@@ -3,6 +3,14 @@ name = "attacker"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
+    "duckdb>=1.5.2",
     "fastapi>=0.136.1",
+    "loguru>=0.7.3",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.0",
     "uvicorn>=0.46.0",
 ]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
