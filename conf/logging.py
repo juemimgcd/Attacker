@@ -6,6 +6,7 @@ from loguru import logger
 from conf.settings import settings
 
 
+# 初始化 loguru 日志输出，统一配置控制台和文件日志。
 def setup_logger() -> None:
     # 你要做的事：
     # 1. 创建日志目录
@@ -34,10 +35,3 @@ def setup_logger() -> None:
         backtrace=True,
         diagnose=settings.app.debug
     )
-    
-    
-    
-    
-    
-    
-    
