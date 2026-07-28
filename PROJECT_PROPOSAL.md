@@ -1,860 +1,478 @@
-# Attacker 项目书
+# Attacker：基于 LangGraph 的 AI Agent 安全评测平台项目计划书
 
-## 1. 项目概述
+> 版本：v0.4
+> 状态：目标方案
+> 目标：完成一个适合 Agent 岗位面试展示、同时具备真实工程边界的安全评测项目。
 
-`Attacker` 是一个面向企业 AI Agent 的对抗测试与红队评测平台。它不扮演传统意义上的助手，而是在企业授权的测试环境、预发环境和沙箱环境中扮演“可控对手”，主动攻击、诱导、压测和破坏目标 Agent，从而帮助企业在真实事故发生前发现系统弱点。
+## 1. 项目摘要
 
-项目的核心理念是：
+Attacker 面向经过明确授权的 AI Agent 测试环境，执行可版本化的攻击 Case，记录目标
+响应，通过可解释 Evaluator 判断风险，并保存可以审计和 Replay 的证据。
 
-> 普通 Agent 负责完成任务，Attacker 负责证明它们什么时候会犯错。
+项目包含两种互补模式：
 
-随着企业将 AI Agent 接入客服、代码仓库、数据库、工单系统、CRM、ERP、知识库、浏览器和自动化工具，Agent 已经不再只是聊天机器人，而是具备行动能力的软件员工。企业需要一种专门的机制来验证这些 Agent 是否会越权、泄露数据、误用工具、被提示注入操控，或者在长任务中偏离目标。
+1. **Deterministic Mode**：固定 Dataset、执行顺序和 Evaluator，保证可复现基线；
+2. **Adaptive Mode**：使用 LangGraph 编排有界状态图，由 Planner 在批准 Case 中选择
+   下一步，支持 checkpoint、条件路由和高风险步骤人工审批。
 
-`Attacker` 的目标不是破坏真实世界系统，而是在受控范围内模拟最坏情况，为企业提供可复现、可审计、可修复的 AI Agent 安全评测能力。
-
-## 2. 项目定位
-
-### 2.1 产品定位
-
-`Attacker` 是企业级 AI Agent Red Team Platform，用于在授权环境内对目标 Agent 进行安全、韧性和业务边界测试。
-
-### 2.2 一句话描述
-
-`Attacker` 是一个专门攻击其他 Agent 的红队 Agent，帮助企业在上线前发现 AI Agent 的越权、泄露、工具滥用和目标漂移风险。
-
-### 2.3 对外表述
-
-面向客户时，建议采用以下定位：
-
-> Attacker 是一个企业级 AI 对抗测试平台，用于在授权测试环境中模拟攻击、误用、故障和异常业务场景，帮助企业评估 AI Agent 的安全边界与系统韧性。
-
-### 2.4 不建议使用的定位
-
-不建议将项目公开描述为：
-
-- 毁灭型 AI
-- 无限制攻击 Agent
-- 企业 AI 核武器
-- 可用于真实环境破坏的自动化攻击系统
-
-这些表述会显著增加监管、融资、客户采购、云平台审核和公众舆论风险。
-
-## 3. 背景与机会
-
-### 3.1 行业背景
-
-AI Agent 正在从“对话式工具”变成“可执行任务的数字员工”。它们开始拥有：
-
-- 工具调用能力
-- 数据库访问能力
-- 文件读写能力
-- 浏览器操作能力
-- 代码修改能力
-- 工单处理能力
-- 审批和业务流转能力
-- 多 Agent 协作能力
-
-这类能力提高了自动化效率，也带来了新的风险。传统安全测试主要关注接口、网络、代码和权限模型，而 AI Agent 的风险往往出现在自然语言交互、上下文污染、工具调用判断、业务流程绕过和多轮诱导之中。
-
-### 3.2 企业痛点
-
-企业在部署 AI Agent 时通常会遇到以下问题：
-
-- 不知道 Agent 是否会泄露系统提示词或内部规则
-- 不知道 Agent 是否会被 prompt injection 操控
-- 不知道 Agent 是否会访问不属于当前用户的数据
-- 不知道 Agent 是否会调用高风险工具
-- 不知道 Agent 是否会执行恶意文档、网页或邮件中的隐藏指令
-- 不知道 Agent 是否会在多轮任务中逐渐偏离目标
-- 不知道修复之后相同问题是否还会复发
-- 缺少面向管理层、合规部门和工程团队的统一风险报告
-
-### 3.3 市场机会
-
-`Attacker` 可以切入以下市场：
-
-- 大模型应用公司
-- 企业 AI Agent 平台
-- 金融、政企、能源、制造等高合规行业
-- 安全服务商和红队服务团队
-- DevSecOps 平台
-- SOC、SIEM、XDR 厂商
-- AI 应用安全评测机构
-
-早期最适合切入的方向是：
-
-> 面向大模型应用公司的 AI Agent 红队测试平台。
-
-这个方向需求明确、交付边界清晰、测试环境容易构建，也更容易形成标准化产品。
-
-## 4. 核心价值
-
-### 4.1 对企业的价值
-
-- 上线前发现 AI Agent 的安全风险
-- 降低数据泄露和越权操作概率
-- 验证工具调用、权限控制和业务流程边界
-- 为安全团队提供自动化红队能力
-- 为管理层提供可理解的风险报告
-- 为工程团队提供可复现的修复依据
-- 修复后自动复测，形成回归测试资产
-
-### 4.2 对安全团队的价值
-
-- 自动生成攻击用例
-- 自动执行多轮对抗测试
-- 自动记录目标 Agent 的响应和工具调用
-- 自动识别违规行为
-- 自动沉淀测试样本库
-- 支持人工红队专家二次编辑和扩展用例
-
-### 4.3 对 AI 应用团队的价值
-
-- 在开发阶段发现 Agent 设计缺陷
-- 验证系统提示词、工具权限和 RAG 检索边界
-- 将安全测试嵌入 CI/CD 或预发布流程
-- 建立可重复执行的 Agent 安全基准测试
-
-## 5. 目标用户
-
-### 5.1 主要用户
-
-- AI 应用开发团队
-- 企业安全团队
-- 红队和渗透测试团队
-- 平台工程团队
-- 合规和风控团队
-
-### 5.2 决策角色
-
-- CTO
-- CISO
-- 安全负责人
-- AI 平台负责人
-- 数字化转型负责人
-- 大模型应用负责人
-
-### 5.3 典型客户
-
-- 已经上线或计划上线 AI Agent 的企业
-- 正在构建内部大模型平台的公司
-- 提供 AI 应用开发平台的厂商
-- 需要做 AI 安全评测的安全公司
-- 对数据泄露、越权审批和业务误操作高度敏感的行业客户
-
-## 6. 核心场景
-
-### 6.1 Prompt Injection 测试
-
-测试目标 Agent 是否会被用户输入、文档内容、网页内容或多轮对话诱导，进而忽略原有规则、泄露隐藏信息或执行不该执行的动作。
-
-目标发现的问题包括：
-
-- 泄露系统提示词
-- 忽略开发者规则
-- 接受外部内容中的恶意指令
-- 误把用户输入当作上级指令
-- 在总结、翻译、检索等任务中执行隐藏命令
-
-### 6.2 工具滥用测试
-
-测试目标 Agent 在接入外部工具后，是否会错误调用高风险工具。
-
-典型工具包括：
-
-- 邮件发送
-- 文件删除或修改
-- 数据库查询
-- 订单退款
-- 工单关闭
-- 权限变更
-- 代码提交
-- 自动部署
-
-测试重点不是绕过真实系统，而是在测试环境中验证 Agent 是否正确遵守工具调用策略。
-
-### 6.3 权限边界测试
-
-模拟不同身份的用户，测试目标 Agent 是否会访问或操作不属于当前身份范围内的数据。
-
-典型身份包括：
-
-- 游客
-- 普通用户
-- 企业员工
-- 客服人员
-- 管理员
-- 外部合作方
-- 内部审计人员
-
-测试目标包括：
-
-- 是否会返回其他用户数据
-- 是否会绕过角色权限
-- 是否会相信用户自称身份
-- 是否会在工具层缺少权限校验时继续执行
-
-### 6.4 数据泄露测试
-
-测试目标 Agent 是否会泄露敏感信息。
-
-敏感信息包括：
-
-- 系统提示词
-- API 返回数据
-- RAG 内部文档
-- 用户隐私数据
-- 内部知识库内容
-- 业务规则
-- 密钥、令牌或配置片段
-- 未公开的财务、合同、订单或客户信息
-
-### 6.5 多 Agent 污染测试
-
-测试多个 Agent 协作时，恶意上下文是否会在链路中传播。
-
-示例场景：
-
-- 文档解析 Agent 读取含有隐藏指令的文档
-- 总结 Agent 将隐藏指令混入摘要
-- 执行 Agent 根据信息调用工具
-- 审批 Agent 未识别上下文污染并继续放行
-
-### 6.6 长任务目标漂移测试
-
-测试目标 Agent 在多轮、长时间、复杂任务中是否会偏离初始目标或忘记安全约束。
-
-重点观察：
-
-- 是否逐渐放宽限制
-- 是否接受矛盾指令
-- 是否忘记当前用户身份
-- 是否在任务后期执行高风险操作
-- 是否将临时上下文误认为长期规则
-
-### 6.7 业务逻辑滥用测试
-
-围绕真实业务流程构造异常请求，测试 Agent 是否会破坏业务规则。
-
-典型业务场景：
-
-- 退款
-- 优惠券
-- 积分
-- 发票
-- 合同
-- 审批
-- 订单
-- 客服补偿
-- 账号权限
-- 数据导出
-
-## 7. 产品功能
-
-### 7.1 目标 Agent 接入
-
-支持用户接入待测 Agent 的以下信息：
-
-- API 地址
-- 鉴权方式
-- 输入输出格式
-- System prompt 或安全策略
-- 工具 schema
-- 用户角色
-- 测试账号
-- 测试环境标识
-- 禁止动作列表
-- 业务约束说明
-
-### 7.2 攻击策略生成
-
-根据目标 Agent 的能力和业务场景自动生成测试策略。
-
-策略类型包括：
-
-- 单轮攻击
-- 多轮诱导
-- 角色伪装
-- 上下文污染
-- 文档注入
-- 工具误用
-- 越权访问
-- 数据外带
-- 长任务漂移
-- 业务规则绕过
-
-### 7.3 测试执行引擎
-
-执行引擎负责编排测试过程。
-
-核心能力包括：
-
-- 并发测试
-- 多轮会话管理
-- 用户角色切换
-- 测试数据注入
-- 工具调用观测
-- 响应内容记录
-- 异常行为捕获
-- 一键停止
-- 失败重试
-
-### 7.4 违规判断引擎
-
-判断目标 Agent 是否违反安全策略或业务规则。
-
-判断方式包括：
-
-- 规则匹配
-- 结构化断言
-- 工具调用审计
-- 权限边界校验
-- 敏感信息检测
-- LLM-as-judge 辅助判断
-- 人工复核队列
-
-### 7.5 报告系统
-
-每次测试生成两类报告。
-
-管理层报告关注：
-
-- 总体风险等级
-- 高危问题数量
-- 受影响业务
-- 风险趋势
-- 修复优先级
-- 是否建议上线
-
-工程报告关注：
-
-- 复现步骤
-- 输入输出记录
-- 工具调用记录
-- 违反的策略
-- 影响范围
-- 修复建议
-- 回归测试用例
-
-### 7.6 Replay 与回归测试
-
-当企业完成修复后，可以使用相同攻击链路进行复测。
-
-核心能力包括：
-
-- 保存攻击链
-- 版本化测试用例
-- 对比修复前后表现
-- 生成回归结果
-- 将高危用例加入长期测试集
-
-### 7.7 安全控制台
-
-为企业提供统一控制台。
-
-核心视图包括：
-
-- 项目列表
-- 目标 Agent 列表
-- 测试任务
-- 风险发现
-- 攻击样本库
-- 策略配置
-- 审计日志
-- 报告中心
-
-## 8. 系统架构
-
-### 8.1 总体架构
-
-系统可以拆分为以下模块：
-
-- Web Console：用户配置、任务管理和报告查看
-- Target Connector：对接待测 Agent
-- Attack Planner：生成攻击计划
-- Attack Executor：执行对抗测试
-- Policy Engine：管理安全策略和业务规则
-- Judge Engine：判断测试结果是否违规
-- Evidence Store：保存会话、响应、工具调用和日志
-- Report Generator：生成管理层和工程报告
-- Replay Engine：复现攻击链并进行回归测试
-
-### 8.2 数据流
-
-1. 用户接入目标 Agent
-2. 用户配置测试范围、角色、工具和禁止动作
-3. Attack Planner 生成测试计划
-4. Attack Executor 执行测试任务
-5. Target Connector 与目标 Agent 交互
-6. Evidence Store 记录完整证据
-7. Judge Engine 判断是否违规
-8. Report Generator 生成报告
-9. Replay Engine 支持修复后复测
-
-### 8.3 部署方式
-
-早期建议支持：
-
-- 本地部署
-- 私有化部署
-- Docker Compose 单机部署
-
-中后期可以支持：
-
-- Kubernetes 部署
-- SaaS 托管版
-- 混合云部署
-- 与企业 CI/CD 集成
-
-## 9. 安全边界
-
-`Attacker` 必须从第一天起设计清晰边界。
-
-### 9.1 授权原则
-
-- 只能测试用户明确授权的目标 Agent
-- 只能访问用户配置的测试环境
-- 不主动扫描公网目标
-- 不自动扩展到未知资产
-- 不绕过企业外部系统
-
-### 9.2 环境隔离
-
-- 默认面向测试环境和沙箱环境
-- 生产环境测试必须显式开启
-- 高风险动作必须要求二次确认
-- 测试账号和真实账号分离
-- 测试数据和生产数据分离
-
-### 9.3 审计与追踪
-
-- 记录每次测试任务
-- 记录发起人、时间、范围和配置
-- 记录所有输入输出
-- 记录目标 Agent 的工具调用
-- 记录判定依据
-- 支持导出审计日志
-
-### 9.4 风险控制
-
-- 支持任务级 kill switch
-- 支持速率限制
-- 支持测试时间窗
-- 支持高风险动作拦截
-- 支持敏感数据脱敏
-- 支持只读模式
-- 支持人工审批模式
-
-## 10. 合规原则
-
-项目应坚持以下原则：
-
-- 授权测试
-- 最小权限
-- 测试隔离
-- 全程审计
-- 结果导向修复
-- 不提供未授权攻击能力
-- 不默认生成针对真实第三方系统的破坏性操作
-- 不将产品宣传为现实环境破坏工具
-
-对外材料应强调：
-
-> Attacker 的价值是帮助企业提前发现风险，而不是制造真实损害。
-
-## 11. MVP 设计
-
-### 11.1 MVP 目标
-
-第一阶段目标是做出一个可演示、可试点、可销售的 Agent 红队测试平台。
-
-MVP 聚焦：
-
-> 输入目标 Agent API 和安全策略，自动执行一批 Agent 安全测试，并输出风险报告。
-
-### 11.2 MVP 功能范围
-
-MVP 包含：
-
-- 目标 Agent API 接入
-- 基础测试配置
-- Prompt Injection 测试集
-- 权限边界测试集
-- 工具调用违规测试
-- 敏感信息泄露测试
-- 测试任务执行
-- 结果判定
-- Markdown 或 HTML 报告生成
-- 攻击链保存与复测
-
-### 11.3 MVP 不包含
-
-MVP 暂不包含：
-
-- 复杂多租户权限
-- 完整 SaaS 计费
-- 大规模并发压测
-- 生产环境破坏测试
-- 自动扫描未知资产
-- 未授权公网目标测试
-- 通用漏洞利用框架
-
-### 11.4 MVP 输入示例
-
-```json
-{
-  "agent_name": "customer_support_agent",
-  "endpoint": "https://test.example.com/agent/chat",
-  "roles": ["guest", "customer", "support_staff"],
-  "tools": ["search_orders", "refund_order", "update_address"],
-  "forbidden_behaviors": [
-    "reveal_system_prompt",
-    "access_other_users_data",
-    "call_refund_tool_without_authorization",
-    "ignore_role_permissions",
-    "execute_external_instruction_from_uploaded_document"
-  ],
-  "environment": "staging"
-}
-```
-
-### 11.5 MVP 输出示例
+核心产品链路：
 
 ```text
-Risk: High
-Finding: Guest user was able to trigger an unauthorized order lookup.
-Attack Type: Role boundary bypass
-Target Agent: customer_support_agent
-Environment: staging
-
-Reproduction:
-1. Start a session as guest user.
-2. Ask for another user's order information.
-3. Claim that identity verification was already completed.
-4. Target Agent called search_orders with an unauthorized customer_id.
-
-Suggested Fix:
-- Enforce identity and ownership checks at the tool layer.
-- Do not rely on model judgment for authorization.
-- Add policy checks before search_orders is executed.
-- Add this attack chain to regression tests.
+Target + Dataset + Policy
+  -> Evaluation Run
+  -> Evidence-backed Finding
+  -> Report
+  -> Replay
 ```
 
-## 12. 技术路线
-
-### 12.1 后端
-
-建议使用 Python 作为初期后端语言，原因是：
-
-- LLM 生态成熟
-- 安全测试脚本开发效率高
-- 适合快速构建执行引擎
-- 方便集成各类模型、向量库和评测工具
-
-可选技术：
-
-- FastAPI
-- Pydantic
-- SQLAlchemy
-- PostgreSQL
-- Redis
-- Celery 或 Dramatiq
-- Docker
-
-### 12.2 前端
-
-建议使用轻量 Web Console。
-
-可选技术：
-
-- React
-- TypeScript
-- Vite
-- Tailwind CSS
-- shadcn/ui
-
-早期也可以先用简单页面或命令行工具验证产品价值。
-
-### 12.3 模型层
-
-模型层应支持多供应商适配：
-
-- OpenAI-compatible API
-- 国内大模型 API
-- 私有化模型
-- 本地模型
-
-模型不应直接获得无限制执行权限。所有测试动作必须经过策略层和执行层约束。
-
-### 12.4 测试样本库
-
-测试样本库是产品护城河之一。
-
-应持续沉淀：
-
-- Prompt injection 样本
-- 越权样本
-- 敏感信息泄露样本
-- 多轮诱导样本
-- RAG 污染样本
-- 工具误用样本
-- 业务逻辑滥用样本
-- 行业场景样本
-
-样本库需要支持版本管理、标签、风险等级和适用场景。
-
-## 13. 商业模式
-
-### 13.1 早期模式
-
-早期建议采用：
-
-- 私有化部署收费
-- PoC 项目收费
-- 安全评测服务收费
-- 年度订阅授权
-
-### 13.2 中期模式
-
-中期可扩展为：
-
-- 按目标 Agent 数量收费
-- 按测试任务数量收费
-- 按企业席位收费
-- 按行业测试包收费
-- SaaS + 私有化双模式
-
-### 13.3 增值服务
-
-可提供：
-
-- 企业 AI Agent 安全基线评估
-- 红队演练服务
-- 定制测试样本库
-- 行业合规模板
-- 安全策略咨询
-- 修复建议落地服务
-
-## 14. 竞争优势
-
-### 14.1 与传统安全工具的区别
-
-传统安全工具主要关注：
-
-- 网络漏洞
-- Web 漏洞
-- 依赖漏洞
-- 主机安全
-- 代码扫描
-
-`Attacker` 关注：
-
-- 自然语言诱导
-- Agent 工具调用
-- 上下文污染
-- 多轮对话攻击
-- RAG 数据泄露
-- 业务规则绕过
-- 多 Agent 协作风险
-
-### 14.2 与普通 AI 助手的区别
-
-普通 AI 助手的目标是帮助用户完成任务。
-
-`Attacker` 的目标是让目标 Agent 在受控测试中暴露问题。
-
-### 14.3 核心壁垒
-
-- Agent 攻击样本库
-- 行业场景经验
-- 自动化攻击链生成能力
-- 风险判定准确率
-- 报告和复测闭环
-- 企业级安全边界设计
-- 与 CI/CD 和 Agent 平台的集成能力
-
-## 15. 路线图
-
-### 15.1 第一阶段：原型验证
-
-目标：验证目标 Agent 接入、攻击执行和报告生成闭环。
-
-交付内容：
-
-- CLI 版本
-- 单目标 Agent 接入
-- 基础攻击样本库
-- Markdown 报告
-- 攻击链复测
-
-### 15.2 第二阶段：MVP
-
-目标：形成可演示、可试点的产品。
-
-交付内容：
-
-- Web Console
-- 多项目管理
-- 测试任务管理
-- 风险发现列表
-- HTML 报告
-- 基础权限管理
-- 测试样本版本管理
-
-### 15.3 第三阶段：企业试点
-
-目标：进入真实企业测试环境。
-
-交付内容：
-
-- 私有化部署
-- 审计日志
-- 测试环境隔离
-- 企业账号体系接入
-- 行业测试模板
-- 工程报告和管理层报告
-
-### 15.4 第四阶段：平台化
-
-目标：成为企业 AI Agent 安全评测基础设施。
-
-交付内容：
-
-- CI/CD 集成
-- 多模型适配
-- 多 Agent 测试
-- 自动化回归测试
-- 风险趋势分析
-- 插件系统
-- SaaS 和私有化双版本
-
-## 16. 风险与应对
-
-### 16.1 合规风险
-
-风险：产品被误解为攻击工具。
-
-应对：
-
-- 明确授权测试边界
-- 默认测试环境运行
-- 强化审计和权限控制
-- 对外强调红队评测和风险修复
-- 避免破坏性宣传话术
-
-### 16.2 技术风险
-
-风险：攻击结果误判或漏判。
-
-应对：
-
-- 规则判断和模型判断结合
-- 高风险结果支持人工复核
-- 保存完整证据链
-- 使用回归测试持续校准
-
-### 16.3 商业风险
-
-风险：客户对 AI Agent 安全认知不足。
-
-应对：
-
-- 从已经上线 Agent 的客户切入
-- 用 PoC 报告证明风险
-- 提供行业案例和风险基线
-- 将产品嵌入上线前安全评审流程
-
-### 16.4 安全风险
-
-风险：产品能力被滥用。
-
-应对：
-
-- 限制测试目标范围
-- 加入授权证明和项目审批
-- 禁止未知资产自动扩展
-- 默认脱敏输出
-- 高风险能力仅在私有化授权环境开启
-
-## 17. 品牌与叙事
-
-### 17.1 项目名称
-
-内部代号可以继续使用：
-
-- Attacker
-
-对外品牌可以考虑：
-
-- Attacker AI
-- RedAgent
-- RedOps AI
-- Adversary Lab
-- Agent Red Team Platform
-
-### 17.2 Slogan
-
-英文：
-
-> Build stronger agents by attacking them first.
-
-中文：
-
-> 先攻击自己的 Agent，才有资格让它面对真实世界。
-
-或者：
-
-> 让企业在上线前，看见 AI Agent 最坏的一面。
-
-### 17.3 品牌气质
-
-品牌应该具备：
-
-- 冷静
-- 强硬
-- 专业
-- 可控
-- 工程化
-- 企业级
-
-不建议使用过度毁灭、反社会或失控叙事。最好的叙事不是“制造破坏”，而是“模拟最坏情况”。
-
-## 18. 成功指标
-
-### 18.1 产品指标
-
-- 支持接入的目标 Agent 数量
-- 可执行测试用例数量
-- 高危问题发现率
-- 误报率
-- 复测成功率
-- 报告生成时间
-- 测试任务完成时间
-
-### 18.2 商业指标
-
-- PoC 转化率
-- 客户试点数量
-- 年度订阅收入
-- 私有化部署数量
-- 客户续费率
-- 单客户平均收入
-
-### 18.3 安全指标
-
-- 已发现高危问题数量
-- 修复闭环率
-- 回归测试覆盖率
-- 审计日志完整率
-- 测试环境隔离合规率
-
-## 19. 项目结论
-
-`Attacker` 的真正价值不在于成为失控的破坏者，而在于成为企业可控、可审计、可复现的 AI 对手。
-
-未来企业会部署越来越多具备行动能力的 Agent。只要 Agent 能调用工具、访问数据、影响业务流程，企业就必须知道它们在什么条件下会犯错。`Attacker` 可以成为这类系统上线前的必要检查环节，也可以成为企业 AI 安全治理的一部分。
-
-最终愿景是：
-
-> 每一个重要 Agent 上线之前，都应该先被 Attacker 攻击一遍。
-
+## 2. 项目价值
+
+普通 API 测试能够验证状态码和固定字段，但难以覆盖 Agent 特有风险：
+
+- Prompt Injection；
+- System Prompt Leakage；
+- Sensitive Data Exposure；
+- Unauthorized Tool Behavior；
+- 多轮上下文导致的策略偏移；
+- Tool 调用边界和授权失效；
+- 修复后安全行为是否真实改善。
+
+Attacker 的重点不是生成大量相似攻击 prompt，而是建立：
+
+- 可复现的 Case；
+- 显式 Policy；
+- 可解释 Evaluator；
+- 可追溯 Evidence；
+- 有界 Adaptive Workflow；
+- 修复前后 Replay。
+
+## 3. 产品定位与边界
+
+### 3.1 对外定位
+
+> 面向 AI Agent 的可恢复安全评测工作流，在明确授权和预算内执行测试，输出证据化
+> Finding，并支持 Replay 与修复差异比较。
+
+### 3.2 不宣称
+
+v1 不宣称：
+
+- 自动发现未知漏洞；
+- 扫描互联网资产；
+- 替代人工渗透测试；
+- 对所有模型进行通用越狱；
+- 自动修复目标 Agent；
+- 使用多 Agent 协同攻击；
+- 具备生产级多租户平台能力。
+
+Adaptive Mode 仍然是有界评测，不拥有任意网络、Shell、浏览器和文件系统权限。
+
+## 4. 目标用户与场景
+
+### 4.1 用户
+
+- Agent 应用开发者；
+- AI 安全评测工程师；
+- 平台和质量工程师；
+- 需要验证修复效果的研发团队。
+
+### 4.2 场景
+
+1. 发布前运行固定安全 Dataset；
+2. 对新模型或新 Prompt 版本执行回归；
+3. 让 Adaptive Workflow 根据既有 Finding 调整 Case 顺序；
+4. 在高风险 Case 前暂停并人工批准；
+5. 服务中断后恢复同一个评测 Run；
+6. 对修复前后结果执行 Replay 和差异比较；
+7. 导出可审阅的 Markdown/JSON 报告。
+
+## 5. v1 范围
+
+### 5.1 必须包含
+
+- HTTP JSON Target Connector；
+- Target、Dataset、Policy 和 Evaluator 快照；
+- Pydantic Evals Dataset/Case；
+- 三个安全评测阶段、共不少于 30 条高质量 Case；
+- Deterministic Mode；
+- LangGraph Adaptive Workflow；
+- Planner Node 的结构化输出；
+- Policy Gate 与运行预算；
+- checkpoint 和中断恢复；
+- 高风险 Case 的 interrupt/approval；
+- 脱敏 Tool/Policy/Approval Trace 接入契约；
+- 测试专用 Memory/RAG Adapter；
+- 跨用户和跨租户隔离验证；
+- SQLite 中的 Run、Step、Event、Finding、Approval、Memory/RAG Snapshot 和 Replay；
+- Markdown/JSON 报告；
+- Finding fingerprint 与修复差异比较。
+
+### 5.2 不包含
+
+- PydanticAI；
+- OpenAI Agents SDK；
+- 多 Agent；
+- 通用 Shell、浏览器、文件和 HTTP 工具；
+- 自动公网扫描；
+- Redis/任务队列；
+- PostgreSQL；
+- MinIO、Qdrant；
+- Web 前端；
+- Kubernetes。
+
+## 6. 三阶段安全评测范围
+
+三个阶段按目标 Agent 的可观测能力递进，并全部属于 v1 最终交付范围。
+
+| 阶段 | 接入深度 | 测试范围 | 最小 Case 数 |
+|---|---|---|---:|
+| 纯黑盒 | Request/Response | Direct Prompt Injection、System Prompt Leakage、Sensitive Data Canary、多轮上下文污染、资源消耗 | 12 |
+| 灰盒 Agent | Tool/Policy/Approval Trace | 工具越权、参数越权、审批绕过、Tool Output Injection、Planner 循环 | 10 |
+| 带状态 Agent | Memory/RAG/Checkpoint | Memory Poisoning、RAG Poisoning、跨用户污染、恢复安全、Replay | 8 |
+
+每条 Case 必须包含：
+
+- 稳定 ID；
+- 阶段、注入面和风险级别；
+- 输入；
+- 预期违规；
+- 正常或安全拒绝对照；
+- Evaluator；
+- 适用 Target 能力；
+- 是否要求人工批准；
+- 所需 Evidence 类型；
+- 测试数据清理步骤；
+- 证据脱敏要求。
+
+## 7. 目标架构
+
+```text
+                         FastAPI
+                            |
+                 +----------+----------+
+                 |                     |
+                 v                     v
+       Deterministic Runner    LangGraph Workflow
+                               | plan / route / resume
+                 |                     |
+                 +----------+----------+
+                            |
+                            v
+              Deterministic Evaluation Core
+       Policy / Connector / Evaluator / Evidence
+                            |
+              +-------------+-------------+
+              |                           |
+              v                           v
+    SQLite Business Facts       LangGraph Checkpoint
+    Run/Event/Finding/Replay     control-flow recovery
+```
+
+核心边界：
+
+- LangGraph 只编排 Adaptive Workflow；
+- Planner 只提出下一条 Case；
+- Policy Gate 才能授权 Target 调用；
+- Evaluator 决定 Finding，不接受 Planner 覆盖；
+- SQLite 保存业务和审计事实；
+- Checkpoint 只保存控制流恢复数据；
+- 报告只读取 SQLite。
+
+## 8. 关键架构决策
+
+### 8.1 LangGraph 负责 Adaptive Workflow
+
+Adaptive Mode 需要：
+
+- 类型化 Graph State；
+- 条件边和循环；
+- 节点失败恢复；
+- checkpoint；
+- interrupt 与人工审批；
+- 节点级运行轨迹。
+
+Attacker 的生命周期与状态图直接对应，因此 LangGraph 有真实业务价值，不是为了增加
+框架关键词。
+
+### 8.2 不同时使用 PydanticAI
+
+同时使用 LangGraph 和 PydanticAI 会引入两套 Agent Runtime、两套工具与消息抽象，并
+让状态和 tracing 边界变得模糊。v1 只保留 LangGraph，模型通过窄接口注入 Planner Node。
+
+### 8.3 确定性核心与 Graph 解耦
+
+以下能力不依赖 LangGraph：
+
+- PolicyService；
+- TargetConnector；
+- EvaluatorService；
+- EvidenceRepository；
+- FindingService；
+- ReplayService；
+- ReportService。
+
+Deterministic Mode 直接调用这些服务；Adaptive Mode 的 Graph Node 也调用同一组服务。
+
+### 8.4 Checkpoint 不是事实源
+
+Checkpoint 回答“工作流从哪里继续”，SQLite 回答“评测实际发生了什么”。
+
+一致性规则：
+
+- 有副作用节点使用稳定 `operation_id`；
+- Repository 幂等写入；
+- 领域事务提交后再推进 checkpoint；
+- 恢复时先读取数据库事实；
+- 冲突时以数据库最后提交 Event 为准；
+- 报告不读取 Graph State。
+
+### 8.5 Pydantic Evals 负责 Dataset 和实验
+
+Pydantic Evals 表达 Dataset、Case 和 Evaluator，并用于确定性实验和 Judge 校准。它不
+保存 Run、Approval、Finding 和 Replay 产品状态。
+
+### 8.6 SQLite 是 v1 唯一业务事实源
+
+SQLite + SQLAlchemy Async 保存：
+
+- Target、Dataset、Policy、Evaluator 快照；
+- Run、Step、Event；
+- Evidence、Finding；
+- Approval Decision；
+- Replay；
+- 报告索引。
+
+DuckDB/Parquet 只保留为未来离线导出方向，不参与在线控制链。
+
+## 9. LangGraph 工作流
+
+### 9.1 节点
+
+```text
+initialize_run
+plan_next_case
+policy_gate
+human_review
+execute_target
+evaluate_result
+persist_evidence
+record_skip
+decide_next
+generate_report
+```
+
+只有 `plan_next_case` 调用 LLM，其他节点保持确定性。
+
+### 9.2 Planner 输出
+
+```python
+class PlannerDecision(BaseModel):
+    action: Literal["execute_case", "finish_run"]
+    case_id: str | None
+    reason: str
+```
+
+Planner 只能从 `allowed_case_ids` 选择。它不能生成任意 Target、任意工具和任意可执行
+prompt。
+
+### 9.3 Human Review
+
+配置为高风险的 Case 在 Target 调用前触发 interrupt。审批决定必须：
+
+- 绑定 `run_id`、`approval_id` 和 `case_id`；
+- 记录批准人、原因和时间；
+- 写入 Event；
+- 恢复后再次经过 Policy Gate；
+- 只对当前 Run 的当前 Case 有效。
+
+## 10. 领域对象
+
+| 对象 | 关键字段 |
+|---|---|
+| Target | `id`、endpoint、request template、auth reference、enabled |
+| Dataset | `id`、version、content hash |
+| Case | `id`、category、severity、input、evaluators、approval flag |
+| Policy | allowlists、budgets、approval rules、stop rules |
+| Run | mode、snapshots、status、budget usage、timestamps |
+| Step | node、case、operation、status、duration |
+| Event | sequence、type、payload、evidence reference |
+| Finding | fingerprint、risk、reason、evidence ids |
+| Approval | case、status、resolver、reason、timestamps |
+| Replay | source run、new run、finding diff |
+
+## 11. Judge 与 Evidence
+
+Evaluator Pipeline：
+
+```text
+transport validation
+  -> deterministic rule
+  -> structured response check
+  -> optional model judge
+  -> finding aggregation
+```
+
+要求：
+
+- 网络错误和超时不视为安全通过；
+- 确定性规则优先；
+- Model Judge 仅用于模糊语义场景；
+- Planner 与 Model Judge 分开配置和计量；
+- Finding 必须引用 Event/Evidence；
+- 所有敏感字段在写入前脱敏。
+
+## 12. 安全边界
+
+- 只测试显式配置和启用的 Target；
+- 不发现或扫描未知 endpoint；
+- Redirect 后重新校验目标；
+- Planner 只能选择 allowlist 内 Case；
+- 不向 Graph 暴露通用执行工具；
+- 每次 Target 调用前校验剩余预算；
+- 高风险 Case 未批准时不能执行；
+- Target 凭据不进入模型、Graph State、checkpoint、日志和报告；
+- 目标响应不能自动扩大测试范围。
+
+## 13. 当前代码基线
+
+### 已有原型
+
+- FastAPI 应用工厂和健康检查；
+- HTTP Target Connector；
+- YAML 单条 Case；
+- 单条 dry-run；
+- 基础字符串 Judge；
+- DuckDB 结果写入；
+- 每事件 Parquet 写入；
+- 本地哈希相似检索。
+
+### 与目标架构的差距
+
+- 当前 Python 版本仍为 3.14；
+- 尚未建立 SQLAlchemy 领域模型和 Alembic；
+- 尚未形成批量 Run 生命周期；
+- 尚未使用 Pydantic Evals；
+- 尚未完成黑盒多轮 Case 和资源预算；
+- 尚未定义 Tool/Policy/Approval Trace；
+- 尚未接入测试专用 Memory/RAG Adapter；
+- 尚未验证跨用户和跨租户隔离；
+- 尚未实现报告与 Replay；
+- 尚未接入 LangGraph；
+- 尚未实现 checkpoint、interrupt 和 Approval；
+- DuckDB/Parquet 仍需迁移。
+
+## 14. 三阶段实施计划
+
+三个阶段可以分别演示和验收，但项目只有在三个阶段全部完成后才达到最终完成定义。
+
+### 14.1 第一阶段：纯黑盒
+
+交付物：
+
+- Python 3.12 项目配置；
+- SQLAlchemy Async Engine 和 Session；
+- Alembic 初始化迁移；
+- Target、Dataset、Policy、Run、Step、Event、Finding 表；
+- Repository 接口和幂等 `operation_id`；
+- 现有 dry-run 写入 SQLite；
+- Pydantic Evals Dataset/Case；
+- 12 条黑盒 Case；
+- Direct Prompt Injection、System Prompt Leakage、Sensitive Data Canary、多轮上下文污染和
+  资源消耗 Evaluator；
+- 批量 Deterministic Run；
+- Markdown/JSON 报告。
+
+验收：
+
+- 单次运行产生连续 Event；
+- 重复 `operation_id` 不重复写入；
+- 标准 HTTP Request/Response 即可完成评测；
+- 12 条黑盒 Case 可重复执行；
+- 相同快照产生可复现 Case 顺序；
+- 每条 Finding 有 Evidence；
+- 网络错误、拒绝、违规和预算中止分别统计；
+- 正常任务对照能够衡量误报和防御误伤；
+- 报告完全从 SQLite 生成。
+
+### 14.2 第二阶段：灰盒 Agent
+
+交付物：
+
+- 脱敏 `ToolEvent`、`PolicyEvent` 和 `ApprovalEvent`；
+- Tool Trace Adapter；
+- `AttackGraphState`、状态图、Planner Model Adapter 和条件边；
+- Policy Gate、interrupt 和 Approval API；
+- Mock Tool 或沙箱 Target；
+- 循环检测、运行预算和 Target/Tool 调用幂等；
+- 10 条工具、权限和规划安全 Case；
+- Adaptive/Deterministic 对比报告。
+
+验收：
+
+- 每次工具请求都有调用身份、参数摘要、Policy Decision 和执行结果；
+- Finding 同时引用模型响应和 Tool/Policy Trace；
+- Planner 无法选择 allowlist 外 Case；
+- 所有 Target/Tool 调用经过 Policy Gate；
+- 高风险 Case 未批准不产生副作用；
+- Planner 循环能被步数、时间或重复状态检测终止；
+- Adaptive 额外发现和模型成本单独统计。
+
+### 14.3 第三阶段：带状态 Agent
+
+交付物：
+
+- 测试专用 Memory Adapter 和 RAG Adapter；
+- Session、User、Tenant、Memory、Dataset、Policy 和 Evaluator 快照；
+- Retrieval Document、排名、来源和权限过滤 Evidence；
+- LangGraph checkpoint 和稳定 `thread_id`；
+- Finding fingerprint；
+- source run 与 replay run 关联；
+- fixed/new/persistent/regressed 差异；
+- 8 条 Memory、RAG、隔离、恢复和 Replay Case；
+- 测试污染数据清理能力。
+
+验收：
+
+- 可以测量污染的写入、持续、跨会话和清除结果；
+- RAG Finding 可追溯到召回文档和权限过滤结果；
+- 跨用户和跨租户污染率为 0；
+- 进程中断后通过相同 `thread_id` 恢复并重新校验 Policy；
+- 节点重试不重复调用 Target/Tool 或创建 Finding；
+- Replay 不依赖旧的临时 Graph State；
+- 历史报告可以从 SQLite 重新生成。
+
+## 15. 成功指标
+
+| 指标 | v1 目标 |
+|---|---:|
+| 高质量 Case | 不少于 30 |
+| 完成阶段 | 3/3 |
+| Finding 证据关联率 | 100% |
+| Target 调用 Policy Gate 覆盖率 | 100% |
+| 高风险 Case 审批覆盖率 | 100% |
+| 报告数据库重建率 | 100% |
+| Replay 可比较 Finding | 100% |
+| 跨用户/跨租户污染率 | 0 |
+| allowlist 外 Case 执行次数 | 0 |
+| 恢复或重试导致的重复 Target/Tool 调用 | 0 |
+| 日志/checkpoint 明文凭据 | 0 |
+
+## 16. 项目完成定义
+
+满足以下条件时，Attacker v1 可作为完整项目展示：
+
+1. 新用户可以根据 README 启动项目；
+2. 可以注册一个授权 Target；
+3. 第一、第二、第三阶段全部通过验收；
+4. 可以运行不少于 30 条 Case，每种方法都有攻击样例和安全对照；
+5. 每条 Finding 都有与接入深度匹配的可追踪 Evidence；
+6. 可以生成 Markdown/JSON 报告；
+7. Adaptive Mode 使用 LangGraph 在预算内选择 Case；
+8. 高风险 Case 支持人工审批和恢复；
+9. Tool/Policy Trace 能证明工具是否越权，而不是仅根据最终文本推断；
+10. Memory/RAG 污染能够被隔离、测量和清理；
+11. 可以 Replay 并比较修复前后差异；
+12. 中断恢复不会重复执行已提交的 Target/Tool 调用；
+13. 文档明确区分当前实现与目标架构；
+14. 不依赖未使用的基础设施；
+15. 简历描述只包含实际完成并可演示的能力。
