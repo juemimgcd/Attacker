@@ -38,4 +38,5 @@ class TargetConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     auth: TargetAuth = Field(default_factory=TargetAuth)
     timeout_seconds: float = 30.0
+    allow_public_target: bool = False
     request_template: TargetRequestTemplate = Field(default_factory=TargetRequestTemplate)

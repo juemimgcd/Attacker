@@ -1,5 +1,5 @@
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from loguru import logger
 
@@ -16,14 +16,14 @@ def setup_logger() -> None:
     # 5. 日志级别从 settings 读取
     log_dir = Path(settings.log.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     logger.remove()
     logger.add(
         sys.stderr,
         level=settings.log.log_level,
         enqueue=True,
         backtrace=True,
-        diagnose=settings.app.debug
+        diagnose=settings.app.debug,
     )
     logger.add(
         log_dir / "attacker.log",
@@ -33,5 +33,5 @@ def setup_logger() -> None:
         encoding="utf-8",
         enqueue=True,
         backtrace=True,
-        diagnose=settings.app.debug
+        diagnose=settings.app.debug,
     )

@@ -1,12 +1,9 @@
-from uuid import uuid4
-
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
-from fastapi import APIRouter
 
 from app.schemas.attack_sample_schema import AttackSample
 from app.schemas.target_schema import TargetConfig
 from app.services.attack_executor import attack_executor
-from app.services.evidence_service import evidence_service
 
 router = APIRouter(tags=["tests"])
 
@@ -29,50 +26,17 @@ async def dry_run(payload: DryRunRequest) -> dict:
 
 # 执行一次攻击 dry-run，并把结果保存为证据记录。
 @router.post("/tests/dry-run-and-save")
-async def dry_run_and_save(payload: DryRunRequest) -> dict:
-    attack_result = await attack_executor.run_once(
+async def dry_run_and_save(payload: DryRunRequest, request: Request) -> dict:
+    report = await request.app.state.run_service.run_single(
         target=payload.target,
         sample=payload.sample,
     )
-    save_result = await evidence_service.save_attack_result(
-        run_id=str(uuid4()),
-        result=attack_result,
-    )
+    step_result = report["steps"][0]["result"]
     return {
-        "attack_result": attack_result.model_dump(mode="json"),
-        "save_result": save_result.model_dump(mode="json"),
+        "attack_result": step_result,
+        "run_id": report["run"]["id"],
+        "report_urls": {
+            "json": f"/runs/{report['run']['id']}/report.json",
+            "markdown": f"/runs/{report['run']['id']}/report.md",
+        },
     }
-
-
-
-from app.schemas.index_schema import SearchSimilarRequest
-from app.services.semantic_index_service import semantic_index_service
-
-
-@router.post("/tests/index-sample")
-async def index_sample(payload: AttackSample) -> dict:
-    result = await semantic_index_service.index_sample(payload)
-    return result.model_dump(mode="json")
-
-
-@router.post("/tests/search-similar")
-async def search_similar(payload: SearchSimilarRequest) -> dict:
-    results = await semantic_index_service.search_similar(payload)
-    return {
-        "results": [result.model_dump(mode="json") for result in results],
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
