@@ -28,6 +28,8 @@ async def resolve_approval(
             approved=payload.approved,
             resolved_by=payload.resolved_by,
             reason=payload.reason,
+            target=payload.target,
+            planner=payload.planner,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

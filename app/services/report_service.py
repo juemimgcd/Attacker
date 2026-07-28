@@ -41,6 +41,43 @@ class ReportService:
         }
         step_outcomes = Counter(step["outcome"] for step in rows["steps"])
         rows["summary"]["step_outcomes"] = dict(step_outcomes)
+        if "stateful" in run["mode"]:
+            retrieval_documents = [
+                document for retrieval in rows["retrievals"] for document in retrieval["documents"]
+            ]
+            cleanup_events = [
+                event
+                for event in rows["events"]
+                if event["event_type"] == "state_cleanup_completed"
+            ]
+            recovery_events = [
+                event
+                for event in rows["events"]
+                if event["event_type"] == "recovery_policy_revalidated"
+            ]
+            rows["stateful_summary"] = {
+                "state_writes": len(rows["state_fixtures"]),
+                "remaining_active_fixtures": sum(
+                    fixture["active"] for fixture in rows["state_fixtures"]
+                ),
+                "cleanup_operations": len(cleanup_events),
+                "outside_scope_cleanup_effects": sum(
+                    event["evidence"]["cleanup"]["outside_scope_affected_count"]
+                    for event in cleanup_events
+                ),
+                "retrieval_documents": len(retrieval_documents),
+                "retrieval_allowed": sum(document["allowed"] for document in retrieval_documents),
+                "retrieval_filtered": sum(
+                    not document["allowed"] for document in retrieval_documents
+                ),
+                "recovery_checks": len(recovery_events),
+                "recovery_policy_revalidated": sum(
+                    bool(event["evidence"]["policy_revalidated"]) for event in recovery_events
+                ),
+                "identity_isolation_findings": sum(
+                    finding["category"] == "identity_isolation" for finding in findings
+                ),
+            }
         baseline_run_id = run.get("baseline_run_id")
         if baseline_run_id:
             baseline_rows = await self.repository.get_report_rows(baseline_run_id)
@@ -141,6 +178,45 @@ class ReportService:
                     + ", ".join(
                         f"`{case_id}`" for case_id in comparison["baseline_only_finding_case_ids"]
                     ),
+                    "",
+                ]
+            )
+        stateful = report.get("stateful_summary")
+        if stateful:
+            lines.extend(
+                [
+                    "## Stateful Evidence",
+                    "",
+                    f"- State writes: {stateful['state_writes']}",
+                    f"- Remaining active fixtures: {stateful['remaining_active_fixtures']}",
+                    f"- Cleanup operations: {stateful['cleanup_operations']}",
+                    f"- Outside-scope cleanup effects: {stateful['outside_scope_cleanup_effects']}",
+                    (
+                        "- Retrieval allowed/filtered: "
+                        f"{stateful['retrieval_allowed']}/"
+                        f"{stateful['retrieval_filtered']}"
+                    ),
+                    (
+                        "- Recovery policy revalidated: "
+                        f"{stateful['recovery_policy_revalidated']}/"
+                        f"{stateful['recovery_checks']}"
+                    ),
+                    "",
+                ]
+            )
+        replay = report.get("replay")
+        if replay:
+            diff = replay["diff"]
+            lines.extend(
+                [
+                    "## Replay Differences",
+                    "",
+                    f"- Source run: `{replay['source_run_id']}`",
+                    f"- Replay run: `{replay['replay_run_id']}`",
+                    "- Fixed: " + ", ".join(f"`{case}`" for case in diff["fixed"]),
+                    "- New: " + ", ".join(f"`{case}`" for case in diff["new"]),
+                    "- Persistent: " + ", ".join(f"`{case}`" for case in diff["persistent"]),
+                    "- Regressed: " + ", ".join(f"`{case}`" for case in diff["regressed"]),
                     "",
                 ]
             )

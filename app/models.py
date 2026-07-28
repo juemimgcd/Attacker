@@ -133,6 +133,7 @@ class FindingRecord(Base):
     risk_level: Mapped[str] = mapped_column(String(32), nullable=False)
     outcome: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    fingerprint: Mapped[str | None] = mapped_column(String(64), index=True)
     evidence_event_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     is_control: Mapped[bool] = mapped_column(Boolean, default=False)
     score: Mapped[float] = mapped_column(Float, default=1.0)
@@ -156,3 +157,73 @@ class ApprovalRecord(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_by: Mapped[str | None] = mapped_column(String(200))
     reason: Mapped[str | None] = mapped_column(Text)
+
+
+class StateFixtureRecord(Base):
+    __tablename__ = "state_fixtures"
+    __table_args__ = (UniqueConstraint("operation_id", name="uq_state_fixtures_operation_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    operation_id: Mapped[str] = mapped_column(String(340), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    content_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance: Mapped[str] = mapped_column(String(200), nullable=False)
+    permissions_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    poisoned: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StateSnapshotRecord(Base):
+    __tablename__ = "state_snapshots"
+    __table_args__ = (UniqueConstraint("operation_id", name="uq_state_snapshots_operation_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    step_id: Mapped[str | None] = mapped_column(ForeignKey("steps.id"))
+    operation_id: Mapped[str] = mapped_column(String(340), nullable=False)
+    case_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    items_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class RetrievalEventRecord(Base):
+    __tablename__ = "retrieval_events"
+    __table_args__ = (UniqueConstraint("operation_id", name="uq_retrieval_events_operation_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    step_id: Mapped[str | None] = mapped_column(ForeignKey("steps.id"))
+    operation_id: Mapped[str] = mapped_column(String(340), nullable=False)
+    case_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    query_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    documents_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    permission_filter_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ReplayRecord(Base):
+    __tablename__ = "replays"
+    __table_args__ = (UniqueConstraint("replay_run_id", name="uq_replays_replay_run_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    replay_run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    diff_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

@@ -12,7 +12,11 @@ from app.models import (
     EventRecord,
     FindingRecord,
     PolicySnapshotRecord,
+    ReplayRecord,
+    RetrievalEventRecord,
     RunStepRecord,
+    StateFixtureRecord,
+    StateSnapshotRecord,
     TargetRecord,
 )
 from app.schemas.run_schema import CaseRunResult, EvaluationOutcome, LoadedDataset, RunBudget
@@ -294,6 +298,53 @@ class RunRepository:
                     )
                 ).all()
             )
+            fixtures = list(
+                (
+                    await session.scalars(
+                        select(StateFixtureRecord)
+                        .where(StateFixtureRecord.run_id == run_id)
+                        .order_by(StateFixtureRecord.created_at)
+                    )
+                ).all()
+            )
+            snapshots = list(
+                (
+                    await session.scalars(
+                        select(StateSnapshotRecord)
+                        .where(StateSnapshotRecord.run_id == run_id)
+                        .order_by(StateSnapshotRecord.created_at)
+                    )
+                ).all()
+            )
+            retrievals = list(
+                (
+                    await session.scalars(
+                        select(RetrievalEventRecord)
+                        .where(RetrievalEventRecord.run_id == run_id)
+                        .order_by(RetrievalEventRecord.created_at)
+                    )
+                ).all()
+            )
+            replays = list(
+                (
+                    await session.scalars(
+                        select(ReplayRecord)
+                        .where(
+                            (ReplayRecord.replay_run_id == run_id)
+                            | (ReplayRecord.source_run_id == run_id)
+                        )
+                        .order_by(ReplayRecord.created_at)
+                    )
+                ).all()
+            )
+            replay = next(
+                (
+                    replay_record
+                    for replay_record in replays
+                    if replay_record.replay_run_id == run_id
+                ),
+                None,
+            )
             return {
                 "run": self._run_dict(run),
                 "target": {
@@ -330,6 +381,73 @@ class RunRepository:
                         "reason": approval.reason,
                     }
                     for approval in approvals
+                ],
+                "state_fixtures": [
+                    {
+                        "id": fixture.id,
+                        "scope_id": fixture.scope_id,
+                        "kind": fixture.kind,
+                        "tenant_id": fixture.tenant_id,
+                        "user_id": fixture.user_id,
+                        "session_id": fixture.session_id,
+                        "namespace": fixture.namespace,
+                        "resource_id": fixture.resource_id,
+                        "content_summary": fixture.content_summary,
+                        "provenance": fixture.provenance,
+                        "permissions": fixture.permissions_json,
+                        "poisoned": fixture.poisoned,
+                        "active": fixture.active,
+                        "cleaned_at": (
+                            fixture.cleaned_at.isoformat() if fixture.cleaned_at else None
+                        ),
+                    }
+                    for fixture in fixtures
+                ],
+                "state_snapshots": [
+                    {
+                        "id": snapshot.id,
+                        "case_id": snapshot.case_id,
+                        "phase": snapshot.phase,
+                        "tenant_id": snapshot.tenant_id,
+                        "user_id": snapshot.user_id,
+                        "session_id": snapshot.session_id,
+                        "items": snapshot.items_json,
+                    }
+                    for snapshot in snapshots
+                ],
+                "retrievals": [
+                    {
+                        "id": retrieval.id,
+                        "case_id": retrieval.case_id,
+                        "tenant_id": retrieval.tenant_id,
+                        "user_id": retrieval.user_id,
+                        "session_id": retrieval.session_id,
+                        "query_summary": retrieval.query_summary,
+                        "documents": retrieval.documents_json,
+                        "permission_filter": retrieval.permission_filter_json,
+                    }
+                    for retrieval in retrievals
+                ],
+                "replay": (
+                    {
+                        "id": replay.id,
+                        "source_run_id": replay.source_run_id,
+                        "replay_run_id": replay.replay_run_id,
+                        "status": replay.status,
+                        "diff": replay.diff_json,
+                    }
+                    if replay
+                    else None
+                ),
+                "replays": [
+                    {
+                        "id": replay_record.id,
+                        "source_run_id": replay_record.source_run_id,
+                        "replay_run_id": replay_record.replay_run_id,
+                        "status": replay_record.status,
+                        "diff": replay_record.diff_json,
+                    }
+                    for replay_record in replays
                 ],
             }
 
@@ -374,6 +492,7 @@ class RunRepository:
             "risk_level": finding.risk_level,
             "outcome": finding.outcome,
             "reason": finding.reason,
+            "fingerprint": finding.fingerprint,
             "evidence_event_ids": finding.evidence_event_ids,
             "is_control": finding.is_control,
         }

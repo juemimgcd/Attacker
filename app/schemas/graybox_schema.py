@@ -209,6 +209,8 @@ class ApprovalResolveRequest(BaseModel):
     approved: bool
     resolved_by: str = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=2_000)
+    target: TargetConfig | None = None
+    planner: PlannerConfig | None = None
 
 
 class PolicyGateResult(BaseModel):
