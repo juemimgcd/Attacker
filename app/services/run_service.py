@@ -51,7 +51,12 @@ class DeterministicRunService:
         if not dataset_path.is_relative_to(samples_root):
             raise ValueError("dataset_path must resolve inside the samples directory")
         dataset = await self.dataset_loader.load(dataset_path, request.case_ids)
-        return await self._run_dataset(request, dataset)
+        return await self.run_dataset(
+            target=request.target,
+            dataset=dataset,
+            budget=request.budget,
+            mode="deterministic",
+        )
 
     async def run_single(
         self,
@@ -96,13 +101,23 @@ class DeterministicRunService:
             budget=RunBudget(max_cases=1, max_target_calls=1),
         )
         self._validate_target(request)
-        return await self._run_dataset(request, dataset)
+        return await self.run_dataset(
+            target=target,
+            dataset=dataset,
+            budget=request.budget,
+            mode="deterministic",
+        )
 
-    async def _run_dataset(
+    async def run_dataset(
         self,
-        request: DeterministicRunRequest,
+        *,
+        target: TargetConfig,
         dataset: LoadedDataset,
+        budget: RunBudget,
+        mode: str,
     ) -> dict[str, Any]:
+        request = DeterministicRunRequest(target=target, budget=budget)
+        self._validate_target(request)
         secret_values = self._secret_values(request.target)
         target_snapshot = self._redact(
             request.target.model_dump(mode="json"),
@@ -113,6 +128,7 @@ class DeterministicRunService:
             target_snapshot=target_snapshot,
             dataset=dataset,
             budget=request.budget,
+            mode=mode,
         )
 
         started = perf_counter()

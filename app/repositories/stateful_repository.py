@@ -20,6 +20,9 @@ from app.models import (
     StateSnapshotRecord,
     TargetRecord,
 )
+from app.schemas.attack_sample_schema import BlackBoxCase
+from app.schemas.graybox_schema import AttackPolicy, GrayBoxCase, LoadedGrayBoxDataset
+from app.schemas.run_schema import LoadedDataset, RunBudget
 from app.schemas.stateful_schema import (
     CleanupResult,
     LoadedStatefulDataset,
@@ -542,6 +545,62 @@ class StatefulRepository:
                 sha256=dataset.sha256,
                 cases=cases,
                 snapshot=dataset.snapshot_json,
+            )
+
+    async def load_blackbox_replay_inputs(
+        self,
+        run_id: str,
+    ) -> tuple[LoadedDataset, RunBudget]:
+        async with self.session_factory() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            dataset = await session.get(DatasetSnapshotRecord, run.dataset_id)
+            policy = await session.get(PolicySnapshotRecord, run.policy_id)
+            if dataset is None or policy is None:
+                raise LookupError(f"replay inputs for run {run_id} not found")
+            cases = [
+                BlackBoxCase.model_validate(raw_case["inputs"])
+                for raw_case in dataset.snapshot_json.get("cases", [])
+            ]
+            return (
+                LoadedDataset(
+                    name=dataset.name,
+                    version=dataset.version,
+                    source_path=Path("<persisted-blackbox-dataset>"),
+                    sha256=dataset.sha256,
+                    cases=cases,
+                    snapshot=dataset.snapshot_json,
+                ),
+                RunBudget.model_validate(policy.config_json),
+            )
+
+    async def load_graybox_replay_inputs(
+        self,
+        run_id: str,
+    ) -> tuple[LoadedGrayBoxDataset, AttackPolicy]:
+        async with self.session_factory() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            dataset = await session.get(DatasetSnapshotRecord, run.dataset_id)
+            policy = await session.get(PolicySnapshotRecord, run.policy_id)
+            if dataset is None or policy is None:
+                raise LookupError(f"replay inputs for run {run_id} not found")
+            cases = [
+                GrayBoxCase.model_validate(raw_case["inputs"])
+                for raw_case in dataset.snapshot_json.get("cases", [])
+            ]
+            return (
+                LoadedGrayBoxDataset(
+                    name=dataset.name,
+                    version=dataset.version,
+                    source_path=Path("<persisted-graybox-dataset>"),
+                    sha256=dataset.sha256,
+                    cases=cases,
+                    snapshot=dataset.snapshot_json,
+                ),
+                AttackPolicy.model_validate(policy.config_json),
             )
 
     async def finding_rows(self, run_id: str) -> list[dict[str, Any]]:

@@ -28,6 +28,7 @@ from app.schemas.graybox_schema import (
     TraceAdapterResult,
 )
 from app.schemas.judge_schema import TargetResponse
+from app.services.finding_fingerprint import finding_fingerprint
 
 
 class AdaptiveRepository:
@@ -627,6 +628,12 @@ class AdaptiveRepository:
                         risk_level=result.evaluation.risk_level.value,
                         outcome=result.evaluation.outcome.value,
                         reason=result.evaluation.reason,
+                        fingerprint=finding_fingerprint(
+                            stage="graybox",
+                            case_id=result.case.id,
+                            category=result.case.category,
+                            is_control=result.case.kind.value == "control",
+                        ),
                         evidence_event_ids=evidence_ids,
                         is_control=result.case.kind.value == "control",
                     )

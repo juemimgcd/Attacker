@@ -62,10 +62,6 @@ class StatefulRunRequest(BaseModel):
     target_name: str = "isolated-stateful-sandbox"
 
 
-class ReplayRunRequest(BaseModel):
-    profile: StatefulProfile
-
-
 class MemoryEvidence(BaseModel):
     resource_id: str
     tenant_id: str
