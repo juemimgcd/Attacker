@@ -1,9 +1,11 @@
 from fastapi import FastAPI
-from fastapi import FastAPI
-from app.api.tests import router as tests_router
+
 from app.api.health import router as health_router
+from app.api.runs import router as runs_router
+from app.api.tests import router as tests_router
 from app.core.lifespan import create_lifespan
 from conf.settings import settings
+
 
 # 创建并配置 FastAPI 应用，注册生命周期和业务路由。
 def create_app() -> FastAPI:
@@ -15,5 +17,9 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(tests_router, prefix=settings.app.api_prefix)
-    app.include_router(health_router,prefix=settings.app.api_prefix)
+    app.include_router(runs_router, prefix=settings.app.api_prefix)
+    app.include_router(health_router, prefix=settings.app.api_prefix)
     return app
+
+
+app = create_app()
