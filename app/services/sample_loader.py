@@ -9,6 +9,7 @@ from pydantic_evals import Dataset
 from app.schemas.attack_sample_schema import AttackSample, BlackBoxCase
 from app.schemas.graybox_schema import GrayBoxCase, LoadedGrayBoxDataset
 from app.schemas.run_schema import LoadedDataset
+from app.schemas.stateful_schema import LoadedStatefulDataset, StatefulCase
 
 
 # 负责从样本文件中加载并校验攻击样本。
@@ -114,3 +115,46 @@ class GrayBoxDatasetLoader:
 
 
 gray_box_dataset_loader = GrayBoxDatasetLoader()
+
+
+class StatefulDatasetLoader:
+    async def load(
+        self,
+        path: Path | str,
+        case_ids: list[str] | None = None,
+    ) -> LoadedStatefulDataset:
+        return await asyncio.to_thread(self._load_sync, Path(path), case_ids)
+
+    def _load_sync(
+        self,
+        path: Path,
+        case_ids: list[str] | None,
+    ) -> LoadedStatefulDataset:
+        raw_bytes = path.read_bytes()
+        raw_data = yaml.safe_load(raw_bytes)
+        dataset = Dataset[dict[str, Any], str, dict[str, Any]].from_file(path)
+        cases: list[StatefulCase] = []
+        for eval_case in dataset.cases:
+            case = StatefulCase.model_validate(eval_case.inputs)
+            if eval_case.name and eval_case.name != case.id:
+                raise ValueError(
+                    f"dataset case name {eval_case.name!r} must match input id {case.id!r}"
+                )
+            cases.append(case)
+        if case_ids is not None:
+            requested = set(case_ids)
+            unknown = requested - {case.id for case in cases}
+            if unknown:
+                raise ValueError(f"unknown case ids: {', '.join(sorted(unknown))}")
+            cases = [case for case in cases if case.id in requested]
+        return LoadedStatefulDataset(
+            name=dataset.name or path.stem,
+            version="3",
+            source_path=path,
+            sha256=hashlib.sha256(raw_bytes).hexdigest(),
+            cases=cases,
+            snapshot=raw_data,
+        )
+
+
+stateful_dataset_loader = StatefulDatasetLoader()

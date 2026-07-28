@@ -42,6 +42,7 @@ class AdaptiveRepository:
         policy: AttackPolicy,
         mode: str,
         baseline_run_id: str | None,
+        planner_snapshot: dict[str, Any] | None = None,
     ) -> tuple[str, str, str, AttackPolicy]:
         run_id = str(uuid4())
         target_id = str(uuid4())
@@ -110,10 +111,35 @@ class AdaptiveRepository:
                         "case_order": [case.id for case in dataset.cases],
                         "policy": effective_policy.model_dump(mode="json"),
                         "baseline_run_id": baseline_run_id,
+                        "planner": planner_snapshot,
                     },
                 )
             )
         return run_id, target_id, thread_id, effective_policy
+
+    async def load_runtime_snapshot(self, run_id: str) -> dict[str, Any]:
+        async with self.session_factory() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            target = await session.get(TargetRecord, run.target_id)
+            dataset = await session.get(DatasetSnapshotRecord, run.dataset_id)
+            policy = await session.get(PolicySnapshotRecord, run.policy_id)
+            started = await session.scalar(
+                select(EventRecord).where(EventRecord.operation_id == f"{run_id}:run_started")
+            )
+            if target is None or dataset is None or policy is None or started is None:
+                raise LookupError(f"runtime snapshot for run {run_id} is incomplete")
+            return {
+                "run_id": run.id,
+                "target_id": run.target_id,
+                "thread_id": run.thread_id,
+                "started_at": run.started_at,
+                "target": target.config_json,
+                "dataset": dataset.snapshot_json,
+                "policy": policy.config_json,
+                "planner": started.evidence_json.get("planner"),
+            }
 
     async def append_event(
         self,

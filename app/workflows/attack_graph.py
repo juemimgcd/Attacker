@@ -89,6 +89,7 @@ class AttackGraph:
             "graph_step_count": state.get("graph_step_count", 0),
             "status": "running",
             "next_action": "plan",
+            "recovery_pending": state.get("recovery_pending", False),
         }
 
     async def plan_next_case(self, state: AttackGraphState) -> dict[str, Any]:
@@ -222,6 +223,20 @@ class AttackGraph:
             operation_id=f"{state['current_operation_id']}:policy:{policy_index}",
             result=result,
         )
+        policy_event_ids = [*state["policy_event_ids"], event_id]
+        if state.get("recovery_pending", False):
+            recovery_event_id = await self.repository.append_event(
+                run_id=state["run_id"],
+                operation_id=f"{state['current_operation_id']}:recovery:policy",
+                event_type="recovery_policy_revalidated",
+                evidence={
+                    "case_id": case.id,
+                    "decision": result.decision.value,
+                    "reason": result.reason,
+                    "thread_id": state["thread_id"],
+                },
+            )
+            policy_event_ids.append(recovery_event_id)
         next_action = {
             ToolPolicyDecision.allow: "execute",
             ToolPolicyDecision.deny: "skip",
@@ -230,10 +245,11 @@ class AttackGraph:
         return {
             "policy_decision": result.decision.value,
             "policy_reason": result.reason,
-            "policy_event_ids": [*state["policy_event_ids"], event_id],
+            "policy_event_ids": policy_event_ids,
             "approval_id": approval_id,
             "approval_status": approval_status,
             "next_action": next_action,
+            "recovery_pending": False,
         }
 
     async def human_review(self, state: AttackGraphState) -> dict[str, Any]:
@@ -244,7 +260,7 @@ class AttackGraph:
             case=case,
             operation_id=f"{state['current_operation_id']}:approval",
         )
-        interrupt(
+        resume_payload = interrupt(
             {
                 "approval_id": approval.id,
                 "run_id": state["run_id"],
@@ -260,6 +276,9 @@ class AttackGraph:
             "approval_id": approval.id,
             "approval_status": resolved.status if resolved else "pending",
             "next_action": "policy",
+            "recovery_pending": bool(
+                isinstance(resume_payload, dict) and resume_payload.get("recovered")
+            ),
         }
 
     async def execute(self, state: AttackGraphState) -> dict[str, Any]:

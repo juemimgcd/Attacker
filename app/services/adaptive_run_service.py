@@ -8,9 +8,12 @@ from langgraph.types import Command
 from app.infrastructure.model_adapter import PlannerModelAdapter, create_planner_adapter
 from app.repositories.adaptive_repository import AdaptiveRepository
 from app.schemas.graybox_schema import (
+    AttackPolicy,
+    GrayBoxCase,
     GrayBoxExecutionResult,
     GrayBoxOutcome,
     GrayBoxRunRequest,
+    PlannerConfig,
     PolicyGateResult,
     ToolPolicyDecision,
 )
@@ -45,9 +48,10 @@ class AdaptiveRuntimeRegistry:
         try:
             return self._runtimes[run_id]
         except KeyError as exc:
-            raise LookupError(
-                "run runtime is unavailable; phase 2 resumes require the originating process"
-            ) from exc
+            raise LookupError(f"runtime for run {run_id} is not loaded") from exc
+
+    def contains(self, run_id: str) -> bool:
+        return run_id in self._runtimes
 
 
 class AdaptiveRunService:
@@ -76,6 +80,7 @@ class AdaptiveRunService:
             policy=request.policy,
             mode="adaptive_graybox",
             baseline_run_id=request.baseline_run_id,
+            planner_snapshot=self._planner_snapshot(request.planner),
         )
         self.registry.add(
             run_id,
@@ -113,6 +118,7 @@ class AdaptiveRunService:
             "next_action": "initialize",
             "status": "running",
             "terminal_reason": None,
+            "recovery_pending": False,
         }
         result = await self.graph.graph.ainvoke(
             state,
@@ -131,7 +137,20 @@ class AdaptiveRunService:
         approved: bool,
         resolved_by: str,
         reason: str,
+        target: TargetConfig | None = None,
+        planner: PlannerConfig | None = None,
     ) -> dict[str, Any]:
+        run = await self.repository.get_run(run_id)
+        if run.thread_id is None:
+            raise ValueError("run does not have a resumable thread")
+        recovered = False
+        if not self.registry.contains(run_id):
+            await self._rehydrate_runtime(
+                run_id=run_id,
+                target_override=target,
+                planner_override=planner,
+            )
+            recovered = True
         approval = await self.repository.resolve_approval(
             run_id=run_id,
             approval_id=approval_id,
@@ -139,18 +158,89 @@ class AdaptiveRunService:
             resolved_by=resolved_by,
             reason=reason,
         )
-        run = await self.repository.get_run(run_id)
-        if run.thread_id is None:
-            raise ValueError("run does not have a resumable thread")
-        self.registry.get(run_id)
         result = await self.graph.graph.ainvoke(
-            Command(resume={"approval_id": approval_id, "status": approval["status"]}),
+            Command(
+                resume={
+                    "approval_id": approval_id,
+                    "status": approval["status"],
+                    "recovered": recovered,
+                }
+            ),
             config={
                 "configurable": {"thread_id": run.thread_id},
                 "recursion_limit": 1_000,
             },
         )
         return await self._status(run_id, result)
+
+    async def _rehydrate_runtime(
+        self,
+        *,
+        run_id: str,
+        target_override: TargetConfig | None,
+        planner_override: PlannerConfig | None,
+    ) -> None:
+        snapshot = await self.repository.load_runtime_snapshot(run_id)
+        stored_target = dict(snapshot["target"])
+        if target_override is None:
+            if self._contains_redaction(stored_target):
+                raise ValueError(
+                    "target credentials were redacted; resupply target configuration to resume"
+                )
+            target = TargetConfig.model_validate(stored_target)
+        else:
+            if target_override.name != stored_target["name"] or str(
+                target_override.endpoint
+            ) != str(stored_target["endpoint"]):
+                raise ValueError("resupplied target must match the original name and endpoint")
+            self._validate_target(target_override)
+            target = target_override
+
+        stored_planner = snapshot.get("planner") or {
+            "backend": "deterministic",
+            "model": "planner",
+            "timeout_seconds": 30.0,
+        }
+        if planner_override is None:
+            if stored_planner.get("api_key_required"):
+                raise ValueError(
+                    "planner credentials were redacted; resupply planner configuration to resume"
+                )
+            planner_config = PlannerConfig.model_validate(stored_planner)
+        else:
+            for field in ("backend", "model", "endpoint"):
+                stored_value = stored_planner.get(field)
+                override_value = planner_override.model_dump(mode="json").get(field)
+                if stored_value is not None and stored_value != override_value:
+                    raise ValueError(f"resupplied planner {field} must match the original run")
+            planner_config = planner_override
+
+        raw_cases = snapshot["dataset"].get("cases", [])
+        cases = [GrayBoxCase.model_validate(raw_case["inputs"]) for raw_case in raw_cases]
+        started_at = snapshot["started_at"]
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        self.registry.add(
+            run_id,
+            AdaptiveRuntime(
+                target=target,
+                cases={case.id: case for case in cases},
+                policy=AttackPolicy.model_validate(snapshot["policy"]),
+                planner=create_planner_adapter(planner_config),
+                started_at=started_at,
+                secret_values=self._secret_values(target),
+            ),
+        )
+        await self.repository.append_event(
+            run_id=run_id,
+            operation_id=f"{run_id}:runtime_rehydrated",
+            event_type="runtime_rehydrated",
+            evidence={
+                "thread_id": snapshot["thread_id"],
+                "target_id": snapshot["target_id"],
+                "credentials_persisted": False,
+            },
+        )
 
     async def _status(self, run_id: str, graph_result: dict[str, Any]) -> dict[str, Any]:
         run = await self.repository.get_run(run_id)
@@ -180,6 +270,24 @@ class AdaptiveRunService:
         if snapshot["auth"].get("token"):
             snapshot["auth"]["token"] = "[REDACTED]"
         return snapshot
+
+    @staticmethod
+    def _planner_snapshot(planner: PlannerConfig) -> dict[str, Any]:
+        return {
+            "backend": planner.backend,
+            "endpoint": str(planner.endpoint) if planner.endpoint else None,
+            "model": planner.model,
+            "timeout_seconds": planner.timeout_seconds,
+            "api_key_required": planner.api_key is not None,
+        }
+
+    @classmethod
+    def _contains_redaction(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(cls._contains_redaction(item) for item in value.values())
+        if isinstance(value, list):
+            return any(cls._contains_redaction(item) for item in value)
+        return value == "[REDACTED]"
 
     @staticmethod
     def _validate_target(target: TargetConfig) -> None:

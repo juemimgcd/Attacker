@@ -26,3 +26,4 @@ class AttackGraphState(TypedDict):
     next_action: str
     status: str
     terminal_reason: str | None
+    recovery_pending: bool

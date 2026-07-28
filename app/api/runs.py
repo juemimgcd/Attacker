@@ -3,8 +3,17 @@ from fastapi.responses import PlainTextResponse
 
 from app.schemas.graybox_schema import GrayBoxRunRequest
 from app.schemas.run_schema import DeterministicRunRequest
+from app.schemas.stateful_schema import StatefulRunRequest
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+@router.post("/stateful")
+async def create_stateful_run(payload: StatefulRunRequest, request: Request) -> dict:
+    try:
+        return await request.app.state.stateful_run_service.run(payload)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/adaptive")
