@@ -1,316 +1,296 @@
-# Attacker 初版 30 天计划摘要
+# Attacker v1 范围摘要
+
+> 文档状态：目标方案
+> 当前基线：FastAPI + DuckDB/Parquet 单条评测原型
+> 目标架构：LangGraph + SQLAlchemy/SQLite 可恢复评测工作流
 
-## 1. 项目目标
+## 1. 目标
 
-`Attacker` 初版目标是在 30 天内完成一个可运行、可演示、可继续扩展的 AI Agent 红队测试 MVP。
+构建一个面向 AI Agent 的有界安全评测工具：
 
-初版聚焦一个核心闭环：
+```text
+Target + Dataset + Policy
+  -> Run
+  -> Evidence-backed Finding
+  -> Report
+  -> Replay
+```
 
-> 接入目标 Agent -> 执行攻击样本 -> 判断违规行为 -> 保存证据 -> 生成报告 -> 支持复测。
+只测试用户明确授权的目标，不扫描未知资产，不执行真实破坏性动作。
 
-项目不追求一开始就做成完整企业平台，而是优先验证 `Attacker` 作为“攻击其他 Agent 的红队 Agent”的产品价值。
-
-## 2. 初版定位
-
-`Attacker` 是一个面向企业测试环境的 AI Agent 对抗测试工具。
-
-它的职责不是辅助目标 Agent 完成任务，而是在授权测试环境中主动诱导、攻击和压测目标 Agent，发现以下问题：
-
-- Prompt injection
-- 系统提示词泄露
-- 权限边界绕过
-- 敏感信息泄露
-- 工具调用滥用
-- RAG 上下文污染
-- 多轮对话诱导
-- 长任务目标漂移
-
-## 3. 30 天交付目标
-
-30 天内需要交付：
-
-- 一个可运行的 FastAPI 后端
-- 一个目标 Agent HTTP Connector
-- 一套基础攻击样本库
-- 一个攻击任务执行器
-- 一个基础违规判断引擎
-- DuckDB 结构化结果存储
-- Parquet 证据归档
-- MinIO 文件与报告存储
-- Qdrant 攻击样本语义索引
-- Markdown 报告生成
-- Replay 复测能力
-- 一份可用于演示的样例测试任务
-
-## 4. 技术栈
-
-初版采用以下技术：
-
-- Python 3.14+
-- FastAPI
-- Uvicorn
-- Pydantic
-- DuckDB
-- Parquet
-- MinIO
-- Qdrant
-- YAML/JSON 测试样本
-- Markdown 报告
-- HTTP JSON API
-
-职责划分：
-
-- DuckDB：保存目标 Agent、测试任务、风险发现、报告索引等结构化数据
-- Parquet：保存多轮对话、攻击事件、工具调用、判定结果等可归档证据
-- MinIO：保存上传文档、报告文件、原始附件和大体积证据
-- Qdrant：保存攻击样本、历史风险发现和 Agent 行为片段的向量索引
-
-## 5. 初版功能范围
-
-### 5.1 目标 Agent 接入
-
-支持通过 HTTP JSON API 接入待测 Agent。
-
-需要支持的配置：
-
-- Agent 名称
-- API 地址
-- 请求方法
-- Header 配置
-- 鉴权配置
-- 用户角色
-- 测试环境标识
-- 禁止行为列表
-
-### 5.2 攻击样本库
-
-初版使用 YAML 或 JSON 管理攻击样本。
-
-样本类型包括：
-
-- Prompt injection
-- System prompt 泄露
-- 敏感信息泄露
-- 权限绕过
-- 工具误用
-- 多轮诱导
-
-每个样本至少包含：
-
-- 样本 ID
-- 名称
-- 分类
-- 风险等级
-- 输入内容
-- 适用角色
-- 预期违规行为
-- 判断规则
-
-### 5.3 攻击执行器
-
-攻击执行器负责：
-
-- 读取攻击样本
-- 创建测试会话
-- 向目标 Agent 发起请求
-- 记录输入和输出
-- 记录错误和超时
-- 保存执行结果
-
-初版优先支持串行执行，后续再扩展并发任务。
-
-### 5.4 Judge Engine
-
-初版 Judge Engine 采用规则判断为主。
-
-支持：
-
-- 关键词匹配
-- 正则匹配
-- 禁止行为匹配
-- 响应内容检测
-- 工具调用结果检测
-
-LLM-as-judge 不作为初版强依赖，可以在第二阶段加入。
-
-### 5.5 证据存储
-
-每次测试需要保存完整证据链。
-
-需要保存：
-
-- 测试任务配置
-- 攻击样本
-- 请求内容
-- 响应内容
-- 时间戳
-- 判断结果
-- 风险等级
-- 复现步骤
-
-结构化结果写入 DuckDB，完整事件和证据归档为 Parquet。
-
-### 5.6 报告生成
-
-初版生成 Markdown 报告。
-
-报告内容包括：
-
-- 测试目标
-- 测试时间
-- 样本数量
-- 命中风险数量
-- 高危发现列表
-- 每个风险的复现步骤
-- 输入输出摘要
-- 判断依据
-- 修复建议
-
-### 5.7 Replay 复测
-
-初版支持保存攻击链，并在修复后重新执行。
-
-Replay 需要支持：
-
-- 使用相同攻击样本
-- 使用相同目标配置
-- 对比前后结果
-- 标记问题是否修复
-
-## 6. 30 天里程碑
-
-### 第 1 周：基础骨架
-
-目标：跑通后端服务和基础项目结构。
-
-交付：
-
-- FastAPI 服务
-- 项目目录结构
-- 配置加载
-- 基础数据模型
-- DuckDB 初始化
-- 健康检查接口
-- 样本目录结构
-
-验收标准：
-
-- 本地可以启动 API 服务
-- 可以读取配置
-- 可以初始化 DuckDB
-- 可以加载一条攻击样本
-
-### 第 2 周：攻击执行闭环
-
-目标：完成目标 Agent 接入和攻击样本执行。
-
-交付：
-
-- HTTP Target Connector
-- 攻击样本解析器
-- Attack Executor
-- 基础 Judge Engine
-- 测试任务创建接口
-- 测试结果写入 DuckDB
-
-验收标准：
-
-- 可以配置一个目标 Agent
-- 可以执行一组攻击样本
-- 可以判断是否命中违规
-- 可以查询测试结果
-
-### 第 3 周：证据与报告
-
-目标：完成证据归档、报告生成和对象存储。
-
-交付：
-
-- Parquet 证据归档
-- MinIO 文件存储
-- Markdown 报告生成
-- 风险发现列表
-- 测试任务详情
-- 报告保存与下载接口
-
-验收标准：
-
-- 每次测试都有完整证据链
-- 可以生成 Markdown 报告
-- 报告文件可以保存到 MinIO
-- 风险发现可以追溯到原始输入输出
-
-### 第 4 周：语义索引与演示闭环
-
-目标：完成 Qdrant 索引、Replay 复测和演示样例。
-
-交付：
-
-- Qdrant 攻击样本索引
-- Qdrant 风险发现索引
-- 相似样本检索接口
-- Replay 复测功能
-- 示例目标 Agent
-- 示例攻击样本集
-- 演示报告
-- README 使用说明
-
-验收标准：
-
-- 可以根据目标 Agent 描述检索相关攻击样本
-- 可以复测一条历史攻击链
-- 可以完成一次端到端演示
-- 演示报告能说明项目价值
-
-## 7. 不做事项
-
-初版 30 天内暂不做：
-
-- 完整前端控制台
-- 多租户 SaaS
-- 企业 SSO
-- 复杂 RBAC
-- 大规模并发压测
-- 生产环境破坏测试
-- 未授权公网扫描
-- 自动漏洞利用框架
-- PDF/Word 报告
-- LLM-as-judge 强依赖
-- 插件市场
-
-这些能力可以放到第二阶段或企业试点阶段。
-
-## 8. 风险控制
-
-初版必须遵守以下边界：
-
-- 只测试用户配置的目标 Agent
-- 默认面向测试环境
-- 不扫描未知资产
-- 不自动扩展攻击范围
-- 不执行真实破坏性操作
-- 所有请求和响应都记录证据
-- 高风险行为只做模拟和判定
-- 测试结果必须导向修复建议
-
-## 9. 成功标准
-
-30 天后，项目应达到以下状态：
-
-- 可以接入一个测试 Agent
-- 可以执行不少于 30 条基础攻击样本
-- 可以识别至少 5 类 Agent 安全风险
-- 可以保存完整证据链
-- 可以生成 Markdown 报告
-- 可以复测历史攻击链
-- 可以通过 Qdrant 检索相似攻击样本
-- 可以完成一次 10 分钟以内的产品演示
-
-## 10. 初版结论
-
-`Attacker` 初版的目标不是“大而全”，而是证明一个关键判断：
-
-> 企业部署 AI Agent 之前，需要一个专门攻击 Agent 的红队 Agent。
-
-只要 30 天内跑通目标接入、攻击执行、违规判断、证据保存、报告生成和 Replay 复测闭环，项目就具备继续产品化和商业验证的基础。
-
+项目用于展示真实 Agent 工程能力：状态建模、条件路由、策略约束、人工审批、中断恢复、
+证据持久化和 Replay，而不是通过同时接入多个 Agent 框架堆砌技术栈。
+
+## 2. 两种模式
+
+### Deterministic Mode
+
+- Pydantic Evals Dataset/Case；
+- 固定执行顺序；
+- 确定性 Evaluator 优先；
+- 不调用 LLM；
+- 不依赖 LangGraph；
+- 作为回归和 Adaptive 对照基线。
+
+### Adaptive Mode
+
+- LangGraph StateGraph；
+- Planner Node 从批准 Case 中选择下一步；
+- Policy Gate 执行最终授权；
+- checkpoint 支持中断恢复；
+- interrupt 支持高风险 Case 人工审批；
+- 与 Deterministic Mode 共用 Connector、Evaluator 和 Repository。
+
+## 3. v1 主技术栈
+
+- Python 3.12；
+- FastAPI、Uvicorn；
+- Pydantic、pydantic-settings；
+- LangGraph；
+- Pydantic Evals、YAML；
+- httpx；
+- SQLAlchemy Async、SQLite、Alembic；
+- Markdown、JSON；
+- Ruff、Pyright、pytest。
+
+## 4. v1 不采用
+
+- PydanticAI；
+- OpenAI Agents SDK；
+- 多 Agent；
+- LangChain Chains、Agents 和 Memory；
+- 通用 Shell、浏览器、文件和 HTTP 工具；
+- Redis、任务队列；
+- PostgreSQL；
+- MinIO、Qdrant；
+- DuckDB/Parquet 在线主链；
+- Web 前端；
+- Kubernetes。
+
+## 5. 三阶段测试范围
+
+三个阶段按观测能力递进，但都属于最终交付范围，后两个阶段不是可选扩展。
+
+| 阶段 | 目标 Agent 接入深度 | 测试方法 | 最小 Case 数 |
+|---|---|---|---:|
+| 第一阶段：纯黑盒 | Request/Response | Direct Prompt Injection、System Prompt Leakage、Sensitive Data Canary、多轮上下文污染、资源消耗 | 12 |
+| 第二阶段：灰盒 Agent | Response + Tool/Policy Trace | 工具越权、参数越权、审批绕过、Tool Output Injection、Planner 循环 | 10 |
+| 第三阶段：带状态 Agent | Trace + Memory/RAG/Checkpoint | Memory Poisoning、RAG Poisoning、跨用户污染、Checkpoint 恢复安全、Replay 差异 | 8 |
+
+合计不少于 30 条高质量 Case。每种方法至少有一个成功样例和一个安全拒绝或正常行为
+对照，避免只统计攻击话术数量。
+
+### 5.1 第一阶段：纯黑盒安全评测
+
+只依赖目标 Agent 的标准请求和响应接口，验证：
+
+- 低权限输入是否能够覆盖高权限指令；
+- System Prompt Canary 是否泄露；
+- 测试用敏感 Canary 是否出现在输出中；
+- 分散在多轮会话中的污染是否改变后续行为；
+- 长上下文、重复请求和异常输出是否突破运行预算。
+
+### 5.2 第二阶段：灰盒工具与权限评测
+
+要求目标 Agent 提供脱敏的 Tool Trace、Policy Decision 和 Approval Event，验证：
+
+- 用户是否能触发未授权工具；
+- 合法工具是否使用越权资源 ID 或危险参数；
+- Approval 是否被复用、拆分或绕过；
+- 不可信 Tool Output 是否劫持后续规划；
+- Planner 是否出现重复工具调用、无限重试或循环。
+
+### 5.3 第三阶段：状态、知识与恢复评测
+
+要求测试环境提供受控 Memory、RAG 和 Checkpoint 接口，验证：
+
+- 污染内容是否跨轮次或跨会话持续；
+- 污染文档是否被 RAG 召回并改变行为；
+- 用户或租户之间是否发生上下文串扰；
+- Checkpoint 恢复是否重新校验权限并保持幂等；
+- Replay 是否能识别 fixed、new、persistent 和 regressed Finding。
+
+## 6. 核心架构
+
+```text
+FastAPI
+  |
+  +-- Deterministic Runner
+  |
+  \-- LangGraph Adaptive Workflow
+       |- plan_next_case ------> LLM
+       |- policy_gate ---------> allow / deny / approval
+       |- human_review --------> interrupt / resume
+       |- execute_target ------> Target Connector
+       |- evaluate_result -----> Evaluators
+       |- persist_evidence ----> SQLite
+       |- decide_next ---------> continue / finish
+       \- generate_report -----> Markdown / JSON
+```
+
+职责边界：
+
+- LangGraph 负责 Adaptive 控制流；
+- Planner 只提出下一条 Case；
+- Policy、Target 调用、Evaluator 和 Evidence 保持确定性；
+- SQLite 保存业务与审计事实；
+- Checkpoint 只负责工作流恢复；
+- 有副作用节点通过稳定 `operation_id` 保证恢复和重试幂等；
+- 报告和 Replay 只读取 SQLite。
+
+## 7. LangGraph 状态图
+
+```text
+initialize
+  -> plan
+  -> policy
+       -> denied -> skip
+       -> approval -> interrupt/resume
+       -> allowed -> execute
+  -> evaluate
+  -> persist
+  -> decide
+       -> continue
+       -> report
+```
+
+只有 Planner Node 调用 LLM。Planner 无法创建任意 Case、Target、工具或 prompt。
+
+## 8. 当前状态
+
+以下状态描述仓库当前代码，不代表目标架构已经落地。
+
+已存在：
+
+- FastAPI 应用；
+- HTTP Target Connector；
+- 单条 YAML Case；
+- 单条 dry-run；
+- 基础规则 Judge；
+- DuckDB/Parquet 证据原型；
+- 本地哈希相似检索。
+
+尚未实现：
+
+- Python 3.12 迁移；
+- SQLite/SQLAlchemy/Alembic；
+- 批量 Run 和领域事件；
+- Pydantic Evals Dataset；
+- 黑盒多轮 Case 和资源预算；
+- Tool/Policy Trace 接入契约；
+- Memory/RAG 测试 Adapter；
+- 报告和 Replay 差异；
+- LangGraph 状态图；
+- checkpoint、interrupt 和 Approval。
+
+## 9. 三阶段实施计划
+
+### 9.1 第一阶段：纯黑盒
+
+基础工程：
+
+- 将目标版本调整为 Python 3.12；
+- 使用 SQLAlchemy Async、SQLite 和 Alembic 建立 Run、Step、Event、Finding；
+- 使用 Pydantic Evals/YAML 管理 Case；
+- 完成批量 Deterministic Run、预算限制和 Markdown/JSON 报告。
+
+安全能力：
+
+- Direct Prompt Injection；
+- System Prompt Leakage；
+- Sensitive Data Canary；
+- 多轮上下文污染；
+- 资源消耗与超时。
+
+阶段验收：
+
+- 仅凭 HTTP Request/Response 即可运行；
+- 至少 12 条 Case 可重复执行；
+- 每条 Finding 引用请求、响应和 Evaluator Evidence；
+- 网络错误、拒绝、违规和预算中止分别统计；
+- 报告可以完全从 SQLite 重建；
+- 正常业务对照用于计算误报和防御误伤。
+
+### 9.2 第二阶段：灰盒 Agent
+
+基础工程：
+
+- 定义脱敏 `ToolEvent`、`PolicyEvent` 和 `ApprovalEvent` 接入契约；
+- 实现 LangGraph Adaptive Workflow、Planner、Policy Gate 和条件边；
+- 使用 Mock Tool 或沙箱 Target 隔离真实副作用；
+- 实现 interrupt、Approval API、循环检测和 Target 调用幂等。
+
+安全能力：
+
+- 未授权工具调用；
+- 工具参数和资源 ID 越权；
+- 审批绕过与历史批准复用；
+- Tool Output Injection；
+- Planner 循环和失败重试放大。
+
+阶段验收：
+
+- 至少 10 条灰盒 Case 可运行；
+- 每次工具请求都有调用身份、参数摘要、Policy Decision 和实际执行结果；
+- 所有 Target/Tool 调用都经过 Policy Gate；
+- 高风险动作未批准时不产生副作用；
+- Planner 循环能被步数、时间或重复状态检测终止；
+- Adaptive 与 Deterministic 使用相同 Case 和 Evaluator 比较。
+
+### 9.3 第三阶段：带状态 Agent
+
+基础工程：
+
+- 定义测试专用 Memory 和 RAG Adapter；
+- 保存会话、用户、租户、Memory、Dataset、Policy 和 Evaluator 快照；
+- 接入 LangGraph checkpoint 并建立稳定 `thread_id`；
+- 实现 Finding fingerprint 和 source/replay Run 关联；
+- 提供测试数据清理和污染隔离。
+
+安全能力：
+
+- Memory Poisoning；
+- RAG Poisoning；
+- 跨用户或跨租户上下文污染；
+- Checkpoint 恢复安全；
+- Replay 与修复前后差异。
+
+阶段验收：
+
+- 至少 8 条带状态 Case 可运行；
+- 可以测量污染的写入、持续、跨会话和清除结果；
+- RAG Evidence 包含召回文档、排名、来源和权限过滤结果；
+- Checkpoint 恢复后重新校验 Policy，且不重复 Target/Tool 调用或 Finding；
+- Replay 可区分 fixed、new、persistent、regressed；
+- 清理操作不会影响非测试用户和非测试数据。
+
+## 10. 完成标准
+
+- 第一、第二、第三阶段全部通过验收，不能只完成纯黑盒阶段；
+- 不少于 30 条 Case 全部可运行；
+- 每种测试方法都有攻击样例和正常或安全拒绝对照；
+- 每条 Finding 引用 Evidence；
+- 报告可以完全从 SQLite 重建；
+- Replay 可区分 fixed、new、persistent、regressed；
+- Planner 无法越出 Target/Case allowlist；
+- 所有 Target 调用经过 Policy Gate；
+- 高风险 Case 未批准不能执行；
+- 中断恢复不重复 Target 调用或 Finding；
+- Memory/RAG 污染能够被隔离、测量和清理；
+- 跨用户或跨租户污染率为 0；
+- checkpoint 和模型上下文不包含凭据；
+- Adaptive 与 Deterministic 结果可以比较。
+
+最终演示必须包含三条完整证据链：
+
+```text
+黑盒输入 -> 目标响应 -> Evaluator -> Finding
+灰盒输入 -> Tool/Policy Trace -> Authorization Finding
+状态污染 -> Memory/RAG/Checkpoint -> Replay Diff
+```
+
+## 11. 详细文档
+
+- [项目计划书](../PROJECT_PROPOSAL.md)
+- [技术选型](../TECH_STACK.md)
+- [目标架构](../docs/architecture.md)
