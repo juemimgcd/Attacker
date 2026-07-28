@@ -1,9 +1,29 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from app.schemas.graybox_schema import GrayBoxRunRequest
 from app.schemas.run_schema import DeterministicRunRequest
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+@router.post("/adaptive")
+async def create_adaptive_run(payload: GrayBoxRunRequest, request: Request) -> dict:
+    try:
+        return await request.app.state.adaptive_run_service.start(payload)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/graybox/deterministic")
+async def create_graybox_deterministic_run(
+    payload: GrayBoxRunRequest,
+    request: Request,
+) -> dict:
+    try:
+        return await request.app.state.deterministic_graybox_service.run(payload)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/deterministic")
