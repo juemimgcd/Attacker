@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 
-from app.schemas.stateful_schema import ReplayRunRequest
+from app.schemas.replay_schema import ReplayRunRequest
 
 router = APIRouter(prefix="/runs", tags=["replays"])
 

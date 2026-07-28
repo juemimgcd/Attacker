@@ -20,6 +20,7 @@ from app.models import (
     TargetRecord,
 )
 from app.schemas.run_schema import CaseRunResult, EvaluationOutcome, LoadedDataset, RunBudget
+from app.services.finding_fingerprint import finding_fingerprint
 
 
 class RunRepository:
@@ -32,6 +33,7 @@ class RunRepository:
         target_snapshot: dict[str, Any],
         dataset: LoadedDataset,
         budget: RunBudget,
+        mode: str = "deterministic",
     ) -> str:
         run_id = str(uuid4())
         async with self.session_factory.begin() as session:
@@ -65,6 +67,7 @@ class RunRepository:
                 target_id=target.id,
                 dataset_id=dataset_record.id,
                 policy_id=policy.id,
+                mode=mode,
                 total_cases=len(dataset.cases),
             )
             session.add(run)
@@ -189,6 +192,12 @@ class RunRepository:
                         risk_level=result.evaluation.risk_level.value,
                         outcome=result.outcome.value,
                         reason=result.evaluation.reason,
+                        fingerprint=finding_fingerprint(
+                            stage="blackbox",
+                            case_id=result.case.id,
+                            category=result.case.category,
+                            is_control=result.case.kind.value == "control",
+                        ),
                         evidence_event_ids=evidence_event_ids,
                         is_control=result.case.kind.value == "control",
                     )

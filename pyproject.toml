@@ -21,6 +21,8 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pyright>=1.1.400",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.0.0",
     "ruff>=0.14.0",
 ]
 
@@ -31,7 +33,14 @@ default = true
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+extend-exclude = ["**/*.md"]
 
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+addopts = "--basetemp=.pytest-tmp"
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]

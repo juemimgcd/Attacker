@@ -13,6 +13,7 @@ from app.schemas.graybox_schema import (
     GrayBoxExecutionResult,
     GrayBoxOutcome,
     GrayBoxRunRequest,
+    LoadedGrayBoxDataset,
     PlannerConfig,
     PolicyGateResult,
     ToolPolicyDecision,
@@ -319,17 +320,34 @@ class DeterministicGrayBoxRunService:
         self.evaluator = GrayBoxEvaluatorService()
 
     async def run(self, request: GrayBoxRunRequest) -> dict[str, Any]:
-        AdaptiveRunService._validate_target(request.target)
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
-        run_id, target_id, _, policy = await self.repository.create_run(
-            target_snapshot=AdaptiveRunService._redacted_target_snapshot(request.target),
+        return await self.run_dataset(
+            target=request.target,
             dataset=dataset,
             policy=request.policy,
             mode="deterministic_graybox",
             baseline_run_id=request.baseline_run_id,
         )
+
+    async def run_dataset(
+        self,
+        *,
+        target: TargetConfig,
+        dataset: LoadedGrayBoxDataset,
+        policy: AttackPolicy,
+        mode: str,
+        baseline_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        AdaptiveRunService._validate_target(target)
+        run_id, target_id, _, policy = await self.repository.create_run(
+            target_snapshot=AdaptiveRunService._redacted_target_snapshot(target),
+            dataset=dataset,
+            policy=policy,
+            mode=mode,
+            baseline_run_id=baseline_run_id,
+        )
         started_at = datetime.now(UTC)
-        secret_values = AdaptiveRunService._secret_values(request.target)
+        secret_values = AdaptiveRunService._secret_values(target)
         target_calls = 0
         for sequence, case in enumerate(dataset.cases, start=1):
             operation_id = f"{run_id}:case:{case.id}:{sequence}"
@@ -384,7 +402,7 @@ class DeterministicGrayBoxRunService:
                 sequence=sequence,
             )
             request_body, response = await self.connector.execute(
-                target=request.target,
+                target=target,
                 case=case,
                 operation_id=operation_id,
                 approval_id=approval_id,

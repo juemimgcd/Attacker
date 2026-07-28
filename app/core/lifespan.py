@@ -58,6 +58,8 @@ def create_lifespan():
             app.state.replay_service = ReplayService(
                 stateful_repository,
                 app.state.stateful_run_service,
+                app.state.run_service,
+                app.state.deterministic_graybox_service,
             )
             app.state.report_service = ReportService(repository)
             logger.info(
