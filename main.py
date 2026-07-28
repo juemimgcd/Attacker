@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.approvals import router as approvals_router
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
 from app.api.tests import router as tests_router
@@ -18,6 +19,7 @@ def create_app() -> FastAPI:
 
     app.include_router(tests_router, prefix=settings.app.api_prefix)
     app.include_router(runs_router, prefix=settings.app.api_prefix)
+    app.include_router(approvals_router, prefix=settings.app.api_prefix)
     app.include_router(health_router, prefix=settings.app.api_prefix)
     return app
 

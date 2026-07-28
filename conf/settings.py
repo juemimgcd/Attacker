@@ -26,6 +26,10 @@ class DatabaseSettings(BaseSettings):
     echo: bool = False
 
 
+class CheckpointSettings(BaseSettings):
+    database_path: str = "data/langgraph_checkpoints.sqlite3"
+
+
 # 定义 MinIO 对象存储连接和桶配置。
 # 汇总所有子配置，并支持从 .env 和环境变量读取覆盖值。
 class Settings(BaseSettings):
@@ -39,6 +43,7 @@ class Settings(BaseSettings):
     app: AppSettings = Field(default_factory=AppSettings)
     log: LogSettings = Field(default_factory=LogSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
 
 
 # 返回缓存后的全局配置对象，避免重复解析配置来源。

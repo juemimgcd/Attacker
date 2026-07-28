@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
+    ApprovalRecord,
     DatasetSnapshotRecord,
     EvaluationRunRecord,
     EventRecord,
@@ -284,6 +285,15 @@ class RunRepository:
                     )
                 ).all()
             )
+            approvals = list(
+                (
+                    await session.scalars(
+                        select(ApprovalRecord)
+                        .where(ApprovalRecord.run_id == run_id)
+                        .order_by(ApprovalRecord.requested_at)
+                    )
+                ).all()
+            )
             return {
                 "run": self._run_dict(run),
                 "target": {
@@ -306,6 +316,21 @@ class RunRepository:
                 "steps": [self._step_dict(step) for step in steps],
                 "events": [self._event_dict(event) for event in events],
                 "findings": [self._finding_dict(finding) for finding in findings],
+                "approvals": [
+                    {
+                        "id": approval.id,
+                        "case_id": approval.case_id,
+                        "status": approval.status,
+                        "risk_summary": approval.risk_summary,
+                        "requested_at": approval.requested_at.isoformat(),
+                        "resolved_at": (
+                            approval.resolved_at.isoformat() if approval.resolved_at else None
+                        ),
+                        "resolved_by": approval.resolved_by,
+                        "reason": approval.reason,
+                    }
+                    for approval in approvals
+                ],
             }
 
     @staticmethod

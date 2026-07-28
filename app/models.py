@@ -59,6 +59,8 @@ class EvaluationRunRecord(Base):
     target_id: Mapped[str] = mapped_column(ForeignKey("targets.id"), nullable=False)
     dataset_id: Mapped[str] = mapped_column(ForeignKey("dataset_snapshots.id"), nullable=False)
     policy_id: Mapped[str] = mapped_column(ForeignKey("policy_snapshots.id"), nullable=False)
+    baseline_run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"))
+    thread_id: Mapped[str | None] = mapped_column(String(100), unique=True)
     mode: Mapped[str] = mapped_column(String(32), default="deterministic")
     status: Mapped[str] = mapped_column(String(32), default="running")
     total_cases: Mapped[int] = mapped_column(Integer, default=0)
@@ -71,6 +73,12 @@ class EvaluationRunRecord(Base):
     budget_aborted_count: Mapped[int] = mapped_column(Integer, default=0)
     false_positive_count: Mapped[int] = mapped_column(Integer, default=0)
     defense_overblock_count: Mapped[int] = mapped_column(Integer, default=0)
+    planner_call_count: Mapped[int] = mapped_column(Integer, default=0)
+    planner_token_count: Mapped[int] = mapped_column(Integer, default=0)
+    tool_call_count: Mapped[int] = mapped_column(Integer, default=0)
+    policy_denied_count: Mapped[int] = mapped_column(Integer, default=0)
+    approval_required_count: Mapped[int] = mapped_column(Integer, default=0)
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -129,3 +137,22 @@ class FindingRecord(Base):
     is_control: Mapped[bool] = mapped_column(Boolean, default=False)
     score: Mapped[float] = mapped_column(Float, default=1.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ApprovalRecord(Base):
+    __tablename__ = "approvals"
+    __table_args__ = (
+        UniqueConstraint("run_id", "case_id", name="uq_approvals_run_case"),
+        UniqueConstraint("operation_id", name="uq_approvals_operation_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(340), nullable=False)
+    risk_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by: Mapped[str | None] = mapped_column(String(200))
+    reason: Mapped[str | None] = mapped_column(Text)

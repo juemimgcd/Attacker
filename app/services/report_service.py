@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Any
 
 from app.repositories.run_repository import RunRepository
@@ -31,8 +32,40 @@ class ReportService:
             "false_positives": run["false_positive_count"],
             "defense_overblocks": run["defense_overblock_count"],
             "target_calls": run["target_call_count"],
+            "tool_calls": run.get("tool_call_count", 0),
+            "planner_calls": run.get("planner_call_count", 0),
+            "planner_tokens": run.get("planner_token_count", 0),
+            "policy_denials": run.get("policy_denied_count", 0),
+            "approval_requests": len(rows["approvals"]),
             "finding_evidence_link_rate": (linked_findings / len(findings) if findings else 1.0),
         }
+        step_outcomes = Counter(step["outcome"] for step in rows["steps"])
+        rows["summary"]["step_outcomes"] = dict(step_outcomes)
+        baseline_run_id = run.get("baseline_run_id")
+        if baseline_run_id:
+            baseline_rows = await self.repository.get_report_rows(baseline_run_id)
+            baseline_cases = {finding["case_id"] for finding in baseline_rows["findings"]}
+            adaptive_cases = {finding["case_id"] for finding in findings}
+            rows["comparison"] = {
+                "baseline_run_id": baseline_run_id,
+                "adaptive_only_finding_case_ids": sorted(adaptive_cases - baseline_cases),
+                "baseline_only_finding_case_ids": sorted(baseline_cases - adaptive_cases),
+                "shared_finding_case_ids": sorted(adaptive_cases & baseline_cases),
+                "usage": {
+                    "adaptive": {
+                        "planner_calls": run.get("planner_call_count", 0),
+                        "planner_tokens": run.get("planner_token_count", 0),
+                        "target_calls": run["target_call_count"],
+                        "tool_calls": run.get("tool_call_count", 0),
+                    },
+                    "baseline": {
+                        "planner_calls": baseline_rows["run"].get("planner_call_count", 0),
+                        "planner_tokens": baseline_rows["run"].get("planner_token_count", 0),
+                        "target_calls": baseline_rows["run"]["target_call_count"],
+                        "tool_calls": baseline_rows["run"].get("tool_call_count", 0),
+                    },
+                },
+            }
         return rows
 
     async def build_markdown(self, run_id: str) -> str:
@@ -41,7 +74,7 @@ class ReportService:
         target = report["target"]
         dataset = report["dataset"]
         lines = [
-            f"# Attacker Black-Box Report: {run_id}",
+            f"# Attacker Evaluation Report: {run_id}",
             "",
             "## Run",
             "",
@@ -50,6 +83,8 @@ class ReportService:
             f"- Dataset: `{dataset['name']}` (`{dataset['sha256']}`)",
             f"- Completed cases: {summary['completed_cases']}/{summary['total_cases']}",
             f"- Target calls: {summary['target_calls']}",
+            f"- Tool calls: {summary['tool_calls']}",
+            f"- Planner calls/tokens: {summary['planner_calls']}/{summary['planner_tokens']}",
             f"- Finding evidence link rate: {summary['finding_evidence_link_rate']:.0%}",
             "",
             "## Outcomes",
@@ -88,6 +123,24 @@ class ReportService:
                     f"- Risk: `{finding['risk_level']}`",
                     f"- Reason: {finding['reason']}",
                     f"- Evidence events: {evidence}",
+                    "",
+                ]
+            )
+        comparison = report.get("comparison")
+        if comparison:
+            lines.extend(
+                [
+                    "## Adaptive / Deterministic Comparison",
+                    "",
+                    f"- Baseline run: `{comparison['baseline_run_id']}`",
+                    "- Adaptive-only findings: "
+                    + ", ".join(
+                        f"`{case_id}`" for case_id in comparison["adaptive_only_finding_case_ids"]
+                    ),
+                    "- Baseline-only findings: "
+                    + ", ".join(
+                        f"`{case_id}`" for case_id in comparison["baseline_only_finding_case_ids"]
+                    ),
                     "",
                 ]
             )

@@ -7,6 +7,7 @@ import yaml
 from pydantic_evals import Dataset
 
 from app.schemas.attack_sample_schema import AttackSample, BlackBoxCase
+from app.schemas.graybox_schema import GrayBoxCase, LoadedGrayBoxDataset
 from app.schemas.run_schema import LoadedDataset
 
 
@@ -67,3 +68,49 @@ class BlackBoxDatasetLoader:
 
 
 black_box_dataset_loader = BlackBoxDatasetLoader()
+
+
+class GrayBoxDatasetLoader:
+    async def load(
+        self,
+        path: Path | str,
+        case_ids: list[str] | None = None,
+    ) -> LoadedGrayBoxDataset:
+        return await asyncio.to_thread(self._load_sync, Path(path), case_ids)
+
+    def _load_sync(
+        self,
+        path: Path,
+        case_ids: list[str] | None,
+    ) -> LoadedGrayBoxDataset:
+        raw_bytes = path.read_bytes()
+        raw_data = yaml.safe_load(raw_bytes)
+        dataset = Dataset[dict[str, Any], str, dict[str, Any]].from_file(path)
+        cases: list[GrayBoxCase] = []
+        for eval_case in dataset.cases:
+            case = GrayBoxCase.model_validate(eval_case.inputs)
+            if eval_case.name and eval_case.name != case.id:
+                raise ValueError(
+                    f"dataset case name {eval_case.name!r} must match input id {case.id!r}"
+                )
+            cases.append(case)
+
+        if case_ids is not None:
+            requested = set(case_ids)
+            known = {case.id for case in cases}
+            unknown = requested - known
+            if unknown:
+                raise ValueError(f"unknown case ids: {', '.join(sorted(unknown))}")
+            cases = [case for case in cases if case.id in requested]
+
+        return LoadedGrayBoxDataset(
+            name=dataset.name or path.stem,
+            version="2",
+            source_path=path,
+            sha256=hashlib.sha256(raw_bytes).hexdigest(),
+            cases=cases,
+            snapshot=raw_data,
+        )
+
+
+gray_box_dataset_loader = GrayBoxDatasetLoader()
