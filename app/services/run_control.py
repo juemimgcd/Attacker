@@ -262,7 +262,10 @@ class RunControlService:
         return (
             budget.steps_used >= budget.max_steps
             or budget.target_calls_used >= budget.max_target_calls
-            or budget.provider_calls_used >= budget.max_provider_calls
+            or (
+                budget.max_provider_calls > 0
+                and budget.provider_calls_used >= budget.max_provider_calls
+            )
             or budget.elapsed_seconds >= budget.max_duration_seconds
             or (budget.max_cost is not None and budget.cost_used >= budget.max_cost)
         )

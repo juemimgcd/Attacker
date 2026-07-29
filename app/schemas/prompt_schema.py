@@ -68,6 +68,7 @@ class PromptBuildRequest(BaseModel):
     profile_id: str = Field(min_length=1)
     caller_id: str = Field(min_length=1)
     schema_version: str = Field(min_length=1)
+    trusted_payload: dict[str, Any] = Field(default_factory=dict)
     observations: list[ObservationSummary] = Field(default_factory=list)
     fact_refs: list[str] = Field(default_factory=list)
     model_id: str = Field(min_length=1)
@@ -93,6 +94,7 @@ class PromptSnapshot(BaseModel):
     template_version: str
     template_checksum: str
     schema_version: str
+    trusted_payload: dict[str, Any]
     observations: list[GovernedObservation]
     fact_refs: list[str]
     model_id: str

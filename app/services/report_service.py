@@ -2,11 +2,13 @@ from collections import Counter
 from typing import Any
 
 from app.repositories.run_repository import RunRepository
+from app.services.adaptive_observability import AdaptiveObservabilityService
 
 
 class ReportService:
     def __init__(self, repository: RunRepository) -> None:
         self.repository = repository
+        self.adaptive_observability = AdaptiveObservabilityService()
 
     async def build_json(self, run_id: str) -> dict[str, Any]:
         rows = await self.repository.get_report_rows(run_id)
@@ -79,6 +81,8 @@ class ReportService:
                 ),
             }
         baseline_run_id = run.get("baseline_run_id")
+        if str(run["mode"]).startswith("adaptive"):
+            rows["adaptive_observability"] = self.adaptive_observability.build(rows)
         if baseline_run_id:
             baseline_rows = await self.repository.get_report_rows(baseline_run_id)
             baseline_cases = {finding["case_id"] for finding in baseline_rows["findings"]}
@@ -102,6 +106,7 @@ class ReportService:
                         "tool_calls": baseline_rows["run"].get("tool_call_count", 0),
                     },
                 },
+                **self.adaptive_observability.compare(rows, baseline_rows),
             }
         return rows
 
@@ -178,6 +183,60 @@ class ReportService:
                     + ", ".join(
                         f"`{case_id}`" for case_id in comparison["baseline_only_finding_case_ids"]
                     ),
+                    (f"- Comparison eligible: `{comparison['comparison_eligible']}`"),
+                    (f"- Adaptive recommended: `{comparison['adaptive_recommended']}`"),
+                    f"- Recommendation: {comparison['recommendation_reason']}",
+                    "",
+                ]
+            )
+        observability = report.get("adaptive_observability")
+        if observability:
+            planner = observability["planner"]
+            candidates = observability["candidates"]
+            gain = observability["information_gain"]
+            loops = observability["loops"]
+            run_metrics = observability["run"]
+            evidence = observability["finding_evidence"]
+            lines.extend(
+                [
+                    "## Adaptive Observability",
+                    "",
+                    (
+                        "- Planner decisions/rejections/fallbacks/errors: "
+                        f"{planner['decision_count']}/{planner['rejection_count']}/"
+                        f"{planner['fallback_count']}/{planner['error_count']}"
+                    ),
+                    (
+                        "- Provider physical attempts/tokens/latency: "
+                        f"{planner['physical_attempts']}/"
+                        f"{planner['input_tokens'] + planner['output_tokens']}/"
+                        f"{planner['latency_ms']} ms"
+                    ),
+                    (
+                        "- Candidate generated/filtered/snapshots expired: "
+                        f"{candidates['generated_total']}/{candidates['filtered_total']}/"
+                        f"{candidates['snapshot_expired_count']}"
+                    ),
+                    (
+                        "- Actual coverage/evidence/finding gain: "
+                        f"{gain['coverage_delta']}/{gain['evidence_delta']}/"
+                        f"{gain['confirmed_finding_delta']}"
+                    ),
+                    (f"- Prediction mismatches: {gain['prediction_mismatch_count']}"),
+                    (
+                        "- Repeated actions/max repeated state/max no-gain: "
+                        f"{loops['repeated_action_count']}/"
+                        f"{loops['max_repeated_state_count']}/"
+                        f"{loops['max_consecutive_no_gain_steps']}"
+                    ),
+                    (
+                        "- Complete executed loops: "
+                        f"{run_metrics['complete_loop_count']}/"
+                        f"{run_metrics['executed_step_count']}"
+                    ),
+                    f"- Stop reason: `{run_metrics['stop_reason']}`",
+                    (f"- Checkpoint/runtime resumes: {run_metrics['checkpoint_resume_count']}"),
+                    (f"- Minimum Finding evidence path: {evidence['minimum_path_length']}"),
                     "",
                 ]
             )
