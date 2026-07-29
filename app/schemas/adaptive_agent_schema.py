@@ -177,8 +177,11 @@ class FinishGateResult(BaseModel):
 class PlannerCallSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    provider_id: str
     prompt_template_version: str
     prompt_checksum: str
+    prompt_profile_id: str
+    input_checksum: str
     model_id: str
     model_parameters: dict[str, int | float | str | bool]
     schema_version: str

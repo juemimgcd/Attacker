@@ -79,6 +79,7 @@ class PromptGovernanceService:
             "template_version": profile.template_version,
             "template_checksum": profile.template_checksum,
             "schema_version": request.schema_version,
+            "trusted_payload": request.trusted_payload,
             "observations": observations,
             "fact_refs": fact_refs,
             "model_id": request.model_id,
@@ -215,6 +216,7 @@ class PromptGovernanceService:
     ) -> list[PromptMessage]:
         user_payload = {
             "schema_version": snapshot.schema_version,
+            "trusted_core_payload": snapshot.trusted_payload,
             "trusted_fact_refs": snapshot.fact_refs,
             "untrusted_observations": [
                 observation.model_dump() for observation in snapshot.observations

@@ -12,6 +12,7 @@ from app.schemas.adaptive_agent_schema import (
     UntrustedObservation,
 )
 from app.schemas.attack_sample_schema import CaseKind, RiskLevel
+from app.schemas.attack_state_schema import PlannerFallbackMode
 from app.schemas.judge_schema import TargetResponse
 from app.schemas.target_schema import TargetConfig
 
@@ -145,12 +146,17 @@ class AttackPolicy(BaseModel):
     allowed_provider_instance_refs: set[str] = Field(default_factory=set)
     max_steps: int = Field(default=40, ge=1, le=1_000)
     max_target_calls: int = Field(default=20, ge=1, le=10_000)
+    max_provider_calls: int = Field(default=20, ge=0, le=10_000)
     max_duration_seconds: float = Field(default=300.0, gt=0, le=86_400)
     approval_required_severities: set[RiskLevel] = Field(
         default_factory=lambda: {RiskLevel.critical}
     )
     max_planner_failures: int = Field(default=3, ge=1, le=20)
     max_repeated_decisions: int = Field(default=3, ge=1, le=20)
+    max_repeated_states: int = Field(default=3, ge=1, le=20)
+    max_no_information_gain_steps: int = Field(default=3, ge=1, le=20)
+    max_target_transport_failures: int = Field(default=3, ge=1, le=20)
+    planner_fallback_mode: PlannerFallbackMode = PlannerFallbackMode.fail_closed
     max_action_repeats: int = Field(default=1, ge=1, le=20)
     stop_on_critical: bool = False
     allow_early_finish: bool = False
@@ -199,8 +205,12 @@ class PlannerDecision(BaseModel):
 
 
 class PlannerUsage(BaseModel):
+    physical_attempts: int = Field(default=0, ge=0)
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
+    latency_ms: int = Field(default=0, ge=0)
+    estimated_cost: float = Field(default=0, ge=0)
+    attempt_errors: list[str] = Field(default_factory=list)
 
 
 class PlannerResult(BaseModel):
@@ -214,10 +224,12 @@ class PlannerConfig(BaseModel):
     backend: Literal["deterministic", "openai_compatible"] = "deterministic"
     endpoint: HttpUrl | None = None
     api_key: SecretStr | None = None
+    provider_id: str = Field(default="core.openai_compatible", min_length=1)
     model: str = "planner"
     timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     temperature: float = Field(default=0, ge=0, le=2)
-    prompt_template_version: str = "planner-v2"
+    max_physical_attempts: int = Field(default=1, ge=1, le=10)
+    prompt_template_version: str = "1.0.0"
 
     @model_validator(mode="after")
     def validate_http_config(self) -> "PlannerConfig":

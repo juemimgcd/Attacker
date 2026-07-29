@@ -1,4 +1,6 @@
+import hashlib
 import ipaddress
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -7,6 +9,7 @@ from langgraph.types import Command
 
 from app.infrastructure.model_adapter import PlannerModelAdapter, create_planner_adapter
 from app.repositories.adaptive_repository import AdaptiveRepository
+from app.schemas.adaptive_agent_schema import ObservationSource
 from app.schemas.graybox_schema import (
     AttackPolicy,
     GrayBoxCase,
@@ -21,6 +24,7 @@ from app.schemas.graybox_schema import (
 from app.schemas.target_schema import TargetConfig
 from app.services.graybox_connector import GrayBoxConnector
 from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
+from app.services.observation_normalizer import ObservationNormalizer
 from app.services.policy_service import PolicyService
 from app.services.sample_loader import GrayBoxDatasetLoader
 from app.services.tool_trace_adapter import ToolTraceAdapter
@@ -82,6 +86,10 @@ class AdaptiveRunService:
             mode="adaptive_graybox",
             baseline_run_id=request.baseline_run_id,
             planner_snapshot=self._planner_snapshot(request.planner),
+            test_principal_refs=request.test_principal_refs,
+            evaluator_snapshot=self._evaluator_snapshot(),
+            candidate_universe_checksum=self._candidate_universe_checksum(dataset.cases),
+            equipment_snapshot=self._equipment_snapshot(dataset.cases),
         )
         hypotheses = await self.repository.initialize_hypotheses(
             run_id=run_id,
@@ -119,6 +127,11 @@ class AdaptiveRunService:
             "action_repeat_counts": {},
             "recent_similarity_keys": [],
             "information_gain_refs": [],
+            "expected_information_gain": None,
+            "last_coverage_delta": 0,
+            "last_evidence_delta": 0,
+            "last_finding_delta": 0,
+            "last_target_transport_failed": False,
             "test_principal_refs": request.test_principal_refs,
             "finding_summaries": [],
             "current_case_id": None,
@@ -132,14 +145,22 @@ class AdaptiveRunService:
             "approval_id": None,
             "approval_status": None,
             "planner_call_count": 0,
+            "provider_call_count": 0,
             "planner_token_count": 0,
+            "planner_latency_ms": 0,
+            "planner_estimated_cost": 0,
             "planner_failures": 0,
             "decision_history": [],
             "target_call_count": 0,
+            "target_transport_failure_count": 0,
             "graph_step_count": 0,
+            "last_state_fingerprint": None,
+            "repeated_state_count": 0,
+            "consecutive_no_gain_steps": 0,
             "next_action": "initialize",
             "status": "running",
             "terminal_reason": None,
+            "stop_reason": None,
             "recovery_pending": False,
         }
         result = await self.graph.graph.ainvoke(
@@ -230,7 +251,7 @@ class AdaptiveRunService:
                 )
             planner_config = PlannerConfig.model_validate(stored_planner)
         else:
-            for field in ("backend", "model", "endpoint"):
+            for field in ("backend", "provider_id", "model", "endpoint"):
                 stored_value = stored_planner.get(field)
                 override_value = planner_override.model_dump(mode="json").get(field)
                 if stored_value is not None and stored_value != override_value:
@@ -299,11 +320,53 @@ class AdaptiveRunService:
             "backend": planner.backend,
             "endpoint": str(planner.endpoint) if planner.endpoint else None,
             "model": planner.model,
+            "provider_id": planner.provider_id,
             "timeout_seconds": planner.timeout_seconds,
             "temperature": planner.temperature,
+            "max_physical_attempts": planner.max_physical_attempts,
             "prompt_template_version": planner.prompt_template_version,
             "api_key_required": planner.api_key is not None,
         }
+
+    @staticmethod
+    def _evaluator_snapshot() -> dict[str, str]:
+        return {
+            "evaluator_id": "core.graybox_evaluator",
+            "evaluator_version": "1.0.0",
+        }
+
+    @staticmethod
+    def _candidate_universe_checksum(cases: list[GrayBoxCase]) -> str:
+        payload = [
+            {
+                "id": case.id,
+                "enabled": case.enabled,
+                "compatible": case.compatible,
+                "provider_instance_ref": case.provider_instance_ref,
+                "capability_contract": case.capability_contract,
+                "coverage_tags": sorted(case.coverage_tags or [case.category]),
+            }
+            for case in sorted(cases, key=lambda item: item.id)
+        ]
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    @staticmethod
+    def _equipment_snapshot(cases: list[GrayBoxCase]) -> list[dict[str, str]]:
+        return [
+            {
+                "provider_instance_ref": provider_instance_ref,
+                "capability_contract": capability_contract,
+            }
+            for provider_instance_ref, capability_contract in sorted(
+                {(case.provider_instance_ref, case.capability_contract) for case in cases}
+            )
+        ]
 
     @classmethod
     def _contains_redaction(cls, value: Any) -> bool:
@@ -341,6 +404,7 @@ class DeterministicGrayBoxRunService:
         self.connector = GrayBoxConnector()
         self.trace_adapter = ToolTraceAdapter()
         self.evaluator = GrayBoxEvaluatorService()
+        self.observation_normalizer = ObservationNormalizer()
 
     async def run(self, request: GrayBoxRunRequest) -> dict[str, Any]:
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
@@ -350,6 +414,7 @@ class DeterministicGrayBoxRunService:
             policy=request.policy,
             mode="deterministic_graybox",
             baseline_run_id=request.baseline_run_id,
+            test_principal_refs=request.test_principal_refs,
         )
 
     async def run_dataset(
@@ -360,6 +425,7 @@ class DeterministicGrayBoxRunService:
         policy: AttackPolicy,
         mode: str,
         baseline_run_id: str | None = None,
+        test_principal_refs: list[str] | None = None,
     ) -> dict[str, Any]:
         AdaptiveRunService._validate_target(target)
         run_id, target_id, _, policy = await self.repository.create_run(
@@ -368,12 +434,27 @@ class DeterministicGrayBoxRunService:
             policy=policy,
             mode=mode,
             baseline_run_id=baseline_run_id,
+            test_principal_refs=test_principal_refs or ["default-test-principal"],
+            evaluator_snapshot=AdaptiveRunService._evaluator_snapshot(),
+            candidate_universe_checksum=(
+                AdaptiveRunService._candidate_universe_checksum(dataset.cases)
+            ),
+            equipment_snapshot=AdaptiveRunService._equipment_snapshot(dataset.cases),
         )
         started_at = datetime.now(UTC)
         secret_values = AdaptiveRunService._secret_values(target)
         target_calls = 0
         for sequence, case in enumerate(dataset.cases, start=1):
             operation_id = f"{run_id}:case:{case.id}:{sequence}"
+            await self.repository.append_event(
+                run_id=run_id,
+                operation_id=f"{operation_id}:decision",
+                event_type="decision_bound",
+                evidence={
+                    "decision_source": "deterministic_case_order",
+                    "case_id": case.id,
+                },
+            )
             approval_id: str | None = None
             approval_status: str | None = None
             if case.requires_approval or case.severity in policy.approval_required_severities:
@@ -462,6 +543,18 @@ class DeterministicGrayBoxRunService:
                 request_body=sanitized_request,
                 response=sanitized_response,
                 trace_result=trace,
+            )
+            normalized = self.observation_normalizer.normalize_target(
+                observation_ref=f"{operation_id}:observation",
+                response=sanitized_response,
+                trace=trace,
+            )
+            await self.repository.record_observation(
+                run_id=run_id,
+                operation_id=f"{operation_id}:observation",
+                source=ObservationSource.target,
+                summary=normalized.summary,
+                step_id=step.id,
             )
             target_calls += 1
             evaluation = self.evaluator.evaluate(

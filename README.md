@@ -48,6 +48,18 @@ Target + Dataset + Policy
 
 对 adaptive gray-box 源 Run 执行 Replay 时，会使用持久化的 Case/Policy 和确定性灰盒执行器；这样比较的是相同安全事实在新 Target 上的变化，而不是 Planner 随机性。
 
+## Agent 模型 Provider 边界
+
+Planner 和可选 Model Judge 通过窄 `model.inference.v1` 契约调用模型。Attacker Core
+负责构造受控 Prompt、执行预算与 Policy 校验、验证结构化响应并决定状态迁移；Provider
+只负责鉴权、协议适配、受限重试、健康检查以及 token、延迟和用量归一化。
+
+- Provider 不能创建 Candidate、授权、Finding、停止条件或 Graph 路由；
+- 每次物理请求（包括 Provider 内部重试）都计入独立 Provider 调用预算；
+- 每次尝试只记录状态、错误类别和延迟，不把凭据或原始错误响应写入事件；
+- Planner 与 Model Judge 使用独立 Prompt Profile、模型身份和用量统计；
+- 确定性 Planner 不调用模型，物理 Provider 调用数为零。
+
 ## 环境要求
 
 - Python `>=3.12,<3.13`
@@ -153,7 +165,12 @@ Content-Type: application/json
   },
   "dataset_path": "samples/graybox/phase2.yaml",
   "planner": {
-    "backend": "deterministic"
+    "backend": "deterministic",
+    "provider_id": "deterministic",
+    "max_physical_attempts": 1
+  },
+  "policy": {
+    "max_provider_calls": 20
   }
 }
 ```
@@ -251,6 +268,20 @@ GET /runs/{run_id}/report.md
 ```
 
 报告只读取 SQLite 中的 Run、Step、Event、Finding、状态证据与 Replay 关联，不依赖 LangGraph checkpoint。
+
+Adaptive 报告额外包含由持久化事件计算的指标：
+
+- Planner decision/rejection/fallback/error 与模型物理尝试、token、成本和延迟；
+- Candidate 数量、过滤原因、Snapshot 生成/过期/拒绝；
+- Coverage、实际信息增益、预测偏差、循环和无增益计数；
+- Evaluator conflict/inconclusive、停止原因、恢复次数；
+- DerivedCase 冻结、确定性复验和有效发现数；
+- 每个 Finding 的最短 Evidence 路径长度。
+
+指标不使用 Prompt、Target 原始响应或 Secret 作为标签。设置 `baseline_run_id` 后，只有
+Dataset、Target、Test Principal、Policy、Evaluator、Candidate 宇宙和装备快照一致的
+Adaptive/Deterministic Run 才会计算效率收益。发现收益只统计带持久化 Evidence 的
+`derived_case_verified`；不可比或没有可测收益时，报告不会推荐 Adaptive 作为默认模式。
 
 ## 开发验证
 

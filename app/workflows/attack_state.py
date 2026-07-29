@@ -18,6 +18,11 @@ class AttackGraphState(TypedDict):
     action_repeat_counts: dict[str, int]
     recent_similarity_keys: list[str]
     information_gain_refs: list[str]
+    expected_information_gain: str | None
+    last_coverage_delta: int
+    last_evidence_delta: int
+    last_finding_delta: int
+    last_target_transport_failed: bool
     test_principal_refs: list[str]
     finding_summaries: list[dict[str, str]]
     current_case_id: str | None
@@ -31,12 +36,20 @@ class AttackGraphState(TypedDict):
     approval_id: str | None
     approval_status: str | None
     planner_call_count: int
+    provider_call_count: int
     planner_token_count: int
+    planner_latency_ms: int
+    planner_estimated_cost: float
     planner_failures: int
     decision_history: list[str]
     target_call_count: int
+    target_transport_failure_count: int
     graph_step_count: int
+    last_state_fingerprint: str | None
+    repeated_state_count: int
+    consecutive_no_gain_steps: int
     next_action: str
     status: str
     terminal_reason: str | None
+    stop_reason: str | None
     recovery_pending: bool

@@ -1,23 +1,45 @@
+import hashlib
+import json
 from collections import Counter
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from app.infrastructure.model_adapter import PlannerAdapterError
 from app.repositories.adaptive_repository import AdaptiveRepository
-from app.schemas.adaptive_agent_schema import CandidateSnapshot, ObservationSource
+from app.schemas.adaptive_agent_schema import (
+    CandidateSnapshot,
+    InformationGain,
+    ObservationSource,
+)
 from app.schemas.attack_sample_schema import CaseKind
-from app.schemas.attack_state_schema import CoverageStatus, RunBudgetSnapshot
+from app.schemas.attack_state_schema import (
+    AttackState,
+    CoverageStatus,
+    RunBudgetSnapshot,
+    RunStatus,
+)
 from app.schemas.graybox_schema import (
     FindingSummary,
     GrayBoxExecutionResult,
     GrayBoxOutcome,
     PlannerContext,
     PlannerDecision,
+    PlannerUsage,
     PolicyGateResult,
     ToolPolicyDecision,
+)
+from app.schemas.run_control_schema import (
+    FallbackAction,
+    PlannerUnavailableContext,
+    StepProgress,
+    StopAction,
+    StopContext,
+    StopLimits,
 )
 from app.services.candidate_builder import CandidateBuilder
 from app.services.finish_gate_service import FinishGateService
@@ -26,6 +48,7 @@ from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
 from app.services.hypothesis_service import HypothesisService
 from app.services.observation_normalizer import ObservationNormalizer
 from app.services.policy_service import PolicyService
+from app.services.run_control import RunControlService
 from app.services.tool_trace_adapter import ToolTraceAdapter
 from app.workflows.attack_state import AttackGraphState
 
@@ -45,6 +68,7 @@ class AttackGraph:
         self.finish_gate_service = FinishGateService()
         self.hypothesis_service = HypothesisService()
         self.observation_normalizer = ObservationNormalizer()
+        self.run_control = RunControlService()
         self.connector = GrayBoxConnector()
         self.trace_adapter = ToolTraceAdapter()
         self.evaluator = GrayBoxEvaluatorService()
@@ -77,6 +101,7 @@ class AttackGraph:
                 "retry": "plan_next_case",
                 "finish": "finish_gate",
                 "finalize": "finalize",
+                "pause": END,
             },
         )
         builder.add_conditional_edges(
@@ -124,6 +149,14 @@ class AttackGraph:
             "action_repeat_counts": state.get("action_repeat_counts", {}),
             "recent_similarity_keys": state.get("recent_similarity_keys", []),
             "information_gain_refs": facts["information_gain_refs"],
+            "expected_information_gain": state.get("expected_information_gain"),
+            "last_coverage_delta": state.get("last_coverage_delta", 0),
+            "last_evidence_delta": state.get("last_evidence_delta", 0),
+            "last_finding_delta": state.get("last_finding_delta", 0),
+            "last_target_transport_failed": state.get(
+                "last_target_transport_failed",
+                False,
+            ),
             "test_principal_refs": state.get(
                 "test_principal_refs",
                 ["default-test-principal"],
@@ -131,13 +164,24 @@ class AttackGraph:
             "finding_summaries": state.get("finding_summaries", []),
             "policy_event_ids": [],
             "planner_call_count": state.get("planner_call_count", 0),
+            "provider_call_count": state.get("provider_call_count", 0),
             "planner_token_count": state.get("planner_token_count", 0),
+            "planner_latency_ms": state.get("planner_latency_ms", 0),
+            "planner_estimated_cost": state.get("planner_estimated_cost", 0),
             "planner_failures": state.get("planner_failures", 0),
             "decision_history": state.get("decision_history", []),
             "target_call_count": state.get("target_call_count", 0),
+            "target_transport_failure_count": state.get(
+                "target_transport_failure_count",
+                0,
+            ),
             "graph_step_count": state.get("graph_step_count", 0),
+            "last_state_fingerprint": state.get("last_state_fingerprint"),
+            "repeated_state_count": state.get("repeated_state_count", 0),
+            "consecutive_no_gain_steps": state.get("consecutive_no_gain_steps", 0),
             "status": "running",
             "next_action": "plan",
+            "stop_reason": state.get("stop_reason"),
             "recovery_pending": state.get("recovery_pending", False),
         }
 
@@ -148,12 +192,16 @@ class AttackGraph:
         budget = RunBudgetSnapshot(
             max_steps=runtime.policy.max_steps,
             max_target_calls=runtime.policy.max_target_calls,
-            max_provider_calls=0,
+            max_provider_calls=runtime.policy.max_provider_calls,
             max_duration_seconds=runtime.policy.max_duration_seconds,
             steps_used=min(state["graph_step_count"], runtime.policy.max_steps),
             target_calls_used=min(
                 state["target_call_count"],
                 runtime.policy.max_target_calls,
+            ),
+            provider_calls_used=min(
+                state["provider_call_count"],
+                runtime.policy.max_provider_calls,
             ),
             elapsed_seconds=min(elapsed, runtime.policy.max_duration_seconds),
         )
@@ -176,7 +224,10 @@ class AttackGraph:
             valid_test_principal_refs=set(state["test_principal_refs"]),
             recent_similarity_keys=tuple(state["recent_similarity_keys"][-3:]),
         )
-        await self.repository.record_candidate_snapshot(snapshot)
+        await self.repository.record_candidate_snapshot(
+            snapshot,
+            previous_snapshot_id=state.get("candidate_snapshot_id"),
+        )
         return {
             "candidate_snapshot_id": snapshot.snapshot_id,
             "candidate_action_ids": [candidate.action_id for candidate in snapshot.candidates],
@@ -197,6 +248,7 @@ class AttackGraph:
                 "next_action": "finalize",
                 "status": "aborted",
                 "terminal_reason": "run duration budget exhausted",
+                "stop_reason": "budget_exhausted",
             }
         remaining_steps = runtime.policy.max_steps - state["graph_step_count"]
         snapshot = await self.repository.load_candidate_snapshot(
@@ -218,24 +270,72 @@ class AttackGraph:
         )
         planner_index = state["planner_call_count"] + 1
         operation_id = f"{state['run_id']}:planner:{planner_index}"
+        remaining_provider_calls = max(
+            runtime.policy.max_provider_calls - state["provider_call_count"],
+            0,
+        )
+        if runtime.planner.requires_provider and remaining_provider_calls == 0:
+            usage = PlannerUsage()
+            planner_error_event_id = await self.repository.record_planner_error(
+                run_id=state["run_id"],
+                operation_id=operation_id,
+                error_type="provider_budget_exhausted",
+                provider_id=runtime.planner.provider_id,
+                model_id=runtime.planner.model_id,
+                usage=usage,
+                call_snapshot=None,
+            )
+            return await self._handle_planner_unavailable(
+                state=state,
+                snapshot=snapshot,
+                planner_index=planner_index,
+                usage=usage,
+                error_category="provider_budget_exhausted",
+                planner_event_id=planner_error_event_id,
+            )
         try:
-            result = await runtime.planner.plan(context)
+            result = await runtime.planner.plan(
+                context,
+                operation_id=operation_id,
+                max_physical_attempts=max(remaining_provider_calls, 1),
+            )
+        except PlannerAdapterError as exc:
+            planner_error_event_id = await self.repository.record_planner_error(
+                run_id=state["run_id"],
+                operation_id=operation_id,
+                error_type=exc.error_category,
+                provider_id=exc.provider_id,
+                model_id=exc.model_id,
+                usage=exc.usage,
+                call_snapshot=exc.call_snapshot,
+            )
+            return await self._handle_planner_unavailable(
+                state=state,
+                snapshot=snapshot,
+                planner_index=planner_index,
+                usage=exc.usage,
+                error_category=exc.error_category,
+                planner_event_id=planner_error_event_id,
+            )
         except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-            await self.repository.record_planner_error(
+            usage = PlannerUsage()
+            planner_error_event_id = await self.repository.record_planner_error(
                 run_id=state["run_id"],
                 operation_id=operation_id,
                 error_type=type(exc).__name__,
-                message=str(exc),
+                provider_id=runtime.planner.provider_id,
+                model_id=runtime.planner.model_id,
+                usage=usage,
+                call_snapshot=None,
             )
-            failures = state["planner_failures"] + 1
-            terminal = failures >= runtime.policy.max_planner_failures
-            return {
-                "planner_call_count": planner_index,
-                "planner_failures": failures,
-                "next_action": "finalize" if terminal else "retry",
-                "status": "aborted" if terminal else "running",
-                "terminal_reason": "planner failure limit exhausted" if terminal else None,
-            }
+            return await self._handle_planner_unavailable(
+                state=state,
+                snapshot=snapshot,
+                planner_index=planner_index,
+                usage=usage,
+                error_category=type(exc).__name__,
+                planner_event_id=planner_error_event_id,
+            )
 
         decision = result.decision
         rejection_reason = self._validate_decision(snapshot, decision)
@@ -252,7 +352,7 @@ class AttackGraph:
         repeated = Counter(history)[history[-1]]
         if repeated > runtime.policy.max_repeated_decisions:
             rejection_reason = "planner repeated the same decision beyond the configured limit"
-        await self.repository.record_planner_result(
+        planner_event_id = await self.repository.record_planner_result(
             run_id=state["run_id"],
             operation_id=operation_id,
             result=result,
@@ -260,41 +360,63 @@ class AttackGraph:
             rejection_reason=rejection_reason,
         )
         planner_tokens = result.usage.input_tokens + result.usage.output_tokens
+        provider_calls = state["provider_call_count"] + result.usage.physical_attempts
         if rejection_reason is not None:
-            failures = state["planner_failures"] + 1
-            terminal = failures >= runtime.policy.max_planner_failures or repeated > (
-                runtime.policy.max_repeated_decisions
+            return await self._handle_planner_unavailable(
+                state=state,
+                snapshot=snapshot,
+                planner_index=planner_index,
+                usage=result.usage,
+                error_category="planner_rejected",
+                planner_event_id=planner_event_id,
+                decision_history=history,
             )
-            return {
-                "planner_call_count": planner_index,
-                "planner_token_count": state["planner_token_count"] + planner_tokens,
-                "planner_failures": failures,
-                "decision_history": history,
-                "next_action": "finalize" if terminal else "retry",
-                "status": "aborted" if terminal else "running",
-                "terminal_reason": rejection_reason if terminal else None,
-            }
         if decision.action == "finish":
             return {
                 "planner_call_count": planner_index,
+                "provider_call_count": provider_calls,
                 "planner_token_count": state["planner_token_count"] + planner_tokens,
+                "planner_latency_ms": (state["planner_latency_ms"] + result.usage.latency_ms),
+                "planner_estimated_cost": (
+                    state["planner_estimated_cost"] + result.usage.estimated_cost
+                ),
+                "planner_failures": 0,
                 "decision_history": history,
                 "next_action": "finish",
                 "status": "running",
                 "terminal_reason": None,
+                "stop_reason": None,
             }
         candidate = next(
             item for item in snapshot.candidates if item.candidate_id == decision.candidate_id
         )
         case_id = candidate.action_id
+        case_operation_id = (
+            f"{state['run_id']}:case:{case_id}:{len(state['completed_case_ids']) + 1}"
+        )
+        await self.repository.append_event(
+            run_id=state["run_id"],
+            operation_id=f"{case_operation_id}:decision",
+            event_type="decision_bound",
+            evidence={
+                "planner_event_id": planner_event_id,
+                "candidate_snapshot_id": snapshot.snapshot_id,
+                "candidate_id": candidate.candidate_id,
+                "case_id": case_id,
+            },
+        )
         return {
             "planner_call_count": planner_index,
+            "provider_call_count": provider_calls,
             "planner_token_count": state["planner_token_count"] + planner_tokens,
+            "planner_latency_ms": state["planner_latency_ms"] + result.usage.latency_ms,
+            "planner_estimated_cost": (
+                state["planner_estimated_cost"] + result.usage.estimated_cost
+            ),
+            "planner_failures": 0,
             "decision_history": history,
             "current_case_id": case_id,
-            "current_operation_id": (
-                f"{state['run_id']}:case:{case_id}:{len(state['completed_case_ids']) + 1}"
-            ),
+            "current_operation_id": case_operation_id,
             "current_step_started_at": datetime.now(UTC).isoformat(),
             "current_step_id": None,
             "evaluation_event_id": None,
@@ -302,6 +424,15 @@ class AttackGraph:
             "approval_id": None,
             "approval_status": None,
             "graph_step_count": state["graph_step_count"] + 1,
+            "expected_information_gain": (
+                decision.expected_information_gain.value
+                if decision.expected_information_gain is not None
+                else None
+            ),
+            "last_coverage_delta": 0,
+            "last_evidence_delta": 0,
+            "last_finding_delta": 0,
+            "last_target_transport_failed": False,
             "next_action": "policy",
         }
 
@@ -336,6 +467,7 @@ class AttackGraph:
                 "next_action": "finalize",
                 "status": "completed",
                 "terminal_reason": result.detail,
+                "stop_reason": "completed",
             }
         await self.repository.record_finish_rejected(
             run_id=state["run_id"],
@@ -348,6 +480,7 @@ class AttackGraph:
                 "next_action": "finalize",
                 "status": "completed",
                 "terminal_reason": result.detail,
+                "stop_reason": "no_information_gain",
             }
         return {
             "next_action": "build",
@@ -594,6 +727,7 @@ class AttackGraph:
         case = runtime.cases[str(state["current_case_id"])]
         operation_id = str(state["current_operation_id"])
         evaluation = await self.repository.load_evaluation(operation_id)
+        _, response, _ = await self.repository.load_target_execution(operation_id)
         facts = await self.repository.load_adaptive_facts(state["run_id"])
         previous_hypothesis = facts["hypotheses"][case.id]
         evaluation_ref = str(state["evaluation_event_id"])
@@ -631,6 +765,11 @@ class AttackGraph:
             operation_id=operation_id,
             coverage_facts=coverage_facts,
             gain=gain,
+            predicted_information_gain=(
+                None
+                if state.get("expected_information_gain") is None
+                else InformationGain(str(state["expected_information_gain"]))
+            ),
             step_id=state.get("current_step_id"),
         )
         updated_facts = await self.repository.load_adaptive_facts(state["run_id"])
@@ -648,6 +787,10 @@ class AttackGraph:
                     ]
                 )
             ),
+            "last_coverage_delta": gain.coverage_delta,
+            "last_evidence_delta": gain.evidence_completeness_delta,
+            "last_finding_delta": gain.confirmed_finding_delta,
+            "last_target_transport_failed": response.error_type is not None,
             "next_action": "decide",
         }
 
@@ -690,31 +833,110 @@ class AttackGraph:
             *state["recent_similarity_keys"],
             runtime.cases[case_id].category,
         ][-10:]
+        elapsed = max(
+            (datetime.now(UTC) - runtime.started_at).total_seconds(),
+            0,
+        )
+        state_fingerprint = self._state_fingerprint(
+            {
+                "completed_case_ids": completed,
+                "denied_action_ids": state["denied_action_ids"],
+                "coverage": state["coverage"],
+                "finding_refs": state["finding_refs"],
+            }
+        )
+        control_state = AttackState(
+            run_id=state["run_id"],
+            goal_id=f"adaptive:{state['run_id']}",
+            test_principal_refs=state["test_principal_refs"],
+            candidate_snapshot_id=state.get("candidate_snapshot_id"),
+            candidate_action_ids=state["candidate_action_ids"],
+            completed_action_ids=completed,
+            denied_action_ids=state["denied_action_ids"],
+            coverage={tag: CoverageStatus(status) for tag, status in state["coverage"].items()},
+            hypothesis_refs=state["hypothesis_refs"],
+            observation_refs=state["observation_refs"],
+            finding_refs=state["finding_refs"],
+            budget=RunBudgetSnapshot(
+                max_steps=runtime.policy.max_steps,
+                max_target_calls=runtime.policy.max_target_calls,
+                max_provider_calls=runtime.policy.max_provider_calls,
+                max_duration_seconds=runtime.policy.max_duration_seconds,
+                steps_used=min(state["graph_step_count"], runtime.policy.max_steps),
+                target_calls_used=min(
+                    state["target_call_count"],
+                    runtime.policy.max_target_calls,
+                ),
+                provider_calls_used=min(
+                    state["provider_call_count"],
+                    runtime.policy.max_provider_calls,
+                ),
+                elapsed_seconds=min(elapsed, runtime.policy.max_duration_seconds),
+                cost_used=Decimal(str(state["planner_estimated_cost"])),
+            ),
+            last_state_fingerprint=state.get("last_state_fingerprint"),
+            consecutive_no_gain_steps=state["consecutive_no_gain_steps"],
+            repeated_state_count=state["repeated_state_count"],
+            planner_failure_count=state["planner_failures"],
+            target_transport_failure_count=state["target_transport_failure_count"],
+        )
+        control_state = self.run_control.record_step_progress(
+            control_state,
+            StepProgress(
+                state_fingerprint=state_fingerprint,
+                coverage_delta=state["last_coverage_delta"],
+                evidence_delta=state["last_evidence_delta"],
+                finding_delta=state["last_finding_delta"],
+                target_transport_failed=state["last_target_transport_failed"],
+            ),
+        )
+        stop_decision = self.run_control.evaluate_stop(
+            control_state,
+            StopContext(has_executable_candidates=True),
+            StopLimits(
+                max_consecutive_no_gain_steps=(runtime.policy.max_no_information_gain_steps),
+                max_repeated_state_count=runtime.policy.max_repeated_states,
+                max_planner_failures=runtime.policy.max_planner_failures,
+                max_target_transport_failures=(runtime.policy.max_target_transport_failures),
+            ),
+        )
         terminal_reason: str | None = None
+        stop_reason: str | None = None
         status = "running"
-        if state["graph_step_count"] >= runtime.policy.max_steps:
-            terminal_reason = "graph step budget exhausted"
-            status = "aborted"
-        elif (
-            datetime.now(UTC) - runtime.started_at
-        ).total_seconds() >= runtime.policy.max_duration_seconds:
-            terminal_reason = "run duration budget exhausted"
-            status = "aborted"
-        elif state["target_call_count"] >= runtime.policy.max_target_calls:
-            terminal_reason = "target call budget exhausted"
-            status = "aborted"
+        if stop_decision.action == StopAction.stop:
+            stop_reason = stop_decision.stop_reason.value if stop_decision.stop_reason else None
+            terminal_reason = stop_decision.reason_code
+            status = "completed" if stop_reason == "completed" else "aborted"
         elif runtime.policy.stop_on_critical and any(
             summary["risk_level"] == "critical" for summary in state["finding_summaries"]
         ):
             terminal_reason = "critical finding stop policy triggered"
+            stop_reason = "policy_terminated"
             status = "completed"
+        await self.repository.record_run_control(
+            run_id=state["run_id"],
+            operation_id=str(state["current_operation_id"]),
+            state_fingerprint=state_fingerprint,
+            repeated_state_count=control_state.repeated_state_count,
+            consecutive_no_gain_steps=control_state.consecutive_no_gain_steps,
+            target_transport_failure_count=(control_state.target_transport_failure_count),
+            action=stop_decision.action.value,
+            stop_reason=stop_reason,
+            reason_code=stop_decision.reason_code,
+            step_id=state.get("current_step_id"),
+        )
         return {
             "completed_case_ids": completed,
             "action_repeat_counts": repeat_counts,
             "recent_similarity_keys": recent_similarity_keys,
+            "last_state_fingerprint": control_state.last_state_fingerprint,
+            "repeated_state_count": control_state.repeated_state_count,
+            "consecutive_no_gain_steps": control_state.consecutive_no_gain_steps,
+            "target_transport_failure_count": (control_state.target_transport_failure_count),
             "next_action": "finalize" if terminal_reason else "build",
             "status": status,
             "terminal_reason": terminal_reason,
+            "stop_reason": stop_reason,
         }
 
     async def finalize(self, state: AttackGraphState) -> dict[str, Any]:
@@ -724,8 +946,181 @@ class AttackGraph:
             run_id=state["run_id"],
             status=status,
             terminal_reason=terminal_reason,
+            stop_reason=state.get("stop_reason"),
         )
         return {"status": status, "terminal_reason": terminal_reason, "next_action": "done"}
+
+    async def _handle_planner_unavailable(
+        self,
+        *,
+        state: AttackGraphState,
+        snapshot: CandidateSnapshot,
+        planner_index: int,
+        usage: PlannerUsage,
+        error_category: str,
+        planner_event_id: str,
+        decision_history: list[str] | None = None,
+    ) -> dict[str, Any]:
+        runtime = self.runtime_registry.get(state["run_id"])
+        provider_calls = state["provider_call_count"] + usage.physical_attempts
+        planner_tokens = usage.input_tokens + usage.output_tokens
+        elapsed = max(
+            (datetime.now(UTC) - runtime.started_at).total_seconds(),
+            0,
+        )
+        control_state = AttackState(
+            run_id=state["run_id"],
+            goal_id=f"adaptive:{state['run_id']}",
+            test_principal_refs=state["test_principal_refs"],
+            candidate_snapshot_id=snapshot.snapshot_id,
+            candidate_action_ids=[candidate.action_id for candidate in snapshot.candidates],
+            completed_action_ids=state["completed_case_ids"],
+            denied_action_ids=state["denied_action_ids"],
+            coverage={tag: CoverageStatus(status) for tag, status in state["coverage"].items()},
+            hypothesis_refs=state["hypothesis_refs"],
+            observation_refs=state["observation_refs"],
+            finding_refs=state["finding_refs"],
+            budget=RunBudgetSnapshot(
+                max_steps=runtime.policy.max_steps,
+                max_target_calls=runtime.policy.max_target_calls,
+                max_provider_calls=runtime.policy.max_provider_calls,
+                max_duration_seconds=runtime.policy.max_duration_seconds,
+                steps_used=min(state["graph_step_count"], runtime.policy.max_steps),
+                target_calls_used=min(
+                    state["target_call_count"],
+                    runtime.policy.max_target_calls,
+                ),
+                provider_calls_used=min(
+                    provider_calls,
+                    runtime.policy.max_provider_calls,
+                ),
+                elapsed_seconds=min(elapsed, runtime.policy.max_duration_seconds),
+                cost_used=Decimal(str(state["planner_estimated_cost"] + usage.estimated_cost)),
+            ),
+            status=RunStatus.running,
+            checkpoint_ref=f"langgraph:{state['thread_id']}",
+            planner_fallback_mode=runtime.policy.planner_fallback_mode,
+            last_state_fingerprint=state.get("last_state_fingerprint"),
+            consecutive_no_gain_steps=state["consecutive_no_gain_steps"],
+            repeated_state_count=state["repeated_state_count"],
+            planner_failure_count=state["planner_failures"] + 1,
+            target_transport_failure_count=state["target_transport_failure_count"],
+        )
+        fallback_state, fallback = self.run_control.handle_planner_unavailable(
+            control_state,
+            PlannerUnavailableContext(
+                reason=error_category,
+                actual_model_id=runtime.planner.model_id,
+                actual_provider_id=runtime.planner.provider_id,
+                checkpoint_ref=control_state.checkpoint_ref,
+            ),
+        )
+        await self.repository.append_event(
+            run_id=state["run_id"],
+            operation_id=f"{state['run_id']}:planner:{planner_index}:fallback",
+            event_type=fallback.event.event_type,
+            evidence={
+                "mode": fallback.event.mode.value,
+                "reason": fallback.event.reason,
+                "actual_model_id": fallback.event.actual_model_id,
+                "actual_provider_id": fallback.event.actual_provider_id,
+                "candidate_snapshot_id": fallback.event.candidate_snapshot_id,
+                "candidate_id": fallback.event.candidate_id,
+                "planner_event_id": planner_event_id,
+                "physical_attempts": usage.physical_attempts,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "latency_ms": usage.latency_ms,
+                "estimated_cost": usage.estimated_cost,
+                "attempt_errors": usage.attempt_errors,
+            },
+        )
+        common = {
+            "planner_call_count": planner_index,
+            "provider_call_count": provider_calls,
+            "planner_token_count": state["planner_token_count"] + planner_tokens,
+            "planner_latency_ms": state["planner_latency_ms"] + usage.latency_ms,
+            "planner_estimated_cost": (state["planner_estimated_cost"] + usage.estimated_cost),
+            "planner_failures": fallback_state.planner_failure_count,
+            "decision_history": decision_history or state["decision_history"],
+        }
+        if fallback.action == FallbackAction.pause:
+            terminal_reason = f"planner paused: {error_category}"
+            await self.repository.pause_run(
+                run_id=state["run_id"],
+                reason=terminal_reason,
+            )
+            return {
+                **common,
+                "next_action": "pause",
+                "status": "paused",
+                "terminal_reason": terminal_reason,
+                "stop_reason": None,
+            }
+        if fallback.action == FallbackAction.terminate:
+            stop_reason = fallback.stop_reason.value if fallback.stop_reason is not None else None
+            return {
+                **common,
+                "next_action": "finalize",
+                "status": ("failed" if fallback_state.status == RunStatus.failed else "aborted"),
+                "terminal_reason": f"planner unavailable: {error_category}",
+                "stop_reason": stop_reason,
+            }
+        if fallback_state.planner_failure_count >= runtime.policy.max_planner_failures:
+            return {
+                **common,
+                "next_action": "finalize",
+                "status": "failed",
+                "terminal_reason": "planner failure limit reached",
+                "stop_reason": "planner_failed",
+            }
+
+        candidate = next(
+            candidate
+            for candidate in snapshot.candidates
+            if candidate.action_id == fallback.candidate_id
+        )
+        case_id = candidate.action_id
+        case_operation_id = (
+            f"{state['run_id']}:case:{case_id}:{len(state['completed_case_ids']) + 1}"
+        )
+        await self.repository.append_event(
+            run_id=state["run_id"],
+            operation_id=f"{case_operation_id}:decision",
+            event_type="decision_bound",
+            evidence={
+                "decision_source": "deterministic_fallback",
+                "planner_event_id": planner_event_id,
+                "candidate_snapshot_id": snapshot.snapshot_id,
+                "candidate_id": candidate.candidate_id,
+                "case_id": case_id,
+            },
+        )
+        return {
+            **common,
+            "decision_history": [
+                *(decision_history or state["decision_history"]),
+                candidate.candidate_id,
+            ],
+            "current_case_id": case_id,
+            "current_operation_id": case_operation_id,
+            "current_step_started_at": datetime.now(UTC).isoformat(),
+            "current_step_id": None,
+            "evaluation_event_id": None,
+            "policy_event_ids": [],
+            "approval_id": None,
+            "approval_status": None,
+            "graph_step_count": state["graph_step_count"] + 1,
+            "expected_information_gain": candidate.expected_information_gain.value,
+            "last_coverage_delta": 0,
+            "last_evidence_delta": 0,
+            "last_finding_delta": 0,
+            "last_target_transport_failed": False,
+            "next_action": "policy",
+            "status": "running",
+            "terminal_reason": None,
+            "stop_reason": None,
+        }
 
     @staticmethod
     def _validate_decision(
@@ -746,6 +1141,16 @@ class AttackGraph:
         if len(candidate_ids) != 1:
             return "planner selected a candidate outside the current snapshot"
         return None
+
+    @staticmethod
+    def _state_fingerprint(value: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()
 
     @staticmethod
     def _after_plan(state: AttackGraphState) -> str:
