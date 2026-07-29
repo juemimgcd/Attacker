@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from app.repositories.run_repository import RunRepository
 from app.schemas.attack_sample_schema import (
@@ -14,7 +15,7 @@ from app.schemas.attack_sample_schema import (
     EvaluatorType,
     RiskLevel,
 )
-from app.schemas.judge_schema import TargetResponse
+from app.schemas.judge_schema import AttackRunResult, EvaluationVerdict, TargetResponse
 from app.schemas.run_schema import (
     CaseRunResult,
     DeterministicRunRequest,
@@ -25,9 +26,20 @@ from app.schemas.run_schema import (
     TargetCallEvidence,
 )
 from app.schemas.target_schema import TargetConfig
+from app.services.attack_executor import AttackExecutor
 from app.services.evaluator_service import EvaluatorService
+from app.services.prompt_governance import redact_sensitive_text
 from app.services.sample_loader import BlackBoxDatasetLoader
 from app.services.target_connector.http_connector import HTTPTargetConnector
+
+_CORE_REDACTED_KEYS = {
+    "authorization",
+    "token",
+    "api_key",
+    "secret",
+    "secret_key",
+    "password",
+}
 
 
 class DeterministicRunService:
@@ -38,11 +50,13 @@ class DeterministicRunService:
         dataset_loader: BlackBoxDatasetLoader | None = None,
         connector: HTTPTargetConnector | None = None,
         evaluator: EvaluatorService | None = None,
+        attack_executor: AttackExecutor | None = None,
     ) -> None:
         self.repository = repository
         self.dataset_loader = dataset_loader or BlackBoxDatasetLoader()
         self.connector = connector or HTTPTargetConnector()
         self.evaluator = evaluator or EvaluatorService()
+        self.attack_executor = attack_executor or AttackExecutor(connector=self.connector)
 
     async def run(self, request: DeterministicRunRequest) -> dict[str, Any]:
         self._validate_target(request)
@@ -64,6 +78,82 @@ class DeterministicRunService:
         target: TargetConfig,
         sample: AttackSample,
     ) -> dict[str, Any]:
+        dataset = self._single_case_dataset(sample)
+        request = DeterministicRunRequest(
+            target=target,
+            budget=RunBudget(max_cases=1, max_target_calls=1),
+        )
+        self._validate_target(request)
+        return await self.run_dataset(
+            target=target,
+            dataset=dataset,
+            budget=request.budget,
+            mode="deterministic",
+        )
+
+    async def run_layered_single(
+        self,
+        *,
+        target: TargetConfig,
+        sample: AttackSample,
+    ) -> dict[str, Any]:
+        dataset = self._single_case_dataset(sample)
+        budget = RunBudget(max_cases=1, max_target_calls=1)
+        request = DeterministicRunRequest(target=target, budget=budget)
+        self._validate_target(request)
+        secret_values = self._secret_values(target)
+        redacted_keys = set(_CORE_REDACTED_KEYS)
+        target_snapshot = self._redact_target_snapshot(
+            target,
+            redacted_keys,
+            secret_values,
+        )
+        persisted_dataset = self._redact_single_case_dataset(
+            dataset,
+            redacted_keys,
+            secret_values,
+        )
+        run_id = await self.repository.create_run(
+            target_snapshot=target_snapshot,
+            dataset=persisted_dataset,
+            budget=budget,
+            mode="deterministic",
+        )
+        raw_result = await self.attack_executor.run_once(target=target, sample=sample)
+        result = self._redact_attack_result(
+            raw_result,
+            redacted_keys,
+            secret_values,
+        )
+        await self.repository.record_layered_result(
+            run_id=run_id,
+            operation_id=f"{run_id}:{sample.id}",
+            case=persisted_dataset.cases[0],
+            result=result,
+        )
+        outcome = {
+            EvaluationVerdict.violation: EvaluationOutcome.violation,
+            EvaluationVerdict.safe: EvaluationOutcome.safe,
+            EvaluationVerdict.inconclusive: EvaluationOutcome.error,
+        }[result.judge_result.verdict]
+        counts = {
+            "violation": int(outcome == EvaluationOutcome.violation),
+            "refused": 0,
+            "safe": int(outcome == EvaluationOutcome.safe),
+            "error": int(outcome == EvaluationOutcome.error),
+            "budget_aborted": 0,
+            "false_positive": 0,
+            "defense_overblock": 0,
+        }
+        await self.repository.finalize_run(
+            run_id,
+            counts=counts,
+            target_call_count=1,
+        )
+        return await self.repository.get_report_rows(run_id)
+
+    @staticmethod
+    def _single_case_dataset(sample: AttackSample) -> LoadedDataset:
         evaluator_type = (
             EvaluatorType.system_prompt_leakage
             if "system" in sample.category
@@ -96,17 +186,7 @@ class DeterministicRunService:
             cases=[case],
             snapshot=snapshot,
         )
-        request = DeterministicRunRequest(
-            target=target,
-            budget=RunBudget(max_cases=1, max_target_calls=1),
-        )
-        self._validate_target(request)
-        return await self.run_dataset(
-            target=target,
-            dataset=dataset,
-            budget=request.budget,
-            mode="deterministic",
-        )
+        return dataset
 
     async def run_dataset(
         self,
@@ -119,9 +199,9 @@ class DeterministicRunService:
         request = DeterministicRunRequest(target=target, budget=budget)
         self._validate_target(request)
         secret_values = self._secret_values(request.target)
-        target_snapshot = self._redact(
-            request.target.model_dump(mode="json"),
-            {"authorization", "token", "api_key", "secret", "secret_key"},
+        target_snapshot = self._redact_target_snapshot(
+            request.target,
+            set(_CORE_REDACTED_KEYS),
             secret_values,
         )
         run_id = await self.repository.create_run(
@@ -214,7 +294,7 @@ class DeterministicRunService:
     ) -> CaseRunResult:
         calls: list[TargetCallEvidence] = []
         raw_responses: list[TargetResponse] = []
-        redact_fields = set(case.redact_fields)
+        redact_fields = set(case.redact_fields) | _CORE_REDACTED_KEYS
         secret_values = self._secret_values(request.target)
 
         for _ in range(case.repeat_count):
@@ -251,12 +331,10 @@ class DeterministicRunService:
                             redact_fields,
                             secret_values,
                         ),
-                        response=TargetResponse.model_validate(
-                            self._redact(
-                                response.model_dump(mode="json"),
-                                redact_fields,
-                                secret_values,
-                            )
+                        response=self._redact_target_response(
+                            response,
+                            redact_fields,
+                            secret_values,
                         ),
                     )
                 )
@@ -349,9 +427,216 @@ class DeterministicRunService:
         if isinstance(value, list):
             return [cls._redact(item, redacted_keys, secret_values) for item in value]
         if isinstance(value, str):
-            for secret in secret_values:
-                value = value.replace(secret, "[REDACTED]")
+            return redact_sensitive_text(value, secret_values)
         return value
+
+    @classmethod
+    def _redact_structure(
+        cls,
+        value: Any,
+        redacted_keys: set[str],
+    ) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    "[REDACTED]"
+                    if cls._is_redacted_key(key, redacted_keys)
+                    else cls._redact_structure(item, redacted_keys)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._redact_structure(item, redacted_keys) for item in value]
+        return value
+
+    @classmethod
+    def _redact_target_snapshot(
+        cls,
+        target: TargetConfig,
+        redacted_keys: set[str],
+        secret_values: set[str],
+    ) -> dict[str, Any]:
+        snapshot = target.model_dump(mode="json")
+        snapshot["name"] = redact_sensitive_text(snapshot["name"], secret_values)
+        snapshot["endpoint"] = cls._redact_endpoint(
+            snapshot["endpoint"],
+            redacted_keys,
+            secret_values,
+        )
+        snapshot["headers"] = cls._redact(
+            snapshot["headers"],
+            redacted_keys,
+            secret_values,
+        )
+        snapshot["auth"] = cls._redact_structure(snapshot["auth"], redacted_keys)
+        request_template = snapshot["request_template"]
+        request_template["body_template"] = cls._redact(
+            request_template["body_template"],
+            redacted_keys,
+            secret_values,
+        )
+        return snapshot
+
+    @classmethod
+    def _redact_target_response(
+        cls,
+        response: TargetResponse,
+        redacted_keys: set[str],
+        secret_values: set[str],
+    ) -> TargetResponse:
+        response_data = response.model_dump(mode="json")
+        response_data["body"] = cls._redact(
+            response_data["body"],
+            redacted_keys,
+            secret_values,
+        )
+        response_data["text"] = cls._redact(
+            response_data["text"],
+            redacted_keys,
+            secret_values,
+        )
+        response_data["error"] = cls._redact(
+            response_data["error"],
+            redacted_keys,
+            secret_values,
+        )
+        return TargetResponse.model_validate(response_data)
+
+    @classmethod
+    def _redact_attack_result(
+        cls,
+        result: AttackRunResult,
+        redacted_keys: set[str],
+        secret_values: set[str],
+    ) -> AttackRunResult:
+        result_data = result.model_dump(mode="json")
+        result_data["target_name"] = cls._redact(
+            result_data["target_name"],
+            redacted_keys,
+            secret_values,
+        )
+        result_data["request_body"] = cls._redact(
+            result_data["request_body"],
+            redacted_keys,
+            secret_values,
+        )
+        result_data["target_response"] = cls._redact_target_response(
+            result.target_response,
+            redacted_keys,
+            secret_values,
+        ).model_dump(mode="json")
+        judge_result = result_data["judge_result"]
+        judge_result["reason"] = cls._redact(
+            judge_result["reason"],
+            redacted_keys,
+            secret_values,
+        )
+        judge_result["matched_patterns"] = cls._redact(
+            judge_result["matched_patterns"],
+            redacted_keys,
+            secret_values,
+        )
+        for evaluator_result in judge_result["evaluator_results"]:
+            evaluator_result["reason"] = cls._redact(
+                evaluator_result["reason"],
+                redacted_keys,
+                secret_values,
+            )
+            evaluator_result["matched_patterns"] = cls._redact(
+                evaluator_result["matched_patterns"],
+                redacted_keys,
+                secret_values,
+            )
+        return AttackRunResult.model_validate(result_data)
+
+    @classmethod
+    def _redact_endpoint(
+        cls,
+        endpoint: str,
+        redacted_keys: set[str],
+        secret_values: set[str],
+    ) -> str:
+        parsed = urlsplit(endpoint)
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = host
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        query = urlencode(
+            [
+                (
+                    key,
+                    (
+                        "[REDACTED]"
+                        if cls._is_redacted_key(key, redacted_keys)
+                        else redact_sensitive_text(value, secret_values)
+                    ),
+                )
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            ],
+            doseq=True,
+        )
+        return urlunsplit(
+            (
+                parsed.scheme,
+                netloc,
+                quote(
+                    redact_sensitive_text(unquote(parsed.path), secret_values),
+                    safe="/:@-._~",
+                ),
+                query,
+                quote(
+                    redact_sensitive_text(unquote(parsed.fragment), secret_values),
+                    safe="-._~",
+                ),
+            )
+        )
+
+    @classmethod
+    def _redact_single_case_dataset(
+        cls,
+        dataset: LoadedDataset,
+        redacted_keys: set[str],
+        secret_values: set[str],
+    ) -> LoadedDataset:
+        redacted_cases: list[BlackBoxCase] = []
+        for case in dataset.cases:
+            case_data = case.model_dump(mode="json")
+            for field in ("name", "prompts", "expected_violation", "cleanup_steps"):
+                case_data[field] = cls._redact(
+                    case_data[field],
+                    redacted_keys,
+                    secret_values,
+                )
+            evaluator = case_data["evaluator"]
+            for field in ("violation_patterns", "refusal_patterns", "canary"):
+                evaluator[field] = cls._redact(
+                    evaluator[field],
+                    redacted_keys,
+                    secret_values,
+                )
+            redacted_cases.append(BlackBoxCase.model_validate(case_data))
+
+        snapshot = {
+            "name": dataset.name,
+            "cases": [
+                {
+                    "name": case.id,
+                    "inputs": case.model_dump(mode="json"),
+                }
+                for case in redacted_cases
+            ],
+        }
+        snapshot_bytes = json.dumps(snapshot, sort_keys=True).encode()
+        return LoadedDataset(
+            name=dataset.name,
+            version=dataset.version,
+            source_path=dataset.source_path,
+            sha256=hashlib.sha256(snapshot_bytes).hexdigest(),
+            cases=redacted_cases,
+            snapshot=snapshot,
+        )
 
     @staticmethod
     def _is_redacted_key(key: str, redacted_keys: set[str]) -> bool:
@@ -369,7 +654,7 @@ class DeterministicRunService:
             for key, value in target.headers.items()
             if cls._is_redacted_key(
                 key,
-                {"authorization", "token", "api_key", "secret", "secret_key"},
+                _CORE_REDACTED_KEYS,
             )
         )
         return {secret for secret in secrets if secret}

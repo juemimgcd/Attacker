@@ -163,6 +163,37 @@ class RunControlService:
             candidate_snapshot_id=state.candidate_snapshot_id,
         )
 
+        if state.status in {
+            RunStatus.stopped,
+            RunStatus.completed,
+            RunStatus.failed,
+            RunStatus.cancelled,
+        }:
+            return (
+                state,
+                FallbackDecision(
+                    action=FallbackAction.terminate,
+                    stop_reason=state.stop_reason,
+                    event=event,
+                ),
+            )
+
+        if self._budget_exhausted(state):
+            decision = FallbackDecision(
+                action=FallbackAction.terminate,
+                stop_reason=StopReason.budget_exhausted,
+                event=event,
+            )
+            return (
+                self._update_state(
+                    state,
+                    status=RunStatus.stopped,
+                    stop_reason=StopReason.budget_exhausted,
+                    planner_fallback_snapshot=fallback_snapshot,
+                ),
+                decision,
+            )
+
         if state.planner_fallback_mode == PlannerFallbackMode.fail_closed:
             decision = FallbackDecision(
                 action=FallbackAction.terminate,
@@ -192,22 +223,6 @@ class RunControlService:
                     status=RunStatus.paused,
                     stop_reason=None,
                     checkpoint_ref=context.checkpoint_ref,
-                    planner_fallback_snapshot=fallback_snapshot,
-                ),
-                decision,
-            )
-
-        if self._budget_exhausted(state):
-            decision = FallbackDecision(
-                action=FallbackAction.terminate,
-                stop_reason=StopReason.budget_exhausted,
-                event=event,
-            )
-            return (
-                self._update_state(
-                    state,
-                    status=RunStatus.stopped,
-                    stop_reason=StopReason.budget_exhausted,
                     planner_fallback_snapshot=fallback_snapshot,
                 ),
                 decision,

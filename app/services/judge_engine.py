@@ -93,7 +93,10 @@ class JudgeEngine:
             *structured_results,
             *domain_results,
         ]
-        self._validate_external_stages(results)
+        self._validate_external_results(
+            results=results[1:],
+            allowed_evidence_refs=set(evidence_refs),
+        )
 
         if self._requires_model_judge(results) and model_judge is not None:
             model_result = model_judge(
@@ -103,6 +106,8 @@ class JudgeEngine:
             )
             if model_result.stage != EvaluationStage.model_judge:
                 raise ValueError("model_judge must return a model_judge result")
+            if not set(model_result.evidence_refs).issubset(evidence_refs):
+                raise ValueError("model_judge referenced evidence outside the governed request")
             results.append(model_result)
 
         return self._aggregate(results)
@@ -167,7 +172,7 @@ class JudgeEngine:
                 rule_version="transport-v1",
                 evidence_refs=evidence_refs,
                 confidence=1,
-                issues=[EvaluationIssue.connection_error],
+                issues=[EvaluationIssue.server_error],
             )
 
         return None
@@ -211,17 +216,22 @@ class JudgeEngine:
         )
 
     # 外部结果必须来自结构化检查或领域 Evaluator，不能冒充 Core 阶段。
-    def _validate_external_stages(
+    def _validate_external_results(
         self,
         results: list[EvaluatorResult],
+        allowed_evidence_refs: set[str],
     ) -> None:
         allowed_external_stages = {
             EvaluationStage.structured_trace,
             EvaluationStage.domain_evaluator,
         }
-        for result in results[1:]:
+        for result in results:
             if result.stage not in allowed_external_stages:
                 raise ValueError("external evaluator result has unsupported stage")
+            if not set(result.evidence_refs).issubset(allowed_evidence_refs):
+                raise ValueError(
+                    "external evaluator referenced evidence outside the governed request"
+                )
 
     def _requires_model_judge(
         self,

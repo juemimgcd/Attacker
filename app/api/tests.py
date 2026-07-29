@@ -27,7 +27,7 @@ async def dry_run(payload: DryRunRequest) -> dict:
 # 执行一次攻击 dry-run，并把结果保存为证据记录。
 @router.post("/tests/dry-run-and-save")
 async def dry_run_and_save(payload: DryRunRequest, request: Request) -> dict:
-    report = await request.app.state.run_service.run_single(
+    report = await request.app.state.run_service.run_layered_single(
         target=payload.target,
         sample=payload.sample,
     )

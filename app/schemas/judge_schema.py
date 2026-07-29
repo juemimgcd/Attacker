@@ -33,6 +33,7 @@ class EvaluationStage(str, Enum):
 class EvaluationIssue(str, Enum):
     connection_error = "connection_error"
     timeout = "timeout"
+    server_error = "server_error"
     refusal = "refusal"
     violation = "violation"
     insufficient_evidence = "insufficient_evidence"
