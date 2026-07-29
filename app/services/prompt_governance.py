@@ -17,13 +17,36 @@ from app.schemas.prompt_schema import (
 _PROMPT_ROOT = Path(__file__).resolve().parents[1] / "prompts"
 _SAFE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(authorization|proxy-authorization|x-api-key|api[-_ ]?key|"
-    r"access[-_ ]?token|refresh[-_ ]?token|secret|password)\b"
-    r"\s*[:=]\s*(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    r"(?im)(?P<quote>[\"']?)(?P<key>\b(?:authorization|proxy-authorization|"
+    r"x-api-key|api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|secret|password)\b)"
+    r"(?P=quote)\s*[:=]\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]*)"
 )
-_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_AUTH_SCHEME_PATTERN = re.compile(
+    r"(?i)\b(bearer|basic|api[-_ ]?key|negotiate|ntlm)\s+[A-Za-z0-9._~+/=-]+"
+)
+_DIGEST_AUTH_PATTERN = re.compile(r"(?i)\bdigest\s+[^\r\n]+")
+_AWS_AUTH_PATTERN = re.compile(r"(?i)\bAWS4-HMAC-SHA256\s+[^\r\n]+")
 _EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _PHONE_PATTERN = re.compile(r"(?<!\w)\+?\d[\d ()-]{7,}\d(?!\w)")
+
+
+def redact_sensitive_text(value: str, secret_values: set[str] | None = None) -> str:
+    redacted = value
+    for secret in sorted(secret_values or (), key=len, reverse=True):
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+    redacted = _SENSITIVE_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group('key')}=<redacted>",
+        redacted,
+    )
+    redacted = _AUTH_SCHEME_PATTERN.sub(
+        lambda match: f"{match.group(1)} <redacted>",
+        redacted,
+    )
+    redacted = _DIGEST_AUTH_PATTERN.sub("Digest <redacted>", redacted)
+    redacted = _AWS_AUTH_PATTERN.sub("AWS4-HMAC-SHA256 <redacted>", redacted)
+    redacted = _EMAIL_PATTERN.sub("<redacted-email>", redacted)
+    return _PHONE_PATTERN.sub("<redacted-phone>", redacted)
 
 
 @dataclass(frozen=True)
@@ -56,7 +79,7 @@ _CORE_TEMPLATES = {
 # 只从 Core 模板和已批准 Profile 构建模型输入，调用方无法覆盖 system prompt。
 class PromptGovernanceService:
     def __init__(self, profiles: list[PromptProfile] | None = None) -> None:
-        selected_profiles = profiles or self._default_profiles()
+        selected_profiles = profiles if profiles is not None else self._default_profiles()
         self._profiles = {profile.profile_id: profile for profile in selected_profiles}
         if len(self._profiles) != len(selected_profiles):
             raise ValueError("prompt profile IDs must be unique")
@@ -201,13 +224,7 @@ class PromptGovernanceService:
 
     # 统一清除常见凭据、认证值和直接 PII，避免进入 Prompt 与快照。
     def _redact(self, value: str) -> str:
-        redacted = _SENSITIVE_ASSIGNMENT_PATTERN.sub(
-            lambda match: f"{match.group(1)}=<redacted>",
-            value,
-        )
-        redacted = _BEARER_PATTERN.sub("Bearer <redacted>", redacted)
-        redacted = _EMAIL_PATTERN.sub("<redacted-email>", redacted)
-        return _PHONE_PATTERN.sub("<redacted-phone>", redacted)
+        return redact_sensitive_text(value)
 
     def _render_messages(
         self,

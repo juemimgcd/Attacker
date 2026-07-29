@@ -3,6 +3,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -19,6 +20,8 @@ from app.models import (
     StateSnapshotRecord,
     TargetRecord,
 )
+from app.schemas.attack_sample_schema import BlackBoxCase
+from app.schemas.judge_schema import AttackRunResult, EvaluationVerdict
 from app.schemas.run_schema import CaseRunResult, EvaluationOutcome, LoadedDataset, RunBudget
 from app.services.finding_fingerprint import finding_fingerprint
 
@@ -213,6 +216,145 @@ class RunRepository:
                         event_type="finding_created",
                         evidence_json={
                             "case_id": result.case.id,
+                            "evidence_event_ids": evidence_event_ids,
+                        },
+                    )
+                )
+
+        return result_json
+
+    async def record_layered_result(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        case: BlackBoxCase,
+        result: AttackRunResult,
+    ) -> dict[str, Any]:
+        evidence_ref_groups = [
+            result.judge_result.evidence_refs,
+            *(
+                evaluator_result.evidence_refs
+                for evaluator_result in result.judge_result.evaluator_results
+            ),
+        ]
+        if any(set(refs) != {result.evidence_id} for refs in evidence_ref_groups):
+            raise ValueError("layered result references evidence outside this execution")
+
+        outcome = {
+            EvaluationVerdict.violation: EvaluationOutcome.violation,
+            EvaluationVerdict.safe: EvaluationOutcome.safe,
+            EvaluationVerdict.inconclusive: EvaluationOutcome.error,
+        }[result.judge_result.verdict]
+        result_json = {
+            "case": case.model_dump(mode="json"),
+            **result.model_dump(mode="json"),
+        }
+        async with self.session_factory.begin() as session:
+            step_id = str(uuid4())
+            inserted_step_id = await session.scalar(
+                sqlite_insert(RunStepRecord)
+                .values(
+                    id=step_id,
+                    run_id=run_id,
+                    case_id=result.sample_id,
+                    operation_id=operation_id,
+                    sequence=1,
+                    status="completed",
+                    outcome=outcome.value,
+                    result_json=result_json,
+                )
+                .on_conflict_do_nothing()
+                .returning(RunStepRecord.id)
+            )
+            if inserted_step_id is None:
+                existing = await session.scalar(
+                    select(RunStepRecord).where(RunStepRecord.operation_id == operation_id)
+                )
+                if existing is not None:
+                    return existing.result_json
+                raise RuntimeError("layered result conflicts with an existing run step")
+
+            last_sequence = await session.scalar(
+                select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
+            )
+            event_sequence = int(last_sequence or 0)
+
+            event_sequence += 1
+            session.add(
+                EventRecord(
+                    id=result.evidence_id,
+                    run_id=run_id,
+                    step_id=step_id,
+                    sequence=event_sequence,
+                    operation_id=f"{operation_id}:target:1",
+                    event_type="target_called",
+                    evidence_json={
+                        "request_body": result.request_body,
+                        "response": result.target_response.model_dump(mode="json"),
+                    },
+                )
+            )
+
+            event_sequence += 1
+            evaluation_event_id = str(uuid4())
+            session.add(
+                EventRecord(
+                    id=evaluation_event_id,
+                    run_id=run_id,
+                    step_id=step_id,
+                    sequence=event_sequence,
+                    operation_id=f"{operation_id}:evaluation",
+                    event_type="evaluation_completed",
+                    evidence_json={
+                        "sample_id": result.sample_id,
+                        "judge_result": result.judge_result.model_dump(mode="json"),
+                    },
+                )
+            )
+
+            if result.judge_result.verdict == EvaluationVerdict.violation:
+                evidence_event_ids = list(
+                    dict.fromkeys(
+                        [
+                            *result.judge_result.evidence_refs,
+                            evaluation_event_id,
+                        ]
+                    )
+                )
+                session.add(
+                    FindingRecord(
+                        id=str(uuid4()),
+                        run_id=run_id,
+                        step_id=step_id,
+                        event_id=evaluation_event_id,
+                        operation_id=f"{operation_id}:finding",
+                        case_id=result.sample_id,
+                        category=case.category,
+                        risk_level=result.judge_result.risk_level.value,
+                        outcome=outcome.value,
+                        reason=result.judge_result.reason,
+                        fingerprint=finding_fingerprint(
+                            stage="blackbox",
+                            case_id=result.sample_id,
+                            category=case.category,
+                            is_control=case.kind.value == "control",
+                        ),
+                        evidence_event_ids=evidence_event_ids,
+                        is_control=case.kind.value == "control",
+                    )
+                )
+                event_sequence += 1
+                session.add(
+                    EventRecord(
+                        id=str(uuid4()),
+                        run_id=run_id,
+                        step_id=step_id,
+                        sequence=event_sequence,
+                        operation_id=f"{operation_id}:finding_event",
+                        event_type="finding_created",
+                        evidence_json={
+                            "case_id": result.sample_id,
                             "evidence_event_ids": evidence_event_ids,
                         },
                     )
