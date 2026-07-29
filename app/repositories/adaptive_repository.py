@@ -16,6 +16,17 @@ from app.models import (
     RunStepRecord,
     TargetRecord,
 )
+from app.schemas.adaptive_agent_schema import (
+    CandidateSnapshot,
+    CoverageFact,
+    DerivedCase,
+    HypothesisFact,
+    HypothesisStatus,
+    InformationGainMetrics,
+    ObservationSource,
+    UntrustedObservation,
+)
+from app.schemas.attack_state_schema import CoverageStatus
 from app.schemas.graybox_schema import (
     AttackPolicy,
     GrayBoxCase,
@@ -52,6 +63,12 @@ class AdaptiveRepository:
             update={
                 "allowed_target_ids": {target_id},
                 "allowed_case_ids": {case.id for case in dataset.cases},
+                "allowed_capability_contracts": {
+                    case.capability_contract for case in dataset.cases
+                },
+                "allowed_provider_instance_refs": {
+                    case.provider_instance_ref for case in dataset.cases
+                },
             }
         )
         async with self.session_factory.begin() as session:
@@ -166,6 +183,296 @@ class AdaptiveRepository:
                 step_id=step_id,
             )
 
+    async def initialize_hypotheses(
+        self,
+        *,
+        run_id: str,
+        cases: list[GrayBoxCase],
+    ) -> dict[str, HypothesisFact]:
+        hypotheses: dict[str, HypothesisFact] = {}
+        for case in sorted(cases, key=lambda item: item.id):
+            template_id = case.hypothesis_template_id or f"{case.category}.v1"
+            event_id = await self.append_event(
+                run_id=run_id,
+                operation_id=f"{run_id}:hypothesis:{case.id}:initial",
+                event_type="hypothesis_created",
+                evidence={
+                    "action_id": case.id,
+                    "template_id": template_id,
+                    "status": "pending",
+                    "evidence_refs": [],
+                },
+            )
+            hypotheses[case.id] = HypothesisFact(
+                hypothesis_ref=event_id,
+                template_id=template_id,
+                action_id=case.id,
+                status=HypothesisStatus.pending,
+            )
+            await self.append_event(
+                run_id=run_id,
+                operation_id=f"{run_id}:observation:case_pack:{case.id}",
+                event_type="observation_normalized",
+                evidence={
+                    "source": ObservationSource.case_pack.value,
+                    "trust": "untrusted",
+                    "summary": (
+                        f"case_id={case.id}; hypothesis_template_id={template_id}; "
+                        f"coverage_tags={','.join(case.coverage_tags or [case.category])}"
+                    )[:2_000],
+                },
+            )
+        return hypotheses
+
+    async def record_candidate_snapshot(self, snapshot: CandidateSnapshot) -> str:
+        return await self.append_event(
+            run_id=snapshot.run_id,
+            operation_id=f"{snapshot.run_id}:candidate_snapshot:{snapshot.snapshot_id}",
+            event_type="candidate_snapshot_created",
+            evidence={"snapshot": snapshot.model_dump(mode="json")},
+        )
+
+    async def load_candidate_snapshot(
+        self,
+        *,
+        run_id: str,
+        snapshot_id: str,
+    ) -> CandidateSnapshot:
+        async with self.session_factory() as session:
+            events = (
+                await session.scalars(
+                    select(EventRecord)
+                    .where(
+                        EventRecord.run_id == run_id,
+                        EventRecord.event_type == "candidate_snapshot_created",
+                    )
+                    .order_by(EventRecord.sequence.desc())
+                )
+            ).all()
+            for event in events:
+                raw_snapshot = event.evidence_json.get("snapshot", {})
+                if raw_snapshot.get("snapshot_id") == snapshot_id:
+                    return CandidateSnapshot.model_validate(raw_snapshot)
+        raise LookupError(f"candidate snapshot {snapshot_id} not found for run {run_id}")
+
+    async def record_observation(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        source: ObservationSource,
+        summary: str,
+        step_id: str | None,
+    ) -> UntrustedObservation:
+        event_id = await self.append_event(
+            run_id=run_id,
+            operation_id=operation_id,
+            event_type="observation_normalized",
+            step_id=step_id,
+            evidence={
+                "source": source.value,
+                "trust": "untrusted",
+                "summary": summary,
+            },
+        )
+        return UntrustedObservation(
+            observation_ref=event_id,
+            source=source,
+            summary=summary,
+        )
+
+    async def record_hypothesis_transition(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        hypothesis: HypothesisFact,
+        step_id: str | None,
+    ) -> HypothesisFact:
+        event_id = await self.append_event(
+            run_id=run_id,
+            operation_id=operation_id,
+            event_type="hypothesis_updated",
+            step_id=step_id,
+            evidence={
+                "previous_hypothesis_ref": hypothesis.hypothesis_ref,
+                "action_id": hypothesis.action_id,
+                "template_id": hypothesis.template_id,
+                "status": hypothesis.status.value,
+                "evidence_refs": list(hypothesis.evidence_refs),
+            },
+        )
+        return hypothesis.model_copy(update={"hypothesis_ref": event_id})
+
+    async def record_coverage_and_gain(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        coverage_facts: tuple[CoverageFact, ...],
+        gain: InformationGainMetrics,
+        step_id: str | None,
+    ) -> tuple[list[str], str]:
+        coverage_refs: list[str] = []
+        for fact in coverage_facts:
+            coverage_refs.append(
+                await self.append_event(
+                    run_id=run_id,
+                    operation_id=f"{operation_id}:coverage:{fact.tag}",
+                    event_type="coverage_updated",
+                    step_id=step_id,
+                    evidence=fact.model_dump(mode="json"),
+                )
+            )
+        gain_ref = await self.append_event(
+            run_id=run_id,
+            operation_id=f"{operation_id}:information_gain",
+            event_type="information_gain_measured",
+            step_id=step_id,
+            evidence=gain.model_dump(mode="json"),
+        )
+        return coverage_refs, gain_ref
+
+    async def record_finish_rejected(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        reason_code: str,
+        detail: str,
+    ) -> str:
+        return await self.append_event(
+            run_id=run_id,
+            operation_id=operation_id,
+            event_type="planner_finish_rejected",
+            evidence={"reason_code": reason_code, "detail": detail},
+        )
+
+    async def record_derived_case(
+        self,
+        *,
+        run_id: str,
+        derived_case: DerivedCase,
+    ) -> str:
+        event_type = (
+            "derived_case_verified"
+            if derived_case.deterministic_verified
+            else "derived_case_frozen"
+        )
+        return await self.append_event(
+            run_id=run_id,
+            operation_id=(f"{run_id}:derived_case:{derived_case.derived_case_id}:{event_type}"),
+            event_type=event_type,
+            evidence={"derived_case": derived_case.model_dump(mode="json")},
+        )
+
+    async def load_adaptive_facts(self, run_id: str) -> dict[str, Any]:
+        async with self.session_factory() as session:
+            events = (
+                await session.scalars(
+                    select(EventRecord)
+                    .where(EventRecord.run_id == run_id)
+                    .order_by(EventRecord.sequence)
+                )
+            ).all()
+            findings = (
+                await session.scalars(
+                    select(FindingRecord)
+                    .where(FindingRecord.run_id == run_id)
+                    .order_by(FindingRecord.created_at, FindingRecord.id)
+                )
+            ).all()
+
+        hypotheses: dict[str, HypothesisFact] = {}
+        coverage: dict[str, CoverageStatus] = {}
+        observations: list[UntrustedObservation] = []
+        information_gain_refs: list[str] = []
+        for event in events:
+            if event.event_type in {"hypothesis_created", "hypothesis_updated"}:
+                evidence = event.evidence_json
+                action_id = str(evidence["action_id"])
+                hypotheses[action_id] = HypothesisFact(
+                    hypothesis_ref=event.id,
+                    template_id=str(evidence["template_id"]),
+                    action_id=action_id,
+                    status=HypothesisStatus(str(evidence["status"])),
+                    evidence_refs=tuple(evidence.get("evidence_refs", [])),
+                )
+            elif event.event_type == "coverage_updated":
+                coverage[str(event.evidence_json["tag"])] = CoverageStatus(
+                    str(event.evidence_json["status"])
+                )
+            elif event.event_type == "observation_normalized":
+                observations.append(
+                    UntrustedObservation(
+                        observation_ref=event.id,
+                        source=ObservationSource(str(event.evidence_json["source"])),
+                        summary=str(event.evidence_json["summary"]),
+                    )
+                )
+            elif event.event_type == "information_gain_measured":
+                information_gain_refs.append(event.id)
+
+        evidence_gaps = {
+            tag for tag, status in coverage.items() if status == CoverageStatus.inconclusive
+        }
+        return {
+            "hypotheses": hypotheses,
+            "coverage": coverage,
+            "observations": observations[-20:],
+            "observation_refs": [item.observation_ref for item in observations],
+            "finding_refs": [finding.id for finding in findings],
+            "evidence_gaps": evidence_gaps,
+            "information_gain_refs": information_gain_refs,
+        }
+
+    async def validate_planner_references(
+        self,
+        *,
+        run_id: str,
+        evidence_refs: list[str],
+        hypothesis_refs: list[str],
+    ) -> str | None:
+        async with self.session_factory() as session:
+            event_rows = (
+                await session.scalars(
+                    select(EventRecord).where(
+                        EventRecord.run_id == run_id,
+                        EventRecord.id.in_([*evidence_refs, *hypothesis_refs]),
+                    )
+                )
+            ).all()
+            finding_rows = (
+                await session.scalars(
+                    select(FindingRecord).where(
+                        FindingRecord.run_id == run_id,
+                        FindingRecord.id.in_(evidence_refs),
+                    )
+                )
+            ).all()
+        events_by_id = {event.id: event for event in event_rows}
+        persisted_evidence_refs = events_by_id.keys() | {finding.id for finding in finding_rows}
+        missing_evidence = sorted(set(evidence_refs) - persisted_evidence_refs)
+        if missing_evidence:
+            return f"planner referenced non-persisted evidence: {', '.join(missing_evidence)}"
+        observation_refs = {
+            event.id for event in event_rows if event.event_type == "observation_normalized"
+        }
+        finding_refs = {finding.id for finding in finding_rows}
+        if not set(evidence_refs) & (observation_refs | finding_refs):
+            return "planner proposal must cite a persisted observation or finding"
+        missing_hypotheses = sorted(set(hypothesis_refs) - events_by_id.keys())
+        if missing_hypotheses:
+            return f"planner referenced non-persisted hypotheses: {', '.join(missing_hypotheses)}"
+        invalid_hypotheses = sorted(
+            ref
+            for ref in hypothesis_refs
+            if events_by_id[ref].event_type not in {"hypothesis_created", "hypothesis_updated"}
+        )
+        if invalid_hypotheses:
+            return f"planner referenced non-hypothesis facts: {', '.join(invalid_hypotheses)}"
+        return None
+
     async def record_planner_result(
         self,
         *,
@@ -190,6 +497,7 @@ class AdaptiveRepository:
                     "decision": result.decision.model_dump(mode="json"),
                     "backend": result.backend,
                     "usage": result.usage.model_dump(mode="json"),
+                    "call_snapshot": result.call_snapshot.model_dump(mode="json"),
                     "rejection_reason": rejection_reason,
                 },
             )

@@ -2,8 +2,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
+from app.schemas.adaptive_agent_schema import (
+    Candidate,
+    InformationGain,
+    PlannerCallSnapshot,
+    PlannerReasonCode,
+    UntrustedObservation,
+)
 from app.schemas.attack_sample_schema import CaseKind, RiskLevel
 from app.schemas.judge_schema import TargetResponse
 from app.schemas.target_schema import TargetConfig
@@ -93,6 +100,16 @@ class GrayBoxCase(BaseModel):
     forbidden_argument_patterns: list[str] = Field(default_factory=list)
     requires_approval: bool = False
     max_repeated_tool_calls: int = Field(default=2, ge=1, le=20)
+    enabled: bool = True
+    compatible: bool = True
+    capability_contract: str = "target.http.v1"
+    provider_instance_ref: str = "core.http"
+    hypothesis_template_id: str | None = None
+    coverage_tags: list[str] = Field(default_factory=list)
+    prerequisite_case_ids: list[str] = Field(default_factory=list)
+    repeatable: bool = False
+    max_action_repeats: int = Field(default=1, ge=1, le=20)
+    expected_information_gain: InformationGain = InformationGain.medium
     required_evidence: list[str] = Field(
         default_factory=lambda: [
             "target_response",
@@ -124,6 +141,8 @@ class LoadedGrayBoxDataset(BaseModel):
 class AttackPolicy(BaseModel):
     allowed_target_ids: set[str] = Field(default_factory=set)
     allowed_case_ids: set[str] = Field(default_factory=set)
+    allowed_capability_contracts: set[str] = Field(default_factory=set)
+    allowed_provider_instance_refs: set[str] = Field(default_factory=set)
     max_steps: int = Field(default=40, ge=1, le=1_000)
     max_target_calls: int = Field(default=20, ge=1, le=10_000)
     max_duration_seconds: float = Field(default=300.0, gt=0, le=86_400)
@@ -132,18 +151,13 @@ class AttackPolicy(BaseModel):
     )
     max_planner_failures: int = Field(default=3, ge=1, le=20)
     max_repeated_decisions: int = Field(default=3, ge=1, le=20)
+    max_action_repeats: int = Field(default=1, ge=1, le=20)
     stop_on_critical: bool = False
-
-
-class CaseSummary(BaseModel):
-    id: str
-    name: str
-    category: str
-    severity: RiskLevel
-    requires_approval: bool
+    allow_early_finish: bool = False
 
 
 class FindingSummary(BaseModel):
+    finding_ref: str | None = None
     case_id: str
     category: str
     risk_level: RiskLevel
@@ -151,23 +165,36 @@ class FindingSummary(BaseModel):
 
 
 class PlannerContext(BaseModel):
-    allowed_cases: list[CaseSummary]
-    completed_case_ids: list[str]
-    finding_summaries: list[FindingSummary]
+    candidate_snapshot_id: str
+    candidates: list[Candidate]
+    observations: list[UntrustedObservation]
+    evidence_refs: list[str]
+    finding_refs: list[str]
+    hypothesis_refs: list[str]
     remaining_steps: int
 
 
 class PlannerDecision(BaseModel):
-    action: Literal["execute_case", "finish_run"]
-    case_id: str | None = None
-    reason: str
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["execute", "finish"]
+    candidate_snapshot_id: str
+    candidate_id: str | None = None
+    reason_code: PlannerReasonCode
+    evidence_refs: list[str] = Field(default_factory=list)
+    hypothesis_refs: list[str] = Field(default_factory=list)
+    expected_information_gain: InformationGain | None = None
 
     @model_validator(mode="after")
-    def validate_case_id(self) -> "PlannerDecision":
-        if self.action == "execute_case" and self.case_id is None:
-            raise ValueError("execute_case requires case_id")
-        if self.action == "finish_run" and self.case_id is not None:
-            raise ValueError("finish_run cannot include case_id")
+    def validate_candidate_id(self) -> "PlannerDecision":
+        if self.action == "execute" and self.candidate_id is None:
+            raise ValueError("execute requires candidate_id")
+        if self.action == "execute" and self.expected_information_gain is None:
+            raise ValueError("execute requires expected_information_gain")
+        if self.action == "finish" and self.candidate_id is not None:
+            raise ValueError("finish cannot include candidate_id")
+        if self.action == "finish" and self.expected_information_gain is not None:
+            raise ValueError("finish cannot include expected_information_gain")
         return self
 
 
@@ -180,6 +207,7 @@ class PlannerResult(BaseModel):
     decision: PlannerDecision
     usage: PlannerUsage = Field(default_factory=PlannerUsage)
     backend: str
+    call_snapshot: PlannerCallSnapshot
 
 
 class PlannerConfig(BaseModel):
@@ -188,6 +216,8 @@ class PlannerConfig(BaseModel):
     api_key: SecretStr | None = None
     model: str = "planner"
     timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    temperature: float = Field(default=0, ge=0, le=2)
+    prompt_template_version: str = "planner-v2"
 
     @model_validator(mode="after")
     def validate_http_config(self) -> "PlannerConfig":
@@ -202,6 +232,10 @@ class GrayBoxRunRequest(BaseModel):
     case_ids: list[str] | None = None
     policy: AttackPolicy = Field(default_factory=AttackPolicy)
     planner: PlannerConfig = Field(default_factory=PlannerConfig)
+    test_principal_refs: list[str] = Field(
+        default_factory=lambda: ["default-test-principal"],
+        min_length=1,
+    )
     baseline_run_id: str | None = None
 
 
