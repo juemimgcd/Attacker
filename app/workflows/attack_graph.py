@@ -29,6 +29,7 @@ from app.schemas.graybox_schema import (
     GrayBoxOutcome,
     PlannerContext,
     PlannerDecision,
+    PlannerResult,
     PlannerUsage,
     PolicyGateResult,
     ToolPolicyDecision,
@@ -81,7 +82,9 @@ class AttackGraph:
         builder.add_node("plan_next_case", self.plan_next_case)
         builder.add_node("finish_gate", self.finish_gate)
         builder.add_node("policy_gate", self.policy_gate)
+        builder.add_node("prepare_human_review", self.prepare_human_review)
         builder.add_node("human_review", self.human_review)
+        builder.add_node("planner_pause", self.planner_pause)
         builder.add_node("execute", self.execute)
         builder.add_node("normalize_observation", self.normalize_observation)
         builder.add_node("skip", self.skip)
@@ -101,7 +104,7 @@ class AttackGraph:
                 "retry": "plan_next_case",
                 "finish": "finish_gate",
                 "finalize": "finalize",
-                "pause": END,
+                "pause": "planner_pause",
             },
         )
         builder.add_conditional_edges(
@@ -112,10 +115,24 @@ class AttackGraph:
         builder.add_conditional_edges(
             "policy_gate",
             self._after_policy,
-            {"review": "human_review", "execute": "execute", "skip": "skip"},
+            {
+                "review": "prepare_human_review",
+                "execute": "execute",
+                "skip": "skip",
+                "finalize": "finalize",
+            },
         )
+        builder.add_edge("prepare_human_review", "human_review")
         builder.add_edge("human_review", "policy_gate")
-        builder.add_edge("execute", "normalize_observation")
+        builder.add_edge("planner_pause", "build_candidates")
+        builder.add_conditional_edges(
+            "execute",
+            self._after_execute,
+            {
+                "normalize": "normalize_observation",
+                "finalize": "finalize",
+            },
+        )
         builder.add_edge("normalize_observation", "evaluate")
         builder.add_edge("evaluate", "persist")
         builder.add_edge("persist", "update_facts")
@@ -137,6 +154,11 @@ class AttackGraph:
             for tag in case.coverage_tags or [case.category]:
                 coverage.setdefault(tag, CoverageStatus.not_started.value)
         return {
+            "goal_id": state.get(
+                "goal_id",
+                f"adaptive_graybox:{state['run_id']}",
+            ),
+            "checkpoint_ref": (state.get("checkpoint_ref") or f"langgraph:{state['thread_id']}"),
             "completed_case_ids": state.get("completed_case_ids", []),
             "denied_action_ids": state.get("denied_action_ids", []),
             "candidate_snapshot_id": state.get("candidate_snapshot_id"),
@@ -169,6 +191,7 @@ class AttackGraph:
             "planner_latency_ms": state.get("planner_latency_ms", 0),
             "planner_estimated_cost": state.get("planner_estimated_cost", 0),
             "planner_failures": state.get("planner_failures", 0),
+            "planner_fallback_snapshot": state.get("planner_fallback_snapshot"),
             "decision_history": state.get("decision_history", []),
             "target_call_count": state.get("target_call_count", 0),
             "target_transport_failure_count": state.get(
@@ -194,6 +217,7 @@ class AttackGraph:
             max_target_calls=runtime.policy.max_target_calls,
             max_provider_calls=runtime.policy.max_provider_calls,
             max_duration_seconds=runtime.policy.max_duration_seconds,
+            max_cost=runtime.policy.max_cost,
             steps_used=min(state["graph_step_count"], runtime.policy.max_steps),
             target_calls_used=min(
                 state["target_call_count"],
@@ -204,6 +228,7 @@ class AttackGraph:
                 runtime.policy.max_provider_calls,
             ),
             elapsed_seconds=min(elapsed, runtime.policy.max_duration_seconds),
+            cost_used=Decimal(str(state["planner_estimated_cost"])),
         )
         actions = self.candidate_builder.actions_from_cases(
             cases=runtime.cases.values(),
@@ -241,6 +266,9 @@ class AttackGraph:
         }
 
     async def plan_next_case(self, state: AttackGraphState) -> dict[str, Any]:
+        external_stop = await self._external_stop(state)
+        if external_stop is not None:
+            return external_stop
         runtime = self.runtime_registry.get(state["run_id"])
         elapsed = (datetime.now(UTC) - runtime.started_at).total_seconds()
         if elapsed >= runtime.policy.max_duration_seconds:
@@ -248,6 +276,16 @@ class AttackGraph:
                 "next_action": "finalize",
                 "status": "aborted",
                 "terminal_reason": "run duration budget exhausted",
+                "stop_reason": "budget_exhausted",
+            }
+        if (
+            runtime.policy.max_cost is not None
+            and Decimal(str(state["planner_estimated_cost"])) >= runtime.policy.max_cost
+        ):
+            return {
+                "next_action": "finalize",
+                "status": "aborted",
+                "terminal_reason": "planner cost budget exhausted",
                 "stop_reason": "budget_exhausted",
             }
         remaining_steps = runtime.policy.max_steps - state["graph_step_count"]
@@ -270,97 +308,146 @@ class AttackGraph:
         )
         planner_index = state["planner_call_count"] + 1
         operation_id = f"{state['run_id']}:planner:{planner_index}"
-        remaining_provider_calls = max(
-            runtime.policy.max_provider_calls - state["provider_call_count"],
-            0,
-        )
-        if runtime.planner.requires_provider and remaining_provider_calls == 0:
-            usage = PlannerUsage()
-            planner_error_event_id = await self.repository.record_planner_error(
-                run_id=state["run_id"],
-                operation_id=operation_id,
-                error_type="provider_budget_exhausted",
-                provider_id=runtime.planner.provider_id,
-                model_id=runtime.planner.model_id,
-                usage=usage,
-                call_snapshot=None,
-            )
+        persisted = await self.repository.load_planner_outcome(operation_id)
+        recovered_outcome = persisted is not None
+        if persisted is not None and persisted["event_type"] == "planner_error":
+            evidence = persisted["evidence"]
+            try:
+                usage = PlannerUsage.model_validate(evidence.get("usage", {}))
+                error_category = str(evidence.get("error_type", "planner_error"))
+            except (ValueError, TypeError):
+                usage = PlannerUsage()
+                error_category = "persisted_planner_outcome_invalid"
             return await self._handle_planner_unavailable(
                 state=state,
                 snapshot=snapshot,
                 planner_index=planner_index,
                 usage=usage,
-                error_category="provider_budget_exhausted",
-                planner_event_id=planner_error_event_id,
+                error_category=error_category,
+                planner_event_id=str(persisted["event_id"]),
             )
-        try:
-            result = await runtime.planner.plan(
-                context,
-                operation_id=operation_id,
-                max_physical_attempts=max(remaining_provider_calls, 1),
+        if persisted is not None:
+            evidence = persisted["evidence"]
+            try:
+                result = PlannerResult.model_validate(
+                    {
+                        "decision": evidence["decision"],
+                        "usage": evidence["usage"],
+                        "backend": evidence["backend"],
+                        "call_snapshot": evidence["call_snapshot"],
+                    }
+                )
+            except (ValueError, KeyError, TypeError):
+                return await self._handle_planner_unavailable(
+                    state=state,
+                    snapshot=snapshot,
+                    planner_index=planner_index,
+                    usage=PlannerUsage(),
+                    error_category="persisted_planner_outcome_invalid",
+                    planner_event_id=str(persisted["event_id"]),
+                )
+            planner_event_id = str(persisted["event_id"])
+            rejection_reason = (
+                str(evidence.get("rejection_reason") or "planner_rejected")
+                if persisted["event_type"] == "planner_rejected"
+                else None
             )
-        except PlannerAdapterError as exc:
-            planner_error_event_id = await self.repository.record_planner_error(
-                run_id=state["run_id"],
-                operation_id=operation_id,
-                error_type=exc.error_category,
-                provider_id=exc.provider_id,
-                model_id=exc.model_id,
-                usage=exc.usage,
-                call_snapshot=exc.call_snapshot,
+        else:
+            remaining_provider_calls = max(
+                runtime.policy.max_provider_calls - state["provider_call_count"],
+                0,
             )
-            return await self._handle_planner_unavailable(
-                state=state,
-                snapshot=snapshot,
-                planner_index=planner_index,
-                usage=exc.usage,
-                error_category=exc.error_category,
-                planner_event_id=planner_error_event_id,
-            )
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-            usage = PlannerUsage()
-            planner_error_event_id = await self.repository.record_planner_error(
-                run_id=state["run_id"],
-                operation_id=operation_id,
-                error_type=type(exc).__name__,
-                provider_id=runtime.planner.provider_id,
-                model_id=runtime.planner.model_id,
-                usage=usage,
-                call_snapshot=None,
-            )
-            return await self._handle_planner_unavailable(
-                state=state,
-                snapshot=snapshot,
-                planner_index=planner_index,
-                usage=usage,
-                error_category=type(exc).__name__,
-                planner_event_id=planner_error_event_id,
-            )
+            if runtime.planner.requires_provider and remaining_provider_calls == 0:
+                usage = PlannerUsage()
+                planner_error_event_id = await self.repository.record_planner_error(
+                    run_id=state["run_id"],
+                    operation_id=operation_id,
+                    error_type="provider_budget_exhausted",
+                    provider_id=runtime.planner.provider_id,
+                    model_id=runtime.planner.model_id,
+                    usage=usage,
+                    call_snapshot=None,
+                )
+                return await self._handle_planner_unavailable(
+                    state=state,
+                    snapshot=snapshot,
+                    planner_index=planner_index,
+                    usage=usage,
+                    error_category="provider_budget_exhausted",
+                    planner_event_id=planner_error_event_id,
+                )
+            try:
+                result = await runtime.planner.plan(
+                    context,
+                    operation_id=operation_id,
+                    max_physical_attempts=max(remaining_provider_calls, 1),
+                )
+            except PlannerAdapterError as exc:
+                planner_error_event_id = await self.repository.record_planner_error(
+                    run_id=state["run_id"],
+                    operation_id=operation_id,
+                    error_type=exc.error_category,
+                    provider_id=exc.provider_id,
+                    model_id=exc.model_id,
+                    usage=exc.usage,
+                    call_snapshot=exc.call_snapshot,
+                )
+                return await self._handle_planner_unavailable(
+                    state=state,
+                    snapshot=snapshot,
+                    planner_index=planner_index,
+                    usage=exc.usage,
+                    error_category=exc.error_category,
+                    planner_event_id=planner_error_event_id,
+                )
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+                usage = PlannerUsage()
+                planner_error_event_id = await self.repository.record_planner_error(
+                    run_id=state["run_id"],
+                    operation_id=operation_id,
+                    error_type=type(exc).__name__,
+                    provider_id=runtime.planner.provider_id,
+                    model_id=runtime.planner.model_id,
+                    usage=usage,
+                    call_snapshot=None,
+                )
+                return await self._handle_planner_unavailable(
+                    state=state,
+                    snapshot=snapshot,
+                    planner_index=planner_index,
+                    usage=usage,
+                    error_category=type(exc).__name__,
+                    planner_event_id=planner_error_event_id,
+                )
+
+            decision = result.decision
+            rejection_reason = self._validate_decision(snapshot, decision)
+            if rejection_reason is None:
+                rejection_reason = await self.repository.validate_planner_references(
+                    run_id=state["run_id"],
+                    evidence_refs=decision.evidence_refs,
+                    hypothesis_refs=decision.hypothesis_refs,
+                )
 
         decision = result.decision
-        rejection_reason = self._validate_decision(snapshot, decision)
-        if rejection_reason is None:
-            rejection_reason = await self.repository.validate_planner_references(
-                run_id=state["run_id"],
-                evidence_refs=decision.evidence_refs,
-                hypothesis_refs=decision.hypothesis_refs,
-            )
         history = [
             *state["decision_history"],
             decision.candidate_id or decision.action,
         ]
         repeated = Counter(history)[history[-1]]
-        if repeated > runtime.policy.max_repeated_decisions:
+        if not recovered_outcome and repeated > runtime.policy.max_repeated_decisions:
             rejection_reason = "planner repeated the same decision beyond the configured limit"
-        planner_event_id = await self.repository.record_planner_result(
-            run_id=state["run_id"],
-            operation_id=operation_id,
-            result=result,
-            accepted=rejection_reason is None,
-            rejection_reason=rejection_reason,
-        )
+        if not recovered_outcome:
+            planner_event_id = await self.repository.record_planner_result(
+                run_id=state["run_id"],
+                operation_id=operation_id,
+                result=result,
+                accepted=rejection_reason is None,
+                rejection_reason=rejection_reason,
+            )
         planner_tokens = result.usage.input_tokens + result.usage.output_tokens
         provider_calls = state["provider_call_count"] + result.usage.physical_attempts
+        planner_estimated_cost = state["planner_estimated_cost"] + result.usage.estimated_cost
         if rejection_reason is not None:
             return await self._handle_planner_unavailable(
                 state=state,
@@ -371,15 +458,30 @@ class AttackGraph:
                 planner_event_id=planner_event_id,
                 decision_history=history,
             )
+        if (
+            runtime.policy.max_cost is not None
+            and Decimal(str(planner_estimated_cost)) >= runtime.policy.max_cost
+        ):
+            return {
+                "planner_call_count": planner_index,
+                "provider_call_count": provider_calls,
+                "planner_token_count": state["planner_token_count"] + planner_tokens,
+                "planner_latency_ms": (state["planner_latency_ms"] + result.usage.latency_ms),
+                "planner_estimated_cost": planner_estimated_cost,
+                "planner_failures": 0,
+                "decision_history": history,
+                "next_action": "finalize",
+                "status": "aborted",
+                "terminal_reason": "planner cost budget exhausted",
+                "stop_reason": "budget_exhausted",
+            }
         if decision.action == "finish":
             return {
                 "planner_call_count": planner_index,
                 "provider_call_count": provider_calls,
                 "planner_token_count": state["planner_token_count"] + planner_tokens,
                 "planner_latency_ms": (state["planner_latency_ms"] + result.usage.latency_ms),
-                "planner_estimated_cost": (
-                    state["planner_estimated_cost"] + result.usage.estimated_cost
-                ),
+                "planner_estimated_cost": (planner_estimated_cost),
                 "planner_failures": 0,
                 "decision_history": history,
                 "next_action": "finish",
@@ -410,9 +512,7 @@ class AttackGraph:
             "provider_call_count": provider_calls,
             "planner_token_count": state["planner_token_count"] + planner_tokens,
             "planner_latency_ms": state["planner_latency_ms"] + result.usage.latency_ms,
-            "planner_estimated_cost": (
-                state["planner_estimated_cost"] + result.usage.estimated_cost
-            ),
+            "planner_estimated_cost": (planner_estimated_cost),
             "planner_failures": 0,
             "decision_history": history,
             "current_case_id": case_id,
@@ -437,6 +537,9 @@ class AttackGraph:
         }
 
     async def finish_gate(self, state: AttackGraphState) -> dict[str, Any]:
+        external_stop = await self._external_stop(state)
+        if external_stop is not None:
+            return external_stop
         runtime = self.runtime_registry.get(state["run_id"])
         snapshot = await self.repository.load_candidate_snapshot(
             run_id=state["run_id"],
@@ -489,6 +592,9 @@ class AttackGraph:
         }
 
     async def policy_gate(self, state: AttackGraphState) -> dict[str, Any]:
+        external_stop = await self._external_stop(state)
+        if external_stop is not None:
+            return external_stop
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         approval = await self.repository.get_approval(
@@ -544,7 +650,7 @@ class AttackGraph:
             "recovery_pending": False,
         }
 
-    async def human_review(self, state: AttackGraphState) -> dict[str, Any]:
+    async def prepare_human_review(self, state: AttackGraphState) -> dict[str, Any]:
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         approval = await self.repository.ensure_approval(
@@ -552,28 +658,78 @@ class AttackGraph:
             case=case,
             operation_id=f"{state['current_operation_id']}:approval",
         )
+        await self.repository.mark_waiting_approval(
+            run_id=state["run_id"],
+            approval_id=approval.id,
+            checkpoint_ref=str(state["checkpoint_ref"]),
+        )
+        return {
+            "approval_id": approval.id,
+            "approval_status": approval.status,
+            "status": "waiting_approval",
+            "terminal_reason": None,
+            "stop_reason": None,
+        }
+
+    async def human_review(self, state: AttackGraphState) -> dict[str, Any]:
+        approval_id = str(state["approval_id"])
+        approval = await self.repository.get_approval(
+            run_id=state["run_id"],
+            approval_id=approval_id,
+        )
+        if approval is None:
+            raise LookupError(f"approval {approval_id} not found")
         resume_payload = interrupt(
             {
-                "approval_id": approval.id,
+                "approval_id": approval_id,
                 "run_id": state["run_id"],
-                "case_id": case.id,
+                "case_id": state["current_case_id"],
                 "risk_summary": approval.risk_summary,
             }
         )
         resolved = await self.repository.get_approval(
             run_id=state["run_id"],
-            approval_id=approval.id,
+            approval_id=approval_id,
         )
         return {
-            "approval_id": approval.id,
+            "approval_id": approval_id,
             "approval_status": resolved.status if resolved else "pending",
             "next_action": "policy",
+            "status": "running",
+            "terminal_reason": None,
+            "stop_reason": None,
+            "recovery_pending": bool(
+                isinstance(resume_payload, dict) and resume_payload.get("recovered")
+            ),
+        }
+
+    async def planner_pause(self, state: AttackGraphState) -> dict[str, Any]:
+        resume_payload = interrupt(
+            {
+                "run_id": state["run_id"],
+                "thread_id": state["thread_id"],
+                "fallback": state.get("planner_fallback_snapshot"),
+            }
+        )
+        await self.repository.mark_run_running(
+            run_id=state["run_id"],
+            operation_id=(f"{state['run_id']}:planner:{state['planner_call_count']}:resumed"),
+            event_type="planner_resumed",
+        )
+        return {
+            "status": "running",
+            "terminal_reason": None,
+            "stop_reason": None,
+            "next_action": "build",
             "recovery_pending": bool(
                 isinstance(resume_payload, dict) and resume_payload.get("recovered")
             ),
         }
 
     async def execute(self, state: AttackGraphState) -> dict[str, Any]:
+        external_stop = await self._external_stop(state)
+        if external_stop is not None:
+            return external_stop
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         operation_id = str(state["current_operation_id"])
@@ -585,7 +741,7 @@ class AttackGraph:
         )
         try:
             await self.repository.load_target_execution(operation_id)
-            return {"current_step_id": step.id, "next_action": "evaluate"}
+            return {"current_step_id": step.id, "next_action": "normalize"}
         except LookupError:
             pass
 
@@ -847,7 +1003,7 @@ class AttackGraph:
         )
         control_state = AttackState(
             run_id=state["run_id"],
-            goal_id=f"adaptive:{state['run_id']}",
+            goal_id=state["goal_id"],
             test_principal_refs=state["test_principal_refs"],
             candidate_snapshot_id=state.get("candidate_snapshot_id"),
             candidate_action_ids=state["candidate_action_ids"],
@@ -862,6 +1018,7 @@ class AttackGraph:
                 max_target_calls=runtime.policy.max_target_calls,
                 max_provider_calls=runtime.policy.max_provider_calls,
                 max_duration_seconds=runtime.policy.max_duration_seconds,
+                max_cost=runtime.policy.max_cost,
                 steps_used=min(state["graph_step_count"], runtime.policy.max_steps),
                 target_calls_used=min(
                     state["target_call_count"],
@@ -890,9 +1047,15 @@ class AttackGraph:
                 target_transport_failed=state["last_target_transport_failed"],
             ),
         )
+        control_flags = await self.repository.load_control_flags(state["run_id"])
         stop_decision = self.run_control.evaluate_stop(
             control_state,
-            StopContext(has_executable_candidates=True),
+            StopContext(
+                cancelled="run_cancel_requested" in control_flags,
+                target_authorization_revoked=("target_authorization_revoked" in control_flags),
+                policy_termination_requested=("policy_termination_requested" in control_flags),
+                has_executable_candidates=True,
+            ),
             StopLimits(
                 max_consecutive_no_gain_steps=(runtime.policy.max_no_information_gain_steps),
                 max_repeated_state_count=runtime.policy.max_repeated_states,
@@ -906,7 +1069,12 @@ class AttackGraph:
         if stop_decision.action == StopAction.stop:
             stop_reason = stop_decision.stop_reason.value if stop_decision.stop_reason else None
             terminal_reason = stop_decision.reason_code
-            status = "completed" if stop_reason == "completed" else "aborted"
+            if stop_reason == "completed":
+                status = "completed"
+            elif stop_reason == "cancelled":
+                status = "cancelled"
+            else:
+                status = "aborted"
         elif runtime.policy.stop_on_critical and any(
             summary["risk_level"] == "critical" for summary in state["finding_summaries"]
         ):
@@ -970,7 +1138,7 @@ class AttackGraph:
         )
         control_state = AttackState(
             run_id=state["run_id"],
-            goal_id=f"adaptive:{state['run_id']}",
+            goal_id=state["goal_id"],
             test_principal_refs=state["test_principal_refs"],
             candidate_snapshot_id=snapshot.snapshot_id,
             candidate_action_ids=[candidate.action_id for candidate in snapshot.candidates],
@@ -985,6 +1153,7 @@ class AttackGraph:
                 max_target_calls=runtime.policy.max_target_calls,
                 max_provider_calls=runtime.policy.max_provider_calls,
                 max_duration_seconds=runtime.policy.max_duration_seconds,
+                max_cost=runtime.policy.max_cost,
                 steps_used=min(state["graph_step_count"], runtime.policy.max_steps),
                 target_calls_used=min(
                     state["target_call_count"],
@@ -998,7 +1167,7 @@ class AttackGraph:
                 cost_used=Decimal(str(state["planner_estimated_cost"] + usage.estimated_cost)),
             ),
             status=RunStatus.running,
-            checkpoint_ref=f"langgraph:{state['thread_id']}",
+            checkpoint_ref=state.get("checkpoint_ref"),
             planner_fallback_mode=runtime.policy.planner_fallback_mode,
             last_state_fingerprint=state.get("last_state_fingerprint"),
             consecutive_no_gain_steps=state["consecutive_no_gain_steps"],
@@ -1042,6 +1211,11 @@ class AttackGraph:
             "planner_latency_ms": state["planner_latency_ms"] + usage.latency_ms,
             "planner_estimated_cost": (state["planner_estimated_cost"] + usage.estimated_cost),
             "planner_failures": fallback_state.planner_failure_count,
+            "planner_fallback_snapshot": (
+                fallback_state.planner_fallback_snapshot.model_dump(mode="json")
+                if fallback_state.planner_fallback_snapshot is not None
+                else None
+            ),
             "decision_history": decision_history or state["decision_history"],
         }
         if fallback.action == FallbackAction.pause:
@@ -1049,6 +1223,8 @@ class AttackGraph:
             await self.repository.pause_run(
                 run_id=state["run_id"],
                 reason=terminal_reason,
+                checkpoint_ref=str(state["checkpoint_ref"]),
+                operation_id=f"{state['run_id']}:planner:{planner_index}:paused",
             )
             return {
                 **common,
@@ -1122,6 +1298,33 @@ class AttackGraph:
             "stop_reason": None,
         }
 
+    async def _external_stop(
+        self,
+        state: AttackGraphState,
+    ) -> dict[str, Any] | None:
+        flags = await self.repository.load_control_flags(state["run_id"])
+        if "run_cancel_requested" in flags:
+            evidence = flags["run_cancel_requested"]
+            return {
+                "next_action": "finalize",
+                "status": "cancelled",
+                "terminal_reason": str(evidence.get("reason", "run cancelled")),
+                "stop_reason": "cancelled",
+            }
+        for event_type in (
+            "target_authorization_revoked",
+            "policy_termination_requested",
+        ):
+            if event_type in flags:
+                evidence = flags[event_type]
+                return {
+                    "next_action": "finalize",
+                    "status": "aborted",
+                    "terminal_reason": str(evidence.get("reason", event_type)),
+                    "stop_reason": "policy_terminated",
+                }
+        return None
+
     @staticmethod
     def _validate_decision(
         snapshot: CandidateSnapshot,
@@ -1162,6 +1365,10 @@ class AttackGraph:
 
     @staticmethod
     def _after_policy(state: AttackGraphState) -> str:
+        return state["next_action"]
+
+    @staticmethod
+    def _after_execute(state: AttackGraphState) -> str:
         return state["next_action"]
 
     @staticmethod

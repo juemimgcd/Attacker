@@ -56,9 +56,11 @@ Planner 和可选 Model Judge 通过窄 `model.inference.v1` 契约调用模型�
 
 - Provider 不能创建 Candidate、授权、Finding、停止条件或 Graph 路由；
 - 每次物理请求（包括 Provider 内部重试）都计入独立 Provider 调用预算；
+- Provider 返回的估算成本计入 Run 的 `max_cost` 硬预算；
 - 每次尝试只记录状态、错误类别和延迟，不把凭据或原始错误响应写入事件；
 - Planner 与 Model Judge 使用独立 Prompt Profile、模型身份和用量统计；
 - 确定性 Planner 不调用模型，物理 Provider 调用数为零。
+- checkpoint 恢复会先读取稳定 operation 对应的 Planner Event，不重复模型请求。
 
 ## 环境要求
 
@@ -170,7 +172,8 @@ Content-Type: application/json
     "max_physical_attempts": 1
   },
   "policy": {
-    "max_provider_calls": 20
+    "max_provider_calls": 20,
+    "max_cost": "0.50"
   }
 }
 ```
@@ -197,6 +200,48 @@ Content-Type: application/json
 ```
 
 进程重启后恢复审批时需要重新提供 Target；原始凭据不会写入 checkpoint 或业务数据库。
+
+等待审批时 Run 状态为 `waiting_approval`，且没有终止 `stop_reason`。Planner 按策略进入
+`pause` 时，Run 状态为 `paused`，可恢复同一个 LangGraph thread：
+
+```http
+POST /runs/{run_id}/resume
+Content-Type: application/json
+
+{
+  "target": {
+    "name": "local-agent",
+    "endpoint": "http://localhost:9000/agent"
+  },
+  "planner": {
+    "backend": "deterministic"
+  }
+}
+```
+
+仅当进程重启后需要重新注入运行时 Target/Planner 配置时才需要提供这些字段。恢复配置
+必须与 Run 快照中的 Target 名称、地址以及 Planner backend/provider/model 匹配。
+
+授权方可以请求三种有界硬停止，调用方不能直接指定 Graph 路由或任意停止原因：
+
+```http
+POST /runs/{run_id}/control
+Content-Type: application/json
+
+{
+  "action": "cancel",
+  "reason": "authorized evaluation window ended"
+}
+```
+
+`action` 可取：
+
+- `cancel`；
+- `revoke_target_authorization`；
+- `terminate_policy`。
+
+控制请求持久化为幂等 Event，并在下一次 Planner、Approval 或 Target 副作用边界前由 Core
+执行。已经在 `waiting_approval` 或 `paused` 的 Run 会直接安全结束。
 
 ### 带状态运行
 

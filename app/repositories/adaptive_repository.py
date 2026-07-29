@@ -30,6 +30,7 @@ from app.schemas.adaptive_agent_schema import (
 )
 from app.schemas.attack_state_schema import CoverageStatus
 from app.schemas.graybox_schema import (
+    AdaptiveControlAction,
     AttackPolicy,
     GrayBoxCase,
     GrayBoxEvaluationResult,
@@ -130,6 +131,7 @@ class AdaptiveRepository:
                     operation_id=f"{run_id}:run_started",
                     event_type="run_started",
                     evidence_json={
+                        "goal_id": f"{mode}:{run_id}",
                         "mode": mode,
                         "thread_id": thread_id,
                         "dataset_sha256": dataset.sha256,
@@ -574,6 +576,85 @@ class AdaptiveRepository:
             run.planner_token_count += result.usage.input_tokens + result.usage.output_tokens
             return event_id
 
+    async def load_planner_outcome(
+        self,
+        operation_id: str,
+    ) -> dict[str, Any] | None:
+        async with self.session_factory() as session:
+            event = await session.scalar(
+                select(EventRecord).where(EventRecord.operation_id == operation_id)
+            )
+            if event is None or event.event_type not in {
+                "planner_decided",
+                "planner_rejected",
+                "planner_error",
+            }:
+                return None
+            return {
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "evidence": event.evidence_json,
+            }
+
+    async def record_control_request(
+        self,
+        *,
+        run_id: str,
+        action: AdaptiveControlAction,
+        reason: str,
+    ) -> str:
+        event_type = {
+            AdaptiveControlAction.cancel: "run_cancel_requested",
+            AdaptiveControlAction.revoke_target_authorization: ("target_authorization_revoked"),
+            AdaptiveControlAction.terminate_policy: "policy_termination_requested",
+        }[action]
+        async with self.session_factory.begin() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            if not run.mode.startswith("adaptive"):
+                raise ValueError("external Agent control requires an adaptive run")
+            operation_id = f"{run_id}:control:{action.value}"
+            existing = await session.scalar(
+                select(EventRecord).where(EventRecord.operation_id == operation_id)
+            )
+            if existing is not None:
+                if existing.evidence_json.get("reason") != reason:
+                    raise ValueError("control action already exists with a different reason")
+                return existing.id
+            if run.status in {"completed", "failed", "aborted", "cancelled"}:
+                raise ValueError(f"terminal run {run_id} cannot accept control requests")
+            return await self._append_event(
+                session,
+                run_id=run_id,
+                operation_id=operation_id,
+                event_type=event_type,
+                evidence={
+                    "action": action.value,
+                    "reason": reason,
+                },
+            )
+
+    async def load_control_flags(self, run_id: str) -> dict[str, Any]:
+        async with self.session_factory() as session:
+            events = (
+                await session.scalars(
+                    select(EventRecord)
+                    .where(EventRecord.run_id == run_id)
+                    .where(
+                        EventRecord.event_type.in_(
+                            {
+                                "run_cancel_requested",
+                                "target_authorization_revoked",
+                                "policy_termination_requested",
+                            }
+                        )
+                    )
+                    .order_by(EventRecord.sequence)
+                )
+            ).all()
+            return {event.event_type: event.evidence_json for event in events}
+
     async def record_planner_error(
         self,
         *,
@@ -712,6 +793,32 @@ class AdaptiveRepository:
             ).all()
             return [self._approval_dict(approval) for approval in approvals]
 
+    async def mark_waiting_approval(
+        self,
+        *,
+        run_id: str,
+        approval_id: str,
+        checkpoint_ref: str,
+    ) -> None:
+        async with self.session_factory.begin() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            if run.status in {"completed", "failed", "aborted", "cancelled"}:
+                raise ValueError(f"terminal run {run_id} cannot wait for approval")
+            run.status = "waiting_approval"
+            run.terminal_reason = None
+            await self._append_event(
+                session,
+                run_id=run_id,
+                operation_id=f"{run_id}:approval_wait:{approval_id}",
+                event_type="run_waiting_approval",
+                evidence={
+                    "approval_id": approval_id,
+                    "checkpoint_ref": checkpoint_ref,
+                },
+            )
+
     async def resolve_approval(
         self,
         *,
@@ -734,6 +841,10 @@ class AdaptiveRepository:
             if approval.status != "pending":
                 if approval.status != desired_status:
                     raise ValueError(f"approval already resolved as {approval.status}")
+                run = await session.get(EvaluationRunRecord, run_id)
+                if run is not None and run.status == "waiting_approval":
+                    run.status = "running"
+                    run.terminal_reason = None
                 return self._approval_dict(approval)
 
             approval.status = desired_status
@@ -747,6 +858,12 @@ class AdaptiveRepository:
                 event_type="approval_resolved",
                 evidence=self._approval_dict(approval),
             )
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            if run.status == "waiting_approval":
+                run.status = "running"
+                run.terminal_reason = None
             return self._approval_dict(approval)
 
     async def ensure_step(
@@ -1119,7 +1236,7 @@ class AdaptiveRepository:
             run = await session.get(EvaluationRunRecord, run_id)
             if run is None:
                 raise LookupError(f"run {run_id} not found")
-            if run.status in {"completed", "failed", "aborted"}:
+            if run.status in {"completed", "failed", "aborted", "cancelled"}:
                 return
             steps = (
                 await session.scalars(select(RunStepRecord).where(RunStepRecord.run_id == run_id))
@@ -1155,15 +1272,51 @@ class AdaptiveRepository:
         *,
         run_id: str,
         reason: str,
+        checkpoint_ref: str,
+        operation_id: str,
     ) -> None:
         async with self.session_factory.begin() as session:
             run = await session.get(EvaluationRunRecord, run_id)
             if run is None:
                 raise LookupError(f"run {run_id} not found")
-            if run.status in {"completed", "failed", "aborted"}:
+            if run.status in {"completed", "failed", "aborted", "cancelled"}:
                 return
             run.status = "paused"
             run.terminal_reason = reason
+            await self._append_event(
+                session,
+                run_id=run_id,
+                operation_id=operation_id,
+                event_type="run_paused",
+                evidence={
+                    "reason": reason,
+                    "checkpoint_ref": checkpoint_ref,
+                    "stop_reason": None,
+                },
+            )
+
+    async def mark_run_running(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        event_type: str,
+    ) -> None:
+        async with self.session_factory.begin() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            if run.status in {"completed", "failed", "aborted", "cancelled"}:
+                raise ValueError(f"terminal run {run_id} cannot resume")
+            run.status = "running"
+            run.terminal_reason = None
+            await self._append_event(
+                session,
+                run_id=run_id,
+                operation_id=operation_id,
+                event_type=event_type,
+                evidence={"status": "running"},
+            )
 
     async def get_run(self, run_id: str) -> EvaluationRunRecord:
         async with self.session_factory() as session:
