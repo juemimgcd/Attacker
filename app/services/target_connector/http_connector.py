@@ -39,9 +39,7 @@ class HTTPTargetConnector:
     def build_headers(self, target: TargetConfig) -> dict[str, str]:
         headers = dict(target.headers)
         if target.auth.type == "bearer" and target.auth.token:
-            headers[target.auth.header_name] = (
-                f"{target.auth.token_prefix} {target.auth.token}"
-            )
+            headers[target.auth.header_name] = f"{target.auth.token_prefix} {target.auth.token}"
         return headers
 
     # 异步调用目标 Agent 并封装请求体、响应内容、耗时和错误。
