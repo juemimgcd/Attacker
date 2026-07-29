@@ -52,6 +52,8 @@ class PlannerFallbackSnapshot(BaseModel):
     reason: str = Field(min_length=1)
     actual_model_id: str = Field(min_length=1)
     actual_provider_id: str = Field(min_length=1)
+
+
 # 定义运行预算上限及其当前消耗快照。
 class RunBudgetSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)

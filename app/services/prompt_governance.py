@@ -22,9 +22,7 @@ _SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
     r"\s*[:=]\s*(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
-_EMAIL_PATTERN = re.compile(
-    r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"
-)
+_EMAIL_PATTERN = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _PHONE_PATTERN = re.compile(r"(?<!\w)\+?\d[\d ()-]{7,}\d(?!\w)")
 
 
@@ -59,9 +57,7 @@ _CORE_TEMPLATES = {
 class PromptGovernanceService:
     def __init__(self, profiles: list[PromptProfile] | None = None) -> None:
         selected_profiles = profiles or self._default_profiles()
-        self._profiles = {
-            profile.profile_id: profile for profile in selected_profiles
-        }
+        self._profiles = {profile.profile_id: profile for profile in selected_profiles}
         if len(self._profiles) != len(selected_profiles):
             raise ValueError("prompt profile IDs must be unique")
 
@@ -152,9 +148,7 @@ class PromptGovernanceService:
     # 读取版本控制资源并在每次构建前验证内容 checksum。
     def _load_core_template(self, profile: PromptProfile) -> str:
         template = _CORE_TEMPLATES[profile.task]
-        content = (_PROMPT_ROOT / template.filename).read_text(
-            encoding="utf-8"
-        )
+        content = (_PROMPT_ROOT / template.filename).read_text(encoding="utf-8")
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if checksum != profile.template_checksum:
             raise ValueError("Core prompt template checksum mismatch")
@@ -178,9 +172,7 @@ class PromptGovernanceService:
 
             summary = self._redact(observation.summary)
             if len(summary) > profile.limits.max_chars_per_observation:
-                raise ValueError(
-                    "observation summary exceeds prompt profile limit"
-                )
+                raise ValueError("observation summary exceeds prompt profile limit")
             governed.append(
                 GovernedObservation(
                     observation_ref=observation.observation_ref,
@@ -225,8 +217,7 @@ class PromptGovernanceService:
             "schema_version": snapshot.schema_version,
             "trusted_fact_refs": snapshot.fact_refs,
             "untrusted_observations": [
-                observation.model_dump()
-                for observation in snapshot.observations
+                observation.model_dump() for observation in snapshot.observations
             ],
         }
         return [
@@ -248,9 +239,7 @@ class PromptGovernanceService:
         messages: list[PromptMessage],
         profile: PromptProfile,
     ) -> None:
-        input_bytes = sum(
-            len(message.content.encode("utf-8")) for message in messages
-        )
+        input_bytes = sum(len(message.content.encode("utf-8")) for message in messages)
         if input_bytes > profile.limits.max_total_input_tokens:
             raise ValueError("prompt input exceeds conservative token limit")
 
@@ -269,15 +258,9 @@ class PromptGovernanceService:
             PromptProfile(
                 profile_id="core.planner.v1",
                 task=PromptTask.planner,
-                template_name=_CORE_TEMPLATES[
-                    PromptTask.planner
-                ].name,
-                template_version=_CORE_TEMPLATES[
-                    PromptTask.planner
-                ].version,
-                template_checksum=_CORE_TEMPLATES[
-                    PromptTask.planner
-                ].checksum,
+                template_name=_CORE_TEMPLATES[PromptTask.planner].name,
+                template_version=_CORE_TEMPLATES[PromptTask.planner].version,
+                template_checksum=_CORE_TEMPLATES[PromptTask.planner].checksum,
                 approved=True,
                 allowed_callers={"attacker_core"},
                 compatible_schema_versions={"planner-decision-v1"},
@@ -285,15 +268,9 @@ class PromptGovernanceService:
             PromptProfile(
                 profile_id="core.model_judge.v1",
                 task=PromptTask.model_judge,
-                template_name=_CORE_TEMPLATES[
-                    PromptTask.model_judge
-                ].name,
-                template_version=_CORE_TEMPLATES[
-                    PromptTask.model_judge
-                ].version,
-                template_checksum=_CORE_TEMPLATES[
-                    PromptTask.model_judge
-                ].checksum,
+                template_name=_CORE_TEMPLATES[PromptTask.model_judge].name,
+                template_version=_CORE_TEMPLATES[PromptTask.model_judge].version,
+                template_checksum=_CORE_TEMPLATES[PromptTask.model_judge].checksum,
                 approved=True,
                 allowed_callers={"attacker_core"},
                 compatible_schema_versions={"model-judge-v1"},
