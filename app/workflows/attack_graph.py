@@ -7,17 +7,24 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.repositories.adaptive_repository import AdaptiveRepository
+from app.schemas.adaptive_agent_schema import CandidateSnapshot, ObservationSource
+from app.schemas.attack_sample_schema import CaseKind
+from app.schemas.attack_state_schema import CoverageStatus, RunBudgetSnapshot
 from app.schemas.graybox_schema import (
-    CaseSummary,
     FindingSummary,
     GrayBoxExecutionResult,
     GrayBoxOutcome,
     PlannerContext,
+    PlannerDecision,
     PolicyGateResult,
     ToolPolicyDecision,
 )
+from app.services.candidate_builder import CandidateBuilder
+from app.services.finish_gate_service import FinishGateService
 from app.services.graybox_connector import GrayBoxConnector
 from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
+from app.services.hypothesis_service import HypothesisService
+from app.services.observation_normalizer import ObservationNormalizer
 from app.services.policy_service import PolicyService
 from app.services.tool_trace_adapter import ToolTraceAdapter
 from app.workflows.attack_state import AttackGraphState
@@ -34,6 +41,10 @@ class AttackGraph:
         self.repository = repository
         self.runtime_registry = runtime_registry
         self.policy_service = PolicyService()
+        self.candidate_builder = CandidateBuilder()
+        self.finish_gate_service = FinishGateService()
+        self.hypothesis_service = HypothesisService()
+        self.observation_normalizer = ObservationNormalizer()
         self.connector = GrayBoxConnector()
         self.trace_adapter = ToolTraceAdapter()
         self.evaluator = GrayBoxEvaluatorService()
@@ -42,21 +53,36 @@ class AttackGraph:
     def _build(self) -> StateGraph:
         builder = StateGraph(AttackGraphState)
         builder.add_node("initialize_run", self.initialize_run)
+        builder.add_node("build_candidates", self.build_candidates)
         builder.add_node("plan_next_case", self.plan_next_case)
+        builder.add_node("finish_gate", self.finish_gate)
         builder.add_node("policy_gate", self.policy_gate)
         builder.add_node("human_review", self.human_review)
         builder.add_node("execute", self.execute)
+        builder.add_node("normalize_observation", self.normalize_observation)
         builder.add_node("skip", self.skip)
         builder.add_node("evaluate", self.evaluate)
         builder.add_node("persist", self.persist)
+        builder.add_node("update_facts", self.update_facts)
         builder.add_node("decide_next", self.decide_next)
         builder.add_node("finalize", self.finalize)
         builder.add_edge(START, "initialize_run")
-        builder.add_edge("initialize_run", "plan_next_case")
+        builder.add_edge("initialize_run", "build_candidates")
+        builder.add_edge("build_candidates", "plan_next_case")
         builder.add_conditional_edges(
             "plan_next_case",
             self._after_plan,
-            {"policy": "policy_gate", "retry": "plan_next_case", "finalize": "finalize"},
+            {
+                "policy": "policy_gate",
+                "retry": "plan_next_case",
+                "finish": "finish_gate",
+                "finalize": "finalize",
+            },
+        )
+        builder.add_conditional_edges(
+            "finish_gate",
+            self._after_finish,
+            {"build": "build_candidates", "finalize": "finalize"},
         )
         builder.add_conditional_edges(
             "policy_gate",
@@ -64,21 +90,44 @@ class AttackGraph:
             {"review": "human_review", "execute": "execute", "skip": "skip"},
         )
         builder.add_edge("human_review", "policy_gate")
-        builder.add_edge("execute", "evaluate")
+        builder.add_edge("execute", "normalize_observation")
+        builder.add_edge("normalize_observation", "evaluate")
         builder.add_edge("evaluate", "persist")
-        builder.add_edge("persist", "decide_next")
+        builder.add_edge("persist", "update_facts")
+        builder.add_edge("update_facts", "decide_next")
         builder.add_edge("skip", "decide_next")
         builder.add_conditional_edges(
             "decide_next",
             self._after_decide,
-            {"plan": "plan_next_case", "finalize": "finalize"},
+            {"build": "build_candidates", "finalize": "finalize"},
         )
         builder.add_edge("finalize", END)
         return builder
 
     async def initialize_run(self, state: AttackGraphState) -> dict[str, Any]:
+        runtime = self.runtime_registry.get(state["run_id"])
+        facts = await self.repository.load_adaptive_facts(state["run_id"])
+        coverage = {tag: status.value for tag, status in facts["coverage"].items()}
+        for case in runtime.cases.values():
+            for tag in case.coverage_tags or [case.category]:
+                coverage.setdefault(tag, CoverageStatus.not_started.value)
         return {
             "completed_case_ids": state.get("completed_case_ids", []),
+            "denied_action_ids": state.get("denied_action_ids", []),
+            "candidate_snapshot_id": state.get("candidate_snapshot_id"),
+            "candidate_action_ids": state.get("candidate_action_ids", []),
+            "coverage": coverage,
+            "hypothesis_refs": [fact.hypothesis_ref for fact in facts["hypotheses"].values()],
+            "observation_refs": facts["observation_refs"],
+            "finding_refs": facts["finding_refs"],
+            "evidence_gaps": sorted(facts["evidence_gaps"]),
+            "action_repeat_counts": state.get("action_repeat_counts", {}),
+            "recent_similarity_keys": state.get("recent_similarity_keys", []),
+            "information_gain_refs": facts["information_gain_refs"],
+            "test_principal_refs": state.get(
+                "test_principal_refs",
+                ["default-test-principal"],
+            ),
             "finding_summaries": state.get("finding_summaries", []),
             "policy_event_ids": [],
             "planner_call_count": state.get("planner_call_count", 0),
@@ -92,6 +141,54 @@ class AttackGraph:
             "recovery_pending": state.get("recovery_pending", False),
         }
 
+    async def build_candidates(self, state: AttackGraphState) -> dict[str, Any]:
+        runtime = self.runtime_registry.get(state["run_id"])
+        facts = await self.repository.load_adaptive_facts(state["run_id"])
+        elapsed = (datetime.now(UTC) - runtime.started_at).total_seconds()
+        budget = RunBudgetSnapshot(
+            max_steps=runtime.policy.max_steps,
+            max_target_calls=runtime.policy.max_target_calls,
+            max_provider_calls=0,
+            max_duration_seconds=runtime.policy.max_duration_seconds,
+            steps_used=min(state["graph_step_count"], runtime.policy.max_steps),
+            target_calls_used=min(
+                state["target_call_count"],
+                runtime.policy.max_target_calls,
+            ),
+            elapsed_seconds=min(elapsed, runtime.policy.max_duration_seconds),
+        )
+        actions = self.candidate_builder.actions_from_cases(
+            cases=runtime.cases.values(),
+            target_id=state["target_id"],
+            test_principal_ref=state["test_principal_refs"][0],
+        )
+        snapshot = self.candidate_builder.build(
+            run_id=state["run_id"],
+            actions=actions,
+            policy=runtime.policy,
+            budget=budget,
+            completed_action_ids=set(state["completed_case_ids"]),
+            denied_action_ids=set(state["denied_action_ids"]),
+            action_repeat_counts=state["action_repeat_counts"],
+            coverage=facts["coverage"],
+            hypotheses=facts["hypotheses"],
+            evidence_gaps=facts["evidence_gaps"],
+            valid_test_principal_refs=set(state["test_principal_refs"]),
+            recent_similarity_keys=tuple(state["recent_similarity_keys"][-3:]),
+        )
+        await self.repository.record_candidate_snapshot(snapshot)
+        return {
+            "candidate_snapshot_id": snapshot.snapshot_id,
+            "candidate_action_ids": [candidate.action_id for candidate in snapshot.candidates],
+            "coverage": {tag: status.value for tag, status in facts["coverage"].items()},
+            "hypothesis_refs": [fact.hypothesis_ref for fact in facts["hypotheses"].values()],
+            "observation_refs": facts["observation_refs"],
+            "finding_refs": facts["finding_refs"],
+            "evidence_gaps": sorted(facts["evidence_gaps"]),
+            "information_gain_refs": facts["information_gain_refs"],
+            "next_action": "plan",
+        }
+
     async def plan_next_case(self, state: AttackGraphState) -> dict[str, Any]:
         runtime = self.runtime_registry.get(state["run_id"])
         elapsed = (datetime.now(UTC) - runtime.started_at).total_seconds()
@@ -102,22 +199,21 @@ class AttackGraph:
                 "terminal_reason": "run duration budget exhausted",
             }
         remaining_steps = runtime.policy.max_steps - state["graph_step_count"]
+        snapshot = await self.repository.load_candidate_snapshot(
+            run_id=state["run_id"],
+            snapshot_id=str(state["candidate_snapshot_id"]),
+        )
+        facts = await self.repository.load_adaptive_facts(state["run_id"])
         context = PlannerContext(
-            allowed_cases=[
-                CaseSummary(
-                    id=case.id,
-                    name=case.name,
-                    category=case.category,
-                    severity=case.severity,
-                    requires_approval=case.requires_approval,
-                )
-                for case in runtime.cases.values()
-                if case.id in state["allowed_case_ids"]
+            candidate_snapshot_id=snapshot.snapshot_id,
+            candidates=list(snapshot.candidates),
+            observations=facts["observations"],
+            evidence_refs=[
+                *facts["observation_refs"],
+                *facts["finding_refs"],
             ],
-            completed_case_ids=state["completed_case_ids"],
-            finding_summaries=[
-                FindingSummary.model_validate(summary) for summary in state["finding_summaries"]
-            ],
+            finding_refs=facts["finding_refs"],
+            hypothesis_refs=[fact.hypothesis_ref for fact in facts["hypotheses"].values()],
             remaining_steps=max(remaining_steps, 0),
         )
         planner_index = state["planner_call_count"] + 1
@@ -142,8 +238,17 @@ class AttackGraph:
             }
 
         decision = result.decision
-        rejection_reason = self._validate_decision(state, decision.case_id, decision.action)
-        history = [*state["decision_history"], decision.case_id or decision.action]
+        rejection_reason = self._validate_decision(snapshot, decision)
+        if rejection_reason is None:
+            rejection_reason = await self.repository.validate_planner_references(
+                run_id=state["run_id"],
+                evidence_refs=decision.evidence_refs,
+                hypothesis_refs=decision.hypothesis_refs,
+            )
+        history = [
+            *state["decision_history"],
+            decision.candidate_id or decision.action,
+        ]
         repeated = Counter(history)[history[-1]]
         if repeated > runtime.policy.max_repeated_decisions:
             rejection_reason = "planner repeated the same decision beyond the configured limit"
@@ -169,16 +274,19 @@ class AttackGraph:
                 "status": "aborted" if terminal else "running",
                 "terminal_reason": rejection_reason if terminal else None,
             }
-        if decision.action == "finish_run":
+        if decision.action == "finish":
             return {
                 "planner_call_count": planner_index,
                 "planner_token_count": state["planner_token_count"] + planner_tokens,
                 "decision_history": history,
-                "next_action": "finalize",
-                "status": "completed",
-                "terminal_reason": decision.reason,
+                "next_action": "finish",
+                "status": "running",
+                "terminal_reason": None,
             }
-        case_id = str(decision.case_id)
+        candidate = next(
+            item for item in snapshot.candidates if item.candidate_id == decision.candidate_id
+        )
+        case_id = candidate.action_id
         return {
             "planner_call_count": planner_index,
             "planner_token_count": state["planner_token_count"] + planner_tokens,
@@ -187,6 +295,7 @@ class AttackGraph:
             "current_operation_id": (
                 f"{state['run_id']}:case:{case_id}:{len(state['completed_case_ids']) + 1}"
             ),
+            "current_step_started_at": datetime.now(UTC).isoformat(),
             "current_step_id": None,
             "evaluation_event_id": None,
             "policy_event_ids": [],
@@ -194,6 +303,56 @@ class AttackGraph:
             "approval_status": None,
             "graph_step_count": state["graph_step_count"] + 1,
             "next_action": "policy",
+        }
+
+    async def finish_gate(self, state: AttackGraphState) -> dict[str, Any]:
+        runtime = self.runtime_registry.get(state["run_id"])
+        snapshot = await self.repository.load_candidate_snapshot(
+            run_id=state["run_id"],
+            snapshot_id=str(state["candidate_snapshot_id"]),
+        )
+        facts = await self.repository.load_adaptive_facts(state["run_id"])
+        approvals = await self.repository.list_approvals(state["run_id"])
+        result = self.finish_gate_service.evaluate(
+            required_coverage_tags={
+                tag
+                for case in runtime.cases.values()
+                for tag in (case.coverage_tags or [case.category])
+            },
+            required_control_action_ids={
+                case.id for case in runtime.cases.values() if case.kind == CaseKind.control
+            },
+            coverage=facts["coverage"],
+            completed_action_ids=set(state["completed_case_ids"]),
+            evidence_gaps=facts["evidence_gaps"],
+            pending_approval_ids={
+                str(approval["id"]) for approval in approvals if approval["status"] == "pending"
+            },
+            allow_early_finish=runtime.policy.allow_early_finish,
+            has_candidates=bool(snapshot.candidates),
+        )
+        if result.allowed:
+            return {
+                "next_action": "finalize",
+                "status": "completed",
+                "terminal_reason": result.detail,
+            }
+        await self.repository.record_finish_rejected(
+            run_id=state["run_id"],
+            operation_id=(f"{state['run_id']}:finish_rejected:{state['planner_call_count']}"),
+            reason_code=result.reason_code.value,
+            detail=result.detail,
+        )
+        if not snapshot.candidates:
+            return {
+                "next_action": "finalize",
+                "status": "completed",
+                "terminal_reason": result.detail,
+            }
+        return {
+            "next_action": "build",
+            "status": "running",
+            "terminal_reason": None,
         }
 
     async def policy_gate(self, state: AttackGraphState) -> dict[str, Any]:
@@ -340,6 +499,28 @@ class AttackGraph:
         return {
             "current_step_id": step.id,
             "target_call_count": state["target_call_count"] + 1,
+            "next_action": "normalize",
+        }
+
+    async def normalize_observation(self, state: AttackGraphState) -> dict[str, Any]:
+        operation_id = str(state["current_operation_id"])
+        _, response, trace = await self.repository.load_target_execution(operation_id)
+        normalized = self.observation_normalizer.normalize_target(
+            observation_ref=f"{operation_id}:observation",
+            response=response,
+            trace=trace,
+        )
+        observation = await self.repository.record_observation(
+            run_id=state["run_id"],
+            operation_id=f"{operation_id}:observation",
+            source=ObservationSource.target,
+            summary=normalized.summary,
+            step_id=state.get("current_step_id"),
+        )
+        return {
+            "observation_refs": list(
+                dict.fromkeys([*state["observation_refs"], observation.observation_ref])
+            ),
             "next_action": "evaluate",
         }
 
@@ -381,7 +562,7 @@ class AttackGraph:
             evaluation=evaluation,
             policy=policy,
         )
-        await self.repository.complete_case(
+        finding_id = await self.repository.complete_case(
             run_id=state["run_id"],
             operation_id=operation_id,
             result=result,
@@ -392,13 +573,83 @@ class AttackGraph:
             findings = [
                 *findings,
                 FindingSummary(
+                    finding_ref=finding_id,
                     case_id=case.id,
                     category=case.category,
                     risk_level=evaluation.risk_level,
                     reason=evaluation.reason,
                 ).model_dump(mode="json"),
             ]
-        return {"finding_summaries": findings, "next_action": "decide"}
+        finding_refs = state["finding_refs"]
+        if finding_id is not None:
+            finding_refs = list(dict.fromkeys([*finding_refs, finding_id]))
+        return {
+            "finding_summaries": findings,
+            "finding_refs": finding_refs,
+            "next_action": "update_facts",
+        }
+
+    async def update_facts(self, state: AttackGraphState) -> dict[str, Any]:
+        runtime = self.runtime_registry.get(state["run_id"])
+        case = runtime.cases[str(state["current_case_id"])]
+        operation_id = str(state["current_operation_id"])
+        evaluation = await self.repository.load_evaluation(operation_id)
+        facts = await self.repository.load_adaptive_facts(state["run_id"])
+        previous_hypothesis = facts["hypotheses"][case.id]
+        evaluation_ref = str(state["evaluation_event_id"])
+        transitioned = self.hypothesis_service.transition(
+            previous=previous_hypothesis,
+            hypothesis_ref=previous_hypothesis.hypothesis_ref,
+            evaluation=evaluation,
+            evidence_refs=(evaluation_ref,),
+        )
+        await self.repository.record_hypothesis_transition(
+            run_id=state["run_id"],
+            operation_id=f"{operation_id}:hypothesis",
+            hypothesis=transitioned,
+            step_id=state.get("current_step_id"),
+        )
+        coverage_facts = self.hypothesis_service.coverage_facts(
+            tags=tuple(case.coverage_tags or [case.category]),
+            evaluation=evaluation,
+            evidence_refs=(evaluation_ref,),
+        )
+        started_at = datetime.fromisoformat(str(state["current_step_started_at"]))
+        gain = self.hypothesis_service.actual_gain(
+            previous_coverage=facts["coverage"],
+            current_coverage=coverage_facts,
+            evaluation=evaluation,
+            target_call_cost=1,
+            planner_cost=1,
+            duration_delta=max(
+                (datetime.now(UTC) - started_at).total_seconds(),
+                0,
+            ),
+        )
+        _, gain_ref = await self.repository.record_coverage_and_gain(
+            run_id=state["run_id"],
+            operation_id=operation_id,
+            coverage_facts=coverage_facts,
+            gain=gain,
+            step_id=state.get("current_step_id"),
+        )
+        updated_facts = await self.repository.load_adaptive_facts(state["run_id"])
+        return {
+            "coverage": {tag: status.value for tag, status in updated_facts["coverage"].items()},
+            "hypothesis_refs": [
+                fact.hypothesis_ref for fact in updated_facts["hypotheses"].values()
+            ],
+            "evidence_gaps": sorted(updated_facts["evidence_gaps"]),
+            "information_gain_refs": list(
+                dict.fromkeys(
+                    [
+                        *state["information_gain_refs"],
+                        gain_ref,
+                    ]
+                )
+            ),
+            "next_action": "decide",
+        }
 
     async def skip(self, state: AttackGraphState) -> dict[str, Any]:
         runtime = self.runtime_registry.get(state["run_id"])
@@ -422,12 +673,23 @@ class AttackGraph:
             reason=policy.reason,
             policy=policy,
         )
-        return {"next_action": "decide"}
+        return {
+            "denied_action_ids": list(dict.fromkeys([*state["denied_action_ids"], case.id])),
+            "next_action": "decide",
+        }
 
     async def decide_next(self, state: AttackGraphState) -> dict[str, Any]:
         runtime = self.runtime_registry.get(state["run_id"])
         case_id = str(state["current_case_id"])
-        completed = list(dict.fromkeys([*state["completed_case_ids"], case_id]))
+        completed = state["completed_case_ids"]
+        if case_id not in state["denied_action_ids"]:
+            completed = list(dict.fromkeys([*completed, case_id]))
+        repeat_counts = dict(state["action_repeat_counts"])
+        repeat_counts[case_id] = repeat_counts.get(case_id, 0) + 1
+        recent_similarity_keys = [
+            *state["recent_similarity_keys"],
+            runtime.cases[case_id].category,
+        ][-10:]
         terminal_reason: str | None = None
         status = "running"
         if state["graph_step_count"] >= runtime.policy.max_steps:
@@ -441,9 +703,6 @@ class AttackGraph:
         elif state["target_call_count"] >= runtime.policy.max_target_calls:
             terminal_reason = "target call budget exhausted"
             status = "aborted"
-        elif len(completed) >= len(state["allowed_case_ids"]):
-            terminal_reason = "all allowed cases completed"
-            status = "completed"
         elif runtime.policy.stop_on_critical and any(
             summary["risk_level"] == "critical" for summary in state["finding_summaries"]
         ):
@@ -451,7 +710,9 @@ class AttackGraph:
             status = "completed"
         return {
             "completed_case_ids": completed,
-            "next_action": "finalize" if terminal_reason else "plan",
+            "action_repeat_counts": repeat_counts,
+            "recent_similarity_keys": recent_similarity_keys,
+            "next_action": "finalize" if terminal_reason else "build",
             "status": status,
             "terminal_reason": terminal_reason,
         }
@@ -468,22 +729,30 @@ class AttackGraph:
 
     @staticmethod
     def _validate_decision(
-        state: AttackGraphState,
-        case_id: str | None,
-        action: str,
+        snapshot: CandidateSnapshot,
+        decision: PlannerDecision,
     ) -> str | None:
-        if action == "finish_run":
+        if decision.candidate_snapshot_id != snapshot.snapshot_id:
+            return "planner referenced an expired or unknown candidate snapshot"
+        if not decision.evidence_refs:
+            return "planner decision must cite persisted evidence"
+        if decision.action == "finish":
             return None
-        if case_id is None:
-            return "planner omitted case_id"
-        if case_id not in state["allowed_case_ids"]:
-            return "planner selected a case outside the allowlist"
-        if case_id in state["completed_case_ids"]:
-            return "planner selected an already completed case"
+        candidate_ids = [
+            candidate.candidate_id
+            for candidate in snapshot.candidates
+            if candidate.candidate_id == decision.candidate_id
+        ]
+        if len(candidate_ids) != 1:
+            return "planner selected a candidate outside the current snapshot"
         return None
 
     @staticmethod
     def _after_plan(state: AttackGraphState) -> str:
+        return state["next_action"]
+
+    @staticmethod
+    def _after_finish(state: AttackGraphState) -> str:
         return state["next_action"]
 
     @staticmethod

@@ -7,9 +7,22 @@ class AttackGraphState(TypedDict):
     thread_id: str
     allowed_case_ids: list[str]
     completed_case_ids: list[str]
+    denied_action_ids: list[str]
+    candidate_snapshot_id: str | None
+    candidate_action_ids: list[str]
+    coverage: dict[str, str]
+    hypothesis_refs: list[str]
+    observation_refs: list[str]
+    finding_refs: list[str]
+    evidence_gaps: list[str]
+    action_repeat_counts: dict[str, int]
+    recent_similarity_keys: list[str]
+    information_gain_refs: list[str]
+    test_principal_refs: list[str]
     finding_summaries: list[dict[str, str]]
     current_case_id: str | None
     current_operation_id: str | None
+    current_step_started_at: str | None
     current_step_id: str | None
     evaluation_event_id: str | None
     policy_decision: str | None

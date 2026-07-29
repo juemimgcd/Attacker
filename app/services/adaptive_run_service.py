@@ -83,6 +83,10 @@ class AdaptiveRunService:
             baseline_run_id=request.baseline_run_id,
             planner_snapshot=self._planner_snapshot(request.planner),
         )
+        hypotheses = await self.repository.initialize_hypotheses(
+            run_id=run_id,
+            cases=dataset.cases,
+        )
         self.registry.add(
             run_id,
             AdaptiveRuntime(
@@ -100,9 +104,26 @@ class AdaptiveRunService:
             "thread_id": thread_id,
             "allowed_case_ids": [case.id for case in dataset.cases],
             "completed_case_ids": [],
+            "denied_action_ids": [],
+            "candidate_snapshot_id": None,
+            "candidate_action_ids": [],
+            "coverage": {
+                tag: "not_started"
+                for case in dataset.cases
+                for tag in (case.coverage_tags or [case.category])
+            },
+            "hypothesis_refs": [fact.hypothesis_ref for fact in hypotheses.values()],
+            "observation_refs": [],
+            "finding_refs": [],
+            "evidence_gaps": [],
+            "action_repeat_counts": {},
+            "recent_similarity_keys": [],
+            "information_gain_refs": [],
+            "test_principal_refs": request.test_principal_refs,
             "finding_summaries": [],
             "current_case_id": None,
             "current_operation_id": None,
+            "current_step_started_at": None,
             "current_step_id": None,
             "evaluation_event_id": None,
             "policy_decision": None,
@@ -279,6 +300,8 @@ class AdaptiveRunService:
             "endpoint": str(planner.endpoint) if planner.endpoint else None,
             "model": planner.model,
             "timeout_seconds": planner.timeout_seconds,
+            "temperature": planner.temperature,
+            "prompt_template_version": planner.prompt_template_version,
             "api_key_required": planner.api_key is not None,
         }
 
