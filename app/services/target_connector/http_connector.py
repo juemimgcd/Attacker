@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from app.schemas.judge_schema import TargetResponse
+from app.schemas.judge_schema import TargetErrorType, TargetResponse
 from app.schemas.target_schema import TargetConfig
 
 
@@ -56,11 +56,19 @@ class HTTPTargetConnector:
                     text=response.text,
                     latency_ms=latency_ms
                 )
-        except httpx.HTTPError as exc:
+        except httpx.TimeoutException as exc:
             latency_ms = int((perf_counter() - start)*1000)
             return request_body,TargetResponse(
                 latency_ms=latency_ms,
-                error=str(exc)
+                error=str(exc),
+                error_type=TargetErrorType.timeout,
+            )
+        except httpx.RequestError as exc:
+            latency_ms = int((perf_counter() - start)*1000)
+            return request_body,TargetResponse(
+                latency_ms=latency_ms,
+                error=str(exc),
+                error_type=TargetErrorType.connection_error,
             )
 
 

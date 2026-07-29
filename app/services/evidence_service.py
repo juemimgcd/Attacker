@@ -1,11 +1,7 @@
-from uuid import uuid4
-
 from app.schemas.evidence_schema import EvidenceEvent, EvidenceSaveResult
 from app.schemas.judge_schema import AttackRunResult
 from app.storage.duckdb_store import DuckDBStore
 from app.storage.parquet_store import ParquetStore
-
-
 
 
 # 负责把攻击运行结果转换为证据事件并写入持久化存储。
@@ -27,7 +23,7 @@ class EvidenceService:
 
     ) -> EvidenceEvent:
         return EvidenceEvent(
-            evidence_id=str(uuid4()),
+            evidence_id=result.evidence_id,
             run_id=run_id,
             target_name=result.target_name,
             sample_id=result.sample_id,

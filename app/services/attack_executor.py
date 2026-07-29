@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from app.schemas.attack_sample_schema import AttackSample
 from app.schemas.judge_schema import AttackRunResult
 from app.schemas.target_schema import TargetConfig
@@ -13,15 +15,18 @@ class AttackExecutor:
             target:TargetConfig,
             sample:AttackSample
 )-> AttackRunResult:
+        evidence_id = str(uuid4())
         request_body,target_response = await http_target_connector.call(
             target=target,
             prompt=sample.prompt,
         )
         judge_result = judge_engine.judge(
             sample=sample,
-            target_response=target_response
+            target_response=target_response,
+            evidence_refs=[evidence_id],
         )
         return AttackRunResult(
+            evidence_id=evidence_id,
             target_name=target.name,
             sample_id=sample.id,
             request_body=request_body,

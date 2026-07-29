@@ -48,6 +48,24 @@ class QdrantSettings(BaseSettings):
     collection_findings: str = "findings"
 
 
+# 定义单个模型职责的独立配置、预算和输入限制。
+class ModelRoleSettings(BaseSettings):
+    model_id: str = "unconfigured"
+    provider_id: str = "unconfigured"
+    max_calls: int = Field(default=0, ge=0)
+    max_input_tokens: int = Field(default=4096, gt=0)
+    max_output_tokens: int = Field(default=512, gt=0)
+    max_cost: float | None = Field(default=None, ge=0)
+    timeout_seconds: float = Field(default=30, gt=0)
+    temperature: float = Field(default=0, ge=0)
+
+
+# Planner 与 Model Judge 不共享模型配置或预算。
+class AgentModelSettings(BaseSettings):
+    planner: ModelRoleSettings = Field(default_factory=ModelRoleSettings)
+    model_judge: ModelRoleSettings = Field(default_factory=ModelRoleSettings)
+
+
 # 汇总所有子配置，并支持从 .env 和环境变量读取覆盖值。
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -63,6 +81,7 @@ class Settings(BaseSettings):
     parquet: ParquetSettings = Field(default_factory=ParquetSettings)
     minio: MinIOSettings = Field(default_factory=MinIOSettings)
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
+    agent_models: AgentModelSettings = Field(default_factory=AgentModelSettings)
 
 
 # 返回缓存后的全局配置对象，避免重复解析配置来源。
