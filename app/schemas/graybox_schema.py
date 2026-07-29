@@ -1,3 +1,4 @@
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -140,6 +141,8 @@ class LoadedGrayBoxDataset(BaseModel):
 
 
 class AttackPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     allowed_target_ids: set[str] = Field(default_factory=set)
     allowed_case_ids: set[str] = Field(default_factory=set)
     allowed_capability_contracts: set[str] = Field(default_factory=set)
@@ -148,6 +151,7 @@ class AttackPolicy(BaseModel):
     max_target_calls: int = Field(default=20, ge=1, le=10_000)
     max_provider_calls: int = Field(default=20, ge=0, le=10_000)
     max_duration_seconds: float = Field(default=300.0, gt=0, le=86_400)
+    max_cost: Decimal | None = Field(default=None, gt=0)
     approval_required_severities: set[RiskLevel] = Field(
         default_factory=lambda: {RiskLevel.critical}
     )
@@ -236,6 +240,26 @@ class PlannerConfig(BaseModel):
         if self.backend == "openai_compatible" and self.endpoint is None:
             raise ValueError("openai_compatible planner requires endpoint")
         return self
+
+
+class PlannerResumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: TargetConfig | None = None
+    planner: PlannerConfig | None = None
+
+
+class AdaptiveControlAction(str, Enum):
+    cancel = "cancel"
+    revoke_target_authorization = "revoke_target_authorization"
+    terminate_policy = "terminate_policy"
+
+
+class AdaptiveControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action: AdaptiveControlAction
+    reason: str = Field(min_length=1, max_length=2_000)
 
 
 class GrayBoxRunRequest(BaseModel):

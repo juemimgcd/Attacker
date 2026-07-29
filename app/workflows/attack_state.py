@@ -3,8 +3,10 @@ from typing import TypedDict
 
 class AttackGraphState(TypedDict):
     run_id: str
+    goal_id: str
     target_id: str
     thread_id: str
+    checkpoint_ref: str | None
     allowed_case_ids: list[str]
     completed_case_ids: list[str]
     denied_action_ids: list[str]
@@ -41,6 +43,7 @@ class AttackGraphState(TypedDict):
     planner_latency_ms: int
     planner_estimated_cost: float
     planner_failures: int
+    planner_fallback_snapshot: dict[str, str] | None
     decision_history: list[str]
     target_call_count: int
     target_transport_failure_count: int

@@ -1,7 +1,11 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app.schemas.graybox_schema import GrayBoxRunRequest
+from app.schemas.graybox_schema import (
+    AdaptiveControlRequest,
+    GrayBoxRunRequest,
+    PlannerResumeRequest,
+)
 from app.schemas.run_schema import DeterministicRunRequest
 from app.schemas.stateful_schema import StatefulRunRequest
 
@@ -22,6 +26,42 @@ async def create_adaptive_run(payload: GrayBoxRunRequest, request: Request) -> d
         return await request.app.state.adaptive_run_service.start(payload)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{run_id}/resume")
+async def resume_paused_run(
+    run_id: str,
+    payload: PlannerResumeRequest,
+    request: Request,
+) -> dict:
+    try:
+        return await request.app.state.adaptive_run_service.resume_paused(
+            run_id=run_id,
+            target=payload.target,
+            planner=payload.planner,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{run_id}/control")
+async def control_adaptive_run(
+    run_id: str,
+    payload: AdaptiveControlRequest,
+    request: Request,
+) -> dict:
+    try:
+        return await request.app.state.adaptive_run_service.request_control(
+            run_id=run_id,
+            action=payload.action,
+            reason=payload.reason,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/graybox/deterministic")

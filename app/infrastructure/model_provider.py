@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from time import perf_counter
 from typing import Literal, Protocol
 
@@ -82,20 +83,20 @@ class OpenAICompatibleModelProvider:
                     structured_output = json.loads(content) if isinstance(content, str) else content
                     if not isinstance(structured_output, dict):
                         raise TypeError("model response content must be a JSON object")
-                    attempts.append(
-                        ProviderAttempt(
-                            attempt=attempt_number,
-                            status="success",
-                            latency_ms=self._elapsed_ms(started),
-                        )
+                    success_attempt = ProviderAttempt(
+                        attempt=attempt_number,
+                        status="success",
+                        latency_ms=self._elapsed_ms(started),
                     )
+                    completed_attempts = (*attempts, success_attempt)
                     raw_usage = body.get("usage", {})
                     usage = ModelProviderUsage(
-                        physical_attempts=len(attempts),
+                        physical_attempts=len(completed_attempts),
                         input_tokens=int(raw_usage.get("prompt_tokens", 0)),
                         output_tokens=int(raw_usage.get("completion_tokens", 0)),
-                        latency_ms=sum(item.latency_ms for item in attempts),
-                        attempts=tuple(attempts),
+                        latency_ms=sum(item.latency_ms for item in completed_attempts),
+                        estimated_cost=Decimal(str(raw_usage.get("estimated_cost", 0))),
+                        attempts=completed_attempts,
                     )
                     return ModelInferenceResult(
                         structured_output=structured_output,

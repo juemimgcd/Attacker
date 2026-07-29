@@ -11,6 +11,7 @@ from app.infrastructure.model_adapter import PlannerModelAdapter, create_planner
 from app.repositories.adaptive_repository import AdaptiveRepository
 from app.schemas.adaptive_agent_schema import ObservationSource
 from app.schemas.graybox_schema import (
+    AdaptiveControlAction,
     AttackPolicy,
     GrayBoxCase,
     GrayBoxExecutionResult,
@@ -108,8 +109,10 @@ class AdaptiveRunService:
         )
         state: AttackGraphState = {
             "run_id": run_id,
+            "goal_id": f"adaptive_graybox:{run_id}",
             "target_id": target_id,
             "thread_id": thread_id,
+            "checkpoint_ref": f"langgraph:{thread_id}",
             "allowed_case_ids": [case.id for case in dataset.cases],
             "completed_case_ids": [],
             "denied_action_ids": [],
@@ -150,6 +153,7 @@ class AdaptiveRunService:
             "planner_latency_ms": 0,
             "planner_estimated_cost": 0,
             "planner_failures": 0,
+            "planner_fallback_snapshot": None,
             "decision_history": [],
             "target_call_count": 0,
             "target_transport_failure_count": 0,
@@ -184,8 +188,14 @@ class AdaptiveRunService:
         planner: PlannerConfig | None = None,
     ) -> dict[str, Any]:
         run = await self.repository.get_run(run_id)
+        if run.status not in {"waiting_approval", "running"}:
+            raise ValueError("run is not waiting for approval")
         if run.thread_id is None:
             raise ValueError("run does not have a resumable thread")
+        await self._require_checkpoint_node(
+            thread_id=run.thread_id,
+            node_name="human_review",
+        )
         recovered = False
         if not self.registry.contains(run_id):
             await self._rehydrate_runtime(
@@ -215,6 +225,82 @@ class AdaptiveRunService:
             },
         )
         return await self._status(run_id, result)
+
+    async def resume_paused(
+        self,
+        *,
+        run_id: str,
+        target: TargetConfig | None = None,
+        planner: PlannerConfig | None = None,
+    ) -> dict[str, Any]:
+        run = await self.repository.get_run(run_id)
+        if run.status not in {"paused", "running"}:
+            raise ValueError("run is not paused")
+        if run.thread_id is None:
+            raise ValueError("run does not have a resumable thread")
+        await self._require_checkpoint_node(
+            thread_id=run.thread_id,
+            node_name="planner_pause",
+        )
+        recovered = False
+        if not self.registry.contains(run_id) or target is not None or planner is not None:
+            await self._rehydrate_runtime(
+                run_id=run_id,
+                target_override=target,
+                planner_override=planner,
+            )
+            recovered = True
+        result = await self.graph.graph.ainvoke(
+            Command(resume={"recovered": recovered}),
+            config={
+                "configurable": {"thread_id": run.thread_id},
+                "recursion_limit": 1_000,
+            },
+        )
+        return await self._status(run_id, result)
+
+    async def request_control(
+        self,
+        *,
+        run_id: str,
+        action: AdaptiveControlAction,
+        reason: str,
+    ) -> dict[str, Any]:
+        run = await self.repository.get_run(run_id)
+        event_id = await self.repository.record_control_request(
+            run_id=run_id,
+            action=action,
+            reason=reason,
+        )
+        if run.status in {"waiting_approval", "paused"}:
+            stop_reason = (
+                "cancelled" if action == AdaptiveControlAction.cancel else "policy_terminated"
+            )
+            status = "cancelled" if action == AdaptiveControlAction.cancel else "aborted"
+            await self.repository.finalize_run(
+                run_id=run_id,
+                status=status,
+                terminal_reason=reason,
+                stop_reason=stop_reason,
+            )
+        current = await self.repository.get_run(run_id)
+        return {
+            "run_id": run_id,
+            "action": action.value,
+            "reason": reason,
+            "event_id": event_id,
+            "status": current.status,
+        }
+
+    async def _require_checkpoint_node(
+        self,
+        *,
+        thread_id: str,
+        node_name: str,
+    ) -> None:
+        snapshot = await self.graph.graph.aget_state({"configurable": {"thread_id": thread_id}})
+        if node_name not in snapshot.next:
+            raise ValueError(f"run checkpoint is not waiting at {node_name}")
 
     async def _rehydrate_runtime(
         self,

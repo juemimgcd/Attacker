@@ -67,7 +67,13 @@ class AdaptiveObservabilityService:
                 event["evidence"]
                 for event in reversed(events)
                 if event["event_type"]
-                in {"run_completed", "run_failed", "run_aborted", "run_paused"}
+                in {
+                    "run_completed",
+                    "run_failed",
+                    "run_aborted",
+                    "run_cancelled",
+                    "run_paused",
+                }
             ),
             {},
         )
@@ -197,9 +203,9 @@ class AdaptiveObservabilityService:
                 ),
             },
             "run": {
-                "stop_reason": terminal.get("stop_reason") or rows["run"].get("terminal_reason"),
+                "stop_reason": terminal.get("stop_reason"),
                 "checkpoint_resume_count": sum(
-                    event["event_type"] in {"runtime_rehydrated", "recovery_policy_revalidated"}
+                    event["event_type"] in {"recovery_policy_revalidated", "planner_resumed"}
                     for event in events
                 ),
                 "target_calls": rows["run"].get("target_call_count", 0),
