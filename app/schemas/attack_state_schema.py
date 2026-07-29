@@ -27,7 +27,7 @@ class RunBudgetSnapshot(BaseModel):
     target_calls_used: int = Field(default=0, ge=0)
     provider_calls_used: int = Field(default=0, ge=0)
     elapsed_seconds: float = Field(default=0, ge=0)
-    cost_used: Decimal = Field(default=Decimal("0"), ge=0)
+    cost_used: Decimal = Field(default=Decimal(0), ge=0)
 
     # 拒绝不可能的预算快照，避免恢复时出现负的剩余预算。
     @model_validator(mode="after")
