@@ -11,12 +11,12 @@ from app.services.target_connector.http_connector import http_target_connector
 class AttackExecutor:
     # 执行单条攻击样本并返回完整运行结果。
     async def run_once(
-            self,
-            target:TargetConfig,
-            sample:AttackSample
-)-> AttackRunResult:
+        self,
+        target: TargetConfig,
+        sample: AttackSample,
+    ) -> AttackRunResult:
         evidence_id = str(uuid4())
-        request_body,target_response = await http_target_connector.call(
+        request_body, target_response = await http_target_connector.call(
             target=target,
             prompt=sample.prompt,
         )
@@ -31,7 +31,7 @@ class AttackExecutor:
             sample_id=sample.id,
             request_body=request_body,
             target_response=target_response,
-            judge_result=judge_result
+            judge_result=judge_result,
         )
 
 

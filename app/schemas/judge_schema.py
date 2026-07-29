@@ -54,13 +54,16 @@ class TargetResponse(BaseModel):
     body: dict[str, Any] | list[Any] | None = None
     text: str = ""
     latency_ms: int = Field(default=0, ge=0)
+    response_bytes: int = Field(default=0, ge=0)
     error: str | None = None
     error_type: TargetErrorType | None = None
 
     @model_validator(mode="after")
     def validate_error(self) -> Self:
-        if (self.error is None) != (self.error_type is None):
-            raise ValueError("error and error_type must be provided together")
+        if self.error is None and self.error_type is not None:
+            raise ValueError("error_type requires error")
+        if self.error is not None and self.error_type is None:
+            self.error_type = TargetErrorType.connection_error
         return self
 
 

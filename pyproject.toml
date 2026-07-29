@@ -1,19 +1,46 @@
 [project]
 name = "attacker"
 version = "0.1.0"
-requires-python = ">=3.14"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "duckdb>=1.5.2",
+    "aiosqlite>=0.22.0",
+    "alembic>=1.18.0",
     "fastapi>=0.136.1",
     "httpx>=0.28.1",
+    "langgraph>=1.2,<1.3",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
     "loguru>=0.7.3",
-    "pyarrow>=24.0.0",
     "pydantic>=2.13.4",
+    "pydantic-evals>=1.0.0",
     "pydantic-settings>=2.14.0",
     "pyyaml>=6.0.3",
+    "sqlalchemy>=2.0.0",
     "uvicorn>=0.46.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.400",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.0.0",
+    "ruff>=0.14.0",
 ]
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["**/*.md"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+addopts = "--basetemp=.pytest-tmp"
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]

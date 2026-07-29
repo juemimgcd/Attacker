@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,32 +20,20 @@ class LogSettings(BaseSettings):
     log_retention: str = "14 days"
 
 
-# 定义 DuckDB 数据库路径和只读模式配置。
-class DuckDBSettings(BaseSettings):
-    database_path: str = "data/attacker.duckdb"
-    read_only: bool = False
+# 定义 SQLAlchemy Async 与 SQLite 连接配置。
+class DatabaseSettings(BaseSettings):
+    url: str = "sqlite+aiosqlite:///data/attacker.sqlite3"
+    echo: bool = False
 
 
-# 定义 Parquet 证据归档目录配置。
-class ParquetSettings(BaseSettings):
-    evidence_dir: str = "data/evidence"
+# 定义 LangGraph checkpoint 的独立 SQLite 路径。
+class CheckpointSettings(BaseSettings):
+    database_path: str = "data/langgraph_checkpoints.sqlite3"
 
 
-# 定义 MinIO 对象存储连接和桶配置。
-class MinIOSettings(BaseSettings):
-    endpoint: str = "localhost:9000"
-    access_key: str = "minioadmin"
-    secret_key: str = "minioadmin"
-    bucket: str = "attacker"
-    secure: bool = False
-
-
-# 定义 Qdrant 向量库地址、密钥和集合配置。
-class QdrantSettings(BaseSettings):
-    url: str = "http://localhost:6333"
-    api_key: str | None = None
-    collection_attack_cases: str = "attack_cases"
-    collection_findings: str = "findings"
+# 定义 API 控制面的可选访问密钥。
+class SecuritySettings(BaseSettings):
+    api_key: SecretStr | None = None
 
 
 # 定义单个模型职责的独立配置、预算和输入限制。
@@ -77,10 +65,9 @@ class Settings(BaseSettings):
 
     app: AppSettings = Field(default_factory=AppSettings)
     log: LogSettings = Field(default_factory=LogSettings)
-    duckdb: DuckDBSettings = Field(default_factory=DuckDBSettings)
-    parquet: ParquetSettings = Field(default_factory=ParquetSettings)
-    minio: MinIOSettings = Field(default_factory=MinIOSettings)
-    qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
     agent_models: AgentModelSettings = Field(default_factory=AgentModelSettings)
 
 
