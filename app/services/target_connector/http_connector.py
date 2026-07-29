@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from app.schemas.judge_schema import TargetResponse
+from app.schemas.judge_schema import TargetErrorType, TargetResponse
 from app.schemas.target_schema import TargetConfig
 
 
@@ -32,14 +32,16 @@ class HTTPTargetConnector:
         if isinstance(value, list):
             return [self._replace_prompt(item, prompt) for item in value]
         if isinstance(value, dict):
-            return {k: self._replace_prompt(v, prompt) for k, v in value.items()}
+            return {key: self._replace_prompt(item, prompt) for key, item in value.items()}
         return value
 
     # 根据目标配置合并普通请求头和鉴权请求头。
-    def build_headers(self, target: TargetConfig):
+    def build_headers(self, target: TargetConfig) -> dict[str, str]:
         headers = dict(target.headers)
         if target.auth.type == "bearer" and target.auth.token:
-            headers[target.auth.header_name] = f"{target.auth.token_prefix} {target.auth.token}"
+            headers[target.auth.header_name] = (
+                f"{target.auth.token_prefix} {target.auth.token}"
+            )
         return headers
 
     # 异步调用目标 Agent 并封装请求体、响应内容、耗时和错误。
@@ -48,15 +50,20 @@ class HTTPTargetConnector:
         target: TargetConfig,
         prompt: str,
         messages: list[dict[str, str]] | None = None,
-    ):
+    ) -> tuple[dict[str, Any], TargetResponse]:
         request_body = self.build_request_body(target, prompt, messages)
         headers = self.build_headers(target)
         start = perf_counter()
 
         try:
-            async with httpx.AsyncClient(timeout=target.timeout_seconds) as client:
+            async with httpx.AsyncClient(
+                timeout=target.timeout_seconds,
+                follow_redirects=False,
+            ) as client:
                 response = await client.post(
-                    str(target.endpoint), headers=headers, json=request_body
+                    str(target.endpoint),
+                    headers=headers,
+                    json=request_body,
                 )
                 latency_ms = int((perf_counter() - start) * 1000)
                 try:
@@ -70,9 +77,20 @@ class HTTPTargetConnector:
                     latency_ms=latency_ms,
                     response_bytes=len(response.content),
                 )
-        except httpx.HTTPError as exc:
+        except httpx.TimeoutException as exc:
             latency_ms = int((perf_counter() - start) * 1000)
-            return request_body, TargetResponse(latency_ms=latency_ms, error=str(exc))
+            return request_body, TargetResponse(
+                latency_ms=latency_ms,
+                error=str(exc),
+                error_type=TargetErrorType.timeout,
+            )
+        except httpx.RequestError as exc:
+            latency_ms = int((perf_counter() - start) * 1000)
+            return request_body, TargetResponse(
+                latency_ms=latency_ms,
+                error=str(exc),
+                error_type=TargetErrorType.connection_error,
+            )
 
 
 http_target_connector = HTTPTargetConnector()

@@ -14,6 +14,44 @@ class CoverageStatus(str, Enum):
     inconclusive = "inconclusive"
 
 
+# 定义 Run 的控制流状态；终止原因由 stop_reason 单独表达。
+class RunStatus(str, Enum):
+    running = "running"
+    waiting_approval = "waiting_approval"
+    paused = "paused"
+    stopped = "stopped"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+# 限定所有允许持久化的终止原因。
+class StopReason(str, Enum):
+    completed = "completed"
+    budget_exhausted = "budget_exhausted"
+    no_information_gain = "no_information_gain"
+    loop_detected = "loop_detected"
+    policy_terminated = "policy_terminated"
+    target_unavailable = "target_unavailable"
+    planner_failed = "planner_failed"
+    cancelled = "cancelled"
+
+
+# 定义 Planner 不可用时由 Run 快照预先选择的确定性行为。
+class PlannerFallbackMode(str, Enum):
+    fail_closed = "fail_closed"
+    deterministic_fallback = "deterministic_fallback"
+    pause = "pause"
+
+
+# 保存一次实际降级所使用的配置和模型身份。
+class PlannerFallbackSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mode: PlannerFallbackMode
+    reason: str = Field(min_length=1)
+    actual_model_id: str = Field(min_length=1)
+    actual_provider_id: str = Field(min_length=1)
 # 定义运行预算上限及其当前消耗快照。
 class RunBudgetSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
@@ -80,6 +118,33 @@ class AttackState(BaseModel):
     observation_refs: list[str] = Field(default_factory=list)
     finding_refs: list[str] = Field(default_factory=list)
     budget: RunBudgetSnapshot
+    status: RunStatus = RunStatus.running
+    stop_reason: StopReason | None = None
+    checkpoint_ref: str | None = Field(default=None, min_length=1)
+    planner_fallback_mode: PlannerFallbackMode = PlannerFallbackMode.fail_closed
+    planner_fallback_snapshot: PlannerFallbackSnapshot | None = None
+    last_state_fingerprint: str | None = Field(default=None, min_length=1)
     consecutive_no_gain_steps: int = Field(default=0, ge=0)
     repeated_state_count: int = Field(default=0, ge=0)
     planner_failure_count: int = Field(default=0, ge=0)
+    target_transport_failure_count: int = Field(default=0, ge=0)
+
+    # 保证非终止状态没有终止原因，终止状态一定有终止原因。
+    @model_validator(mode="after")
+    def validate_status_and_stop_reason(self) -> Self:
+        terminal_statuses = {
+            RunStatus.stopped,
+            RunStatus.completed,
+            RunStatus.failed,
+            RunStatus.cancelled,
+        }
+        if self.status in terminal_statuses and self.stop_reason is None:
+            raise ValueError("terminal run status requires stop_reason")
+        if self.status not in terminal_statuses and self.stop_reason is not None:
+            raise ValueError("non-terminal run status cannot have stop_reason")
+        if (
+            self.status in {RunStatus.waiting_approval, RunStatus.paused}
+            and self.checkpoint_ref is None
+        ):
+            raise ValueError("waiting or paused run requires checkpoint_ref")
+        return self

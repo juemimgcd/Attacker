@@ -20,21 +20,40 @@ class LogSettings(BaseSettings):
     log_retention: str = "14 days"
 
 
-# 定义 DuckDB 数据库路径和只读模式配置。
+# 定义 SQLAlchemy Async 与 SQLite 连接配置。
 class DatabaseSettings(BaseSettings):
     url: str = "sqlite+aiosqlite:///data/attacker.sqlite3"
     echo: bool = False
 
 
+# 定义 LangGraph checkpoint 的独立 SQLite 路径。
 class CheckpointSettings(BaseSettings):
     database_path: str = "data/langgraph_checkpoints.sqlite3"
 
 
+# 定义 API 控制面的可选访问密钥。
 class SecuritySettings(BaseSettings):
     api_key: SecretStr | None = None
 
 
-# 定义 MinIO 对象存储连接和桶配置。
+# 定义单个模型职责的独立配置、预算和输入限制。
+class ModelRoleSettings(BaseSettings):
+    model_id: str = "unconfigured"
+    provider_id: str = "unconfigured"
+    max_calls: int = Field(default=0, ge=0)
+    max_input_tokens: int = Field(default=4096, gt=0)
+    max_output_tokens: int = Field(default=512, gt=0)
+    max_cost: float | None = Field(default=None, ge=0)
+    timeout_seconds: float = Field(default=30, gt=0)
+    temperature: float = Field(default=0, ge=0)
+
+
+# Planner 与 Model Judge 不共享模型配置或预算。
+class AgentModelSettings(BaseSettings):
+    planner: ModelRoleSettings = Field(default_factory=ModelRoleSettings)
+    model_judge: ModelRoleSettings = Field(default_factory=ModelRoleSettings)
+
+
 # 汇总所有子配置，并支持从 .env 和环境变量读取覆盖值。
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -49,6 +68,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    agent_models: AgentModelSettings = Field(default_factory=AgentModelSettings)
 
 
 # 返回缓存后的全局配置对象，避免重复解析配置来源。
