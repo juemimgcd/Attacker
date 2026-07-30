@@ -56,8 +56,10 @@ jobs:
           DATABASE__AUTO_CREATE_SCHEMA: "false"
           CHECKPOINT__URL: postgresql://attacker:attacker-ci-password@127.0.0.1:5432/attacker
         run: |
+          echo "postgres-smoke: alembic upgrade"
           uv run alembic upgrade head
-          uv run python - <<'PY'
+          echo "postgres-smoke: runtime start"
+          timeout --signal=INT --kill-after=10s 150s uv run python -u - <<'PY'
           import asyncio
 
           from app.runtime import create_runtime
@@ -66,7 +68,9 @@ jobs:
           from conf.settings import settings
 
           async def smoke():
+              print("postgres-smoke: entering runtime", flush=True)
               async with create_runtime(settings, recover_cleanups=True) as runtime:
+                  print("postgres-smoke: runtime ready", flush=True)
                   queued = await runtime.job_repository.enqueue(
                       RunJobCreate(
                           request_id="postgres-ci-worker-smoke",
@@ -75,6 +79,7 @@ jobs:
                       ),
                       default_max_attempts=settings.worker.max_attempts,
                   )
+                  print(f"postgres-smoke: enqueued {queued['id']}", flush=True)
                   worker = JobWorker(
                       worker_id="postgres-ci-worker",
                       repository=runtime.job_repository,
@@ -82,13 +87,18 @@ jobs:
                       settings=settings.worker,
                   )
                   await worker.run(asyncio.Event(), once=True)
+                  print("postgres-smoke: worker stopped", flush=True)
                   completed = await runtime.job_repository.get(queued["id"])
                   assert completed["status"] == "succeeded", completed
                   assert completed["result"]["run_id"], completed
+                  print("postgres-smoke: job succeeded", flush=True)
 
           asyncio.run(smoke())
+          print("postgres-smoke: runtime closed", flush=True)
           PY
+          echo "postgres-smoke: alembic downgrade"
           uv run alembic downgrade 20260730_0006
+          echo "postgres-smoke: alembic re-upgrade"
           uv run alembic upgrade head
       - name: Validate fail-closed production profile
         env:
