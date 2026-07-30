@@ -104,7 +104,10 @@ class Database:
             yield
             return
         started = monotonic()
-        async with self.engine.connect() as connection:
+        async with self.engine.connect() as raw_connection:
+            # PostgreSQL session-level advisory locks do not require a transaction. Keeping
+            # one open here can deadlock setup operations such as CREATE INDEX CONCURRENTLY.
+            connection = await raw_connection.execution_options(isolation_level="AUTOCOMMIT")
             acquired = False
             try:
                 while not acquired:
