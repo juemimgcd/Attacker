@@ -144,8 +144,8 @@ Per repository policy, this implementation does not add or modify test files. Ex
 ## Task 7: Commit and publish
 
 - [x] Confirm the worktree is clean except for this branch's intended changes.
-- [ ] Commit with a scoped production-hardening message.
-- [ ] Push `feat/enterprise-production-hardening` and report verification evidence plus environment-dependent checks that were not executed locally.
+- [x] Commit with a scoped production-hardening message.
+- [x] Push `feat/enterprise-production-hardening` and report verification evidence plus environment-dependent checks that were not executed locally.
 
 ## Verification evidence
 
