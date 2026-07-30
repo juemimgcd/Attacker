@@ -373,14 +373,37 @@ uv run attacker skill dry-run state-poisoning-evaluator --payload '{\"documents\
 
 ## 生产化路线图
 
-当前 V1 定位为单实例、授权环境中的评测服务。以下内容不属于 V1 已交付能力：
+当前版本在保留单 API Key、暂不引入身份平面的前提下，提供以下生产基础：
 
-- PostgreSQL 和多实例事务/锁；
-- 分布式任务队列和 worker 调度；
+- PostgreSQL SQLAlchemy 数据库和 PostgreSQL LangGraph checkpoint；
+- 基于数据库租约、`FOR UPDATE SKIP LOCKED`、心跳和过期恢复的持久化 Run Job；
+- `env:`（仅本地）、受限 `file:` 和 Vault KV v2 `vault:` Secret 引用；
+- 会拒绝 SQLite、自动建表、弱控制密钥和未签名外部装备的生产配置门禁；
+- request ID、结构化日志、Prometheus 指标、可选 OpenTelemetry OTLP；
+- liveness、依赖 readiness、非 root 容器、PostgreSQL/API/worker Compose；
+- 校验 checksum 的 PostgreSQL 与装备归档备份/空目标恢复脚本。
+
+以下内容仍不是已交付能力：
+
 - OIDC/JWT、用户体系、RBAC 和审批人组织权限；
-- 外部 secrets manager 与自动密钥轮换；
-- 指标、链路追踪、告警和集中日志；
-- 数据备份、恢复、归档和保留策略；
-- 容器编排、水平扩缩容和高可用部署。
+- PostgreSQL、Vault、入口、遥测和存储后端自身的跨可用区高可用；
+- Kubernetes/Helm、自动水平扩缩容和平台级网络策略；
+- 由本仓库直接运营的集中日志、告警后端和 Secret 自动轮换；
+- 已在目标生产环境完成的负载、混沌、渗透和灾备恢复证明。
 
-在公网、多租户或关键生产环境部署前，应先完成上述能力和独立安全评审。
+在公网、多租户或关键生产环境部署前，应完成目标环境验证和独立安全评审。
+
+生产部署、升级、回滚、Worker 排空、SLO、告警和灾备步骤见
+[`docs/operations/production-runbook.md`](docs/operations/production-runbook.md)。
+
+队列提交示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/jobs \
+  -H "X-API-Key: $ATTACKER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"request_id":"stateful-20260730-001","kind":"stateful","payload":{"profile":"hardened"}}'
+```
+
+Durable Job 不接受 password、token、API key 等原始 Secret 字段；敏感执行必须通过
+Provider Instance Secret 引用绑定。身份、OIDC、RBAC 仍明确不在当前范围内。

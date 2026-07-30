@@ -3,7 +3,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import func, select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -252,28 +252,28 @@ class RunRepository:
         }
         async with self.session_factory.begin() as session:
             step_id = str(uuid4())
-            inserted_step_id = await session.scalar(
-                sqlite_insert(RunStepRecord)
-                .values(
-                    id=step_id,
-                    run_id=run_id,
-                    case_id=result.sample_id,
-                    operation_id=operation_id,
-                    sequence=1,
-                    status="completed",
-                    outcome=outcome.value,
-                    result_json=result_json,
-                )
-                .on_conflict_do_nothing()
-                .returning(RunStepRecord.id)
-            )
-            if inserted_step_id is None:
+            try:
+                async with session.begin_nested():
+                    session.add(
+                        RunStepRecord(
+                            id=step_id,
+                            run_id=run_id,
+                            case_id=result.sample_id,
+                            operation_id=operation_id,
+                            sequence=1,
+                            status="completed",
+                            outcome=outcome.value,
+                            result_json=result_json,
+                        )
+                    )
+                    await session.flush()
+            except IntegrityError:
                 existing = await session.scalar(
                     select(RunStepRecord).where(RunStepRecord.operation_id == operation_id)
                 )
                 if existing is not None:
                     return existing.result_json
-                raise RuntimeError("layered result conflicts with an existing run step")
+                raise RuntimeError("layered result conflicts with an existing run step") from None
 
             last_sequence = await session.scalar(
                 select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)

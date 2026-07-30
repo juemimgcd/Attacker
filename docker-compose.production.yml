@@ -1,0 +1,229 @@
+name: attacker-production
+
+x-attacker-environment: &attacker-environment
+  APP__APP_ENV: production
+  APP__DEBUG: "false"
+  LOG__LOG_LEVEL: INFO
+  LOG__LOG_DIR: /var/log/attacker
+  LOG__STRUCTURED_JSON: "true"
+  DATABASE__URL_FILE: /run/secrets/database_url
+  DATABASE__AUTO_CREATE_SCHEMA: "false"
+  DATABASE__POOL_SIZE: "10"
+  DATABASE__MAX_OVERFLOW: "20"
+  DATABASE__POOL_PRE_PING: "true"
+  CHECKPOINT__URL_FILE: /run/secrets/checkpoint_url
+  SECURITY__API_KEY_FILE: /run/secrets/api_key
+  SECURITY__METRICS_API_KEY_FILE: /run/secrets/metrics_api_key
+  SECRETS__BACKEND: file
+  SECRETS__ALLOW_ENVIRONMENT_REFERENCES: "false"
+  SECRETS__FILE_ROOT: /run/attacker-secrets
+  EQUIPMENT__ROOT: /app/equipment
+  EQUIPMENT__CONTRACTS_ROOT: /app/contracts
+  EQUIPMENT__WORKSPACE_ROOT: /var/lib/attacker/equipment-workspaces
+  EQUIPMENT__ARCHIVE_ROOT: /var/lib/attacker/equipment-archive
+  EQUIPMENT__REQUIRE_CHECKSUM: "true"
+  EQUIPMENT__REQUIRE_SIGNATURE: "true"
+  EQUIPMENT__ALLOW_UNTRUSTED: "false"
+  EQUIPMENT__TRUST_ROOTS_FILE: /etc/attacker/equipment_trust_roots.json
+  EQUIPMENT__REVOCATIONS_FILE: /etc/attacker/equipment_revocations.json
+  OBSERVABILITY__METRICS_ENABLED: "true"
+  OBSERVABILITY__TRACING_ENABLED: "${ATTACKER_TRACING_ENABLED:-true}"
+  OBSERVABILITY__OTLP_ENDPOINT: http://otel-collector:4318/v1/traces
+  OBSERVABILITY__SERVICE_NAME: attacker
+  OBSERVABILITY__DEPLOYMENT_ENVIRONMENT: production
+
+x-attacker-service: &attacker-service
+  image: "${ATTACKER_IMAGE:-attacker:production}"
+  environment: *attacker-environment
+  secrets:
+    - database_url
+    - checkpoint_url
+    - api_key
+    - metrics_api_key
+  volumes:
+    - attacker-data:/var/lib/attacker
+    - attacker-logs:/var/log/attacker
+    - prometheus-multiproc:/var/lib/attacker-prometheus
+    - "${ATTACKER_PROVIDER_SECRETS_DIR:-./deploy/provider-secrets}:/run/attacker-secrets:ro"
+    - ./deploy/security/equipment_trust_roots.json:/etc/attacker/equipment_trust_roots.json:ro
+    - ./deploy/security/equipment_revocations.json:/etc/attacker/equipment_revocations.json:ro
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+  init: true
+  networks: [backend]
+
+services:
+  postgres:
+    image: postgres:17.5-bookworm
+    environment:
+      POSTGRES_DB: attacker
+      POSTGRES_USER: attacker
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U attacker -d attacker"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+    shm_size: 256m
+    stop_grace_period: 90s
+    pids_limit: 256
+    mem_limit: 4g
+    cpus: 2.0
+    networks: [backend]
+
+  migrate:
+    <<: *attacker-service
+    command: ["alembic", "upgrade", "head"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *attacker-service
+    environment:
+      <<: *attacker-environment
+      PROMETHEUS_MULTIPROC_DIR: /var/lib/attacker-prometheus
+    command:
+      [
+        "uvicorn",
+        "main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--workers",
+        "${ATTACKER_API_WORKERS:-2}",
+        "--proxy-headers",
+        "--forwarded-allow-ips=*"
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    ports:
+      - "${ATTACKER_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 90s
+    mem_limit: 4g
+    cpus: 2.0
+    networks: [backend, egress]
+
+  worker:
+    <<: *attacker-service
+    healthcheck:
+      disable: true
+    command:
+      [
+        "attacker",
+        "worker",
+        "--worker-id",
+        "${ATTACKER_WORKER_ID:-worker-1}",
+        "--concurrency",
+        "${ATTACKER_WORKER_CONCURRENCY:-2}"
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+    stop_grace_period: 90s
+    mem_limit: 4g
+    cpus: 2.0
+    networks: [backend, egress]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    secrets:
+      - metrics_api_key
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    pids_limit: 128
+    mem_limit: 2g
+    cpus: 1.0
+    networks: [backend]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.130.0
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./deploy/otel-collector.yml:/etc/otelcol/config.yml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.0
+    networks: [backend]
+
+secrets:
+  postgres_password:
+    file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/postgres_password"
+  database_url:
+    file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/database_url"
+  checkpoint_url:
+    file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/checkpoint_url"
+  api_key:
+    file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/api_key"
+  metrics_api_key:
+    file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/metrics_api_key"
+
+volumes:
+  postgres-data:
+  attacker-data:
+  attacker-logs:
+  prometheus-data:
+  prometheus-multiproc:
+
+networks:
+  backend:
+    internal: true
+  egress:

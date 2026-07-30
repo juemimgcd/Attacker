@@ -22,8 +22,9 @@ def setup_logger() -> None:
         sys.stderr,
         level=settings.log.log_level,
         enqueue=True,
-        backtrace=True,
+        backtrace=settings.app.debug,
         diagnose=settings.app.debug,
+        serialize=settings.log.structured_json,
     )
     logger.add(
         log_dir / "attacker.log",
@@ -32,6 +33,7 @@ def setup_logger() -> None:
         retention=settings.log.log_retention,
         encoding="utf-8",
         enqueue=True,
-        backtrace=True,
+        backtrace=settings.app.debug,
         diagnose=settings.app.debug,
+        serialize=settings.log.structured_json,
     )
