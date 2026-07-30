@@ -35,8 +35,7 @@ class JudgeEngine:
         )
         false_positive_count = sum(
             observation.expected_verdict == EvaluationVerdict.safe
-            and observation.actual_result.verdict
-            == EvaluationVerdict.violation
+            and observation.actual_result.verdict == EvaluationVerdict.violation
             for observation in observation_list
         )
         false_negative_count = sum(
@@ -45,16 +44,12 @@ class JudgeEngine:
             for observation in observation_list
         )
         inconclusive_count = sum(
-            observation.actual_result.verdict
-            == EvaluationVerdict.inconclusive
+            observation.actual_result.verdict == EvaluationVerdict.inconclusive
             for observation in observation_list
         )
         total_cases = len(observation_list)
         category_counts = {
-            category: sum(
-                observation.category == category
-                for observation in observation_list
-            )
+            category: sum(observation.category == category for observation in observation_list)
             for category in CalibrationCategory
         }
         return CalibrationReport(
@@ -63,18 +58,12 @@ class JudgeEngine:
             false_negative_count=false_negative_count,
             inconclusive_count=inconclusive_count,
             false_positive_rate=(
-                false_positive_count / expected_safe_count
-                if expected_safe_count
-                else 0
+                false_positive_count / expected_safe_count if expected_safe_count else 0
             ),
             false_negative_rate=(
-                false_negative_count / expected_violation_count
-                if expected_violation_count
-                else 0
+                false_negative_count / expected_violation_count if expected_violation_count else 0
             ),
-            inconclusive_rate=(
-                inconclusive_count / total_cases if total_cases else 0
-            ),
+            inconclusive_rate=(inconclusive_count / total_cases if total_cases else 0),
             category_counts=category_counts,
         )
 
@@ -104,7 +93,10 @@ class JudgeEngine:
             *structured_results,
             *domain_results,
         ]
-        self._validate_external_stages(results)
+        self._validate_external_results(
+            results=results[1:],
+            allowed_evidence_refs=set(evidence_refs),
+        )
 
         if self._requires_model_judge(results) and model_judge is not None:
             model_result = model_judge(
@@ -114,6 +106,8 @@ class JudgeEngine:
             )
             if model_result.stage != EvaluationStage.model_judge:
                 raise ValueError("model_judge must return a model_judge result")
+            if not set(model_result.evidence_refs).issubset(evidence_refs):
+                raise ValueError("model_judge referenced evidence outside the governed request")
             results.append(model_result)
 
         return self._aggregate(results)
@@ -178,7 +172,7 @@ class JudgeEngine:
                 rule_version="transport-v1",
                 evidence_refs=evidence_refs,
                 confidence=1,
-                issues=[EvaluationIssue.connection_error],
+                issues=[EvaluationIssue.server_error],
             )
 
         return None
@@ -222,60 +216,43 @@ class JudgeEngine:
         )
 
     # 外部结果必须来自结构化检查或领域 Evaluator，不能冒充 Core 阶段。
-    def _validate_external_stages(
+    def _validate_external_results(
         self,
         results: list[EvaluatorResult],
+        allowed_evidence_refs: set[str],
     ) -> None:
         allowed_external_stages = {
             EvaluationStage.structured_trace,
             EvaluationStage.domain_evaluator,
         }
-        for result in results[1:]:
+        for result in results:
             if result.stage not in allowed_external_stages:
+                raise ValueError("external evaluator result has unsupported stage")
+            if not set(result.evidence_refs).issubset(allowed_evidence_refs):
                 raise ValueError(
-                    "external evaluator result has unsupported stage"
+                    "external evaluator referenced evidence outside the governed request"
                 )
 
     def _requires_model_judge(
         self,
         results: list[EvaluatorResult],
     ) -> bool:
-        return not any(
-            result.verdict != EvaluationVerdict.inconclusive
-            for result in results
-        )
+        return not any(result.verdict != EvaluationVerdict.inconclusive for result in results)
 
     # Core 对一致结论聚合；结论或违规风险冲突时显式输出 inconclusive。
     def _aggregate(self, results: list[EvaluatorResult]) -> JudgeResult:
         decisive_results = [
-            result
-            for result in results
-            if result.verdict != EvaluationVerdict.inconclusive
+            result for result in results if result.verdict != EvaluationVerdict.inconclusive
         ]
-        decisive_outcomes = {
-            (result.verdict, result.risk_level)
-            for result in decisive_results
-        }
+        decisive_outcomes = {(result.verdict, result.risk_level) for result in decisive_results}
         evidence_refs = sorted(
-            {
-                evidence_ref
-                for result in results
-                for evidence_ref in result.evidence_refs
-            }
+            {evidence_ref for result in results for evidence_ref in result.evidence_refs}
         )
         matched_patterns = sorted(
-            {
-                pattern
-                for result in results
-                for pattern in result.matched_patterns
-            }
+            {pattern for result in results for pattern in result.matched_patterns}
         )
         issues = sorted(
-            {
-                issue
-                for result in results
-                for issue in result.issues
-            },
+            {issue for result in results for issue in result.issues},
             key=lambda issue: issue.value,
         )
 
@@ -304,9 +281,7 @@ class JudgeEngine:
                 matched_patterns=matched_patterns,
                 reason=decision.reason,
                 evidence_refs=evidence_refs,
-                confidence=min(
-                    result.confidence for result in decisive_results
-                ),
+                confidence=min(result.confidence for result in decisive_results),
                 issues=issues,
                 evaluator_results=results,
             )

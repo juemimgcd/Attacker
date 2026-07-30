@@ -44,15 +44,11 @@ class RunControlService:
                 **state.model_dump(),
                 "last_state_fingerprint": progress.state_fingerprint,
                 "consecutive_no_gain_steps": (
-                    0
-                    if has_information_gain
-                    else state.consecutive_no_gain_steps + 1
+                    0 if has_information_gain else state.consecutive_no_gain_steps + 1
                 ),
                 "repeated_state_count": repeated_state_count,
                 "planner_failure_count": (
-                    state.planner_failure_count + 1
-                    if progress.planner_failed
-                    else 0
+                    state.planner_failure_count + 1 if progress.planner_failed else 0
                 ),
                 "target_transport_failure_count": (
                     state.target_transport_failure_count + 1
@@ -96,10 +92,7 @@ class RunControlService:
             for coverage_id in context.required_coverage_ids
         ):
             return self._stop(StopReason.completed, "required_coverage_completed")
-        if (
-            state.consecutive_no_gain_steps
-            >= limits.max_consecutive_no_gain_steps
-        ):
+        if state.consecutive_no_gain_steps >= limits.max_consecutive_no_gain_steps:
             return self._stop(
                 StopReason.no_information_gain,
                 "consecutive_no_information_gain",
@@ -113,10 +106,7 @@ class RunControlService:
             )
         if state.planner_failure_count >= limits.max_planner_failures:
             return self._stop(StopReason.planner_failed, "planner_failure_limit")
-        if (
-            state.target_transport_failure_count
-            >= limits.max_target_transport_failures
-        ):
+        if state.target_transport_failure_count >= limits.max_target_transport_failures:
             return self._stop(
                 StopReason.target_unavailable,
                 "target_transport_failure_limit",
@@ -173,6 +163,37 @@ class RunControlService:
             candidate_snapshot_id=state.candidate_snapshot_id,
         )
 
+        if state.status in {
+            RunStatus.stopped,
+            RunStatus.completed,
+            RunStatus.failed,
+            RunStatus.cancelled,
+        }:
+            return (
+                state,
+                FallbackDecision(
+                    action=FallbackAction.terminate,
+                    stop_reason=state.stop_reason,
+                    event=event,
+                ),
+            )
+
+        if self._budget_exhausted(state):
+            decision = FallbackDecision(
+                action=FallbackAction.terminate,
+                stop_reason=StopReason.budget_exhausted,
+                event=event,
+            )
+            return (
+                self._update_state(
+                    state,
+                    status=RunStatus.stopped,
+                    stop_reason=StopReason.budget_exhausted,
+                    planner_fallback_snapshot=fallback_snapshot,
+                ),
+                decision,
+            )
+
         if state.planner_fallback_mode == PlannerFallbackMode.fail_closed:
             decision = FallbackDecision(
                 action=FallbackAction.terminate,
@@ -202,22 +223,6 @@ class RunControlService:
                     status=RunStatus.paused,
                     stop_reason=None,
                     checkpoint_ref=context.checkpoint_ref,
-                    planner_fallback_snapshot=fallback_snapshot,
-                ),
-                decision,
-            )
-
-        if self._budget_exhausted(state):
-            decision = FallbackDecision(
-                action=FallbackAction.terminate,
-                stop_reason=StopReason.budget_exhausted,
-                event=event,
-            )
-            return (
-                self._update_state(
-                    state,
-                    status=RunStatus.stopped,
-                    stop_reason=StopReason.budget_exhausted,
                     planner_fallback_snapshot=fallback_snapshot,
                 ),
                 decision,
@@ -272,12 +277,12 @@ class RunControlService:
         return (
             budget.steps_used >= budget.max_steps
             or budget.target_calls_used >= budget.max_target_calls
-            or budget.provider_calls_used >= budget.max_provider_calls
-            or budget.elapsed_seconds >= budget.max_duration_seconds
             or (
-                budget.max_cost is not None
-                and budget.cost_used >= budget.max_cost
+                budget.max_provider_calls > 0
+                and budget.provider_calls_used >= budget.max_provider_calls
             )
+            or budget.elapsed_seconds >= budget.max_duration_seconds
+            or (budget.max_cost is not None and budget.cost_used >= budget.max_cost)
         )
 
     def _stop(self, reason: StopReason, reason_code: str) -> StopDecision:

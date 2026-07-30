@@ -52,6 +52,8 @@ class PlannerFallbackSnapshot(BaseModel):
     reason: str = Field(min_length=1)
     actual_model_id: str = Field(min_length=1)
     actual_provider_id: str = Field(min_length=1)
+
+
 # 定义运行预算上限及其当前消耗快照。
 class RunBudgetSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
@@ -67,7 +69,7 @@ class RunBudgetSnapshot(BaseModel):
     elapsed_seconds: float = Field(default=0, ge=0)
     cost_used: Decimal = Field(default=Decimal(0), ge=0)
 
-    # 拒绝不可能的预算快照，避免恢复时出现负的剩余预算。
+    # 次数和时长由 Core 预先约束；实际 Provider 成本允许在单次调用后越过上限并触发停止。
     @model_validator(mode="after")
     def validate_usage_within_limits(self) -> Self:
         if self.steps_used > self.max_steps:
@@ -78,8 +80,6 @@ class RunBudgetSnapshot(BaseModel):
             raise ValueError("provider_calls_used cannot exceed max_provider_calls")
         if self.elapsed_seconds > self.max_duration_seconds:
             raise ValueError("elapsed_seconds cannot exceed max_duration_seconds")
-        if self.max_cost is not None and self.cost_used > self.max_cost:
-            raise ValueError("cost_used cannot exceed max_cost")
         return self
 
 
