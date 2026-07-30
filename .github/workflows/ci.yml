@@ -10,6 +10,20 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.5-bookworm
+        env:
+          POSTGRES_DB: attacker
+          POSTGRES_USER: attacker
+          POSTGRES_PASSWORD: attacker-ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U attacker -d attacker"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       PYTHONUTF8: "1"
     steps:
@@ -29,3 +43,77 @@ jobs:
         run: uv run pytest -q
       - name: Compile
         run: uv run python -m compileall -q app conf alembic
+      - name: SQLite migration round trip
+        env:
+          DATABASE__URL: sqlite+aiosqlite:///ci-attacker.sqlite3
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade 20260730_0006
+          uv run alembic upgrade head
+      - name: PostgreSQL migration and worker smoke
+        env:
+          DATABASE__URL: postgresql+asyncpg://attacker:attacker-ci-password@127.0.0.1:5432/attacker
+          DATABASE__AUTO_CREATE_SCHEMA: "false"
+          CHECKPOINT__URL: postgresql://attacker:attacker-ci-password@127.0.0.1:5432/attacker
+        run: |
+          echo "postgres-smoke: alembic upgrade"
+          uv run alembic upgrade head
+          echo "postgres-smoke: runtime start"
+          timeout --signal=INT --kill-after=10s 150s uv run python -u - <<'PY'
+          import asyncio
+
+          from app.runtime import create_runtime
+          from app.schemas.job_schema import RunJobCreate
+          from app.services.job_service import JobWorker
+          from conf.settings import settings
+
+          async def smoke():
+              print("postgres-smoke: entering runtime", flush=True)
+              async with create_runtime(settings, recover_cleanups=True) as runtime:
+                  print("postgres-smoke: runtime ready", flush=True)
+                  queued = await runtime.job_repository.enqueue(
+                      RunJobCreate(
+                          request_id="postgres-ci-worker-smoke",
+                          kind="stateful",
+                          payload={"profile": "hardened"},
+                      ),
+                      default_max_attempts=settings.worker.max_attempts,
+                  )
+                  print(f"postgres-smoke: enqueued {queued['id']}", flush=True)
+                  worker = JobWorker(
+                      worker_id="postgres-ci-worker",
+                      repository=runtime.job_repository,
+                      dispatcher=runtime.job_dispatcher,
+                      settings=settings.worker,
+                  )
+                  await worker.run(asyncio.Event(), once=True)
+                  print("postgres-smoke: worker stopped", flush=True)
+                  completed = await runtime.job_repository.get(queued["id"])
+                  assert completed["status"] == "succeeded", completed
+                  assert completed["result"]["run_id"], completed
+                  print("postgres-smoke: job succeeded", flush=True)
+
+          asyncio.run(smoke())
+          print("postgres-smoke: runtime closed", flush=True)
+          PY
+          echo "postgres-smoke: alembic downgrade"
+          uv run alembic downgrade 20260730_0006
+          echo "postgres-smoke: alembic re-upgrade"
+          uv run alembic upgrade head
+      - name: Validate fail-closed production profile
+        env:
+          APP__APP_ENV: local
+          APP__DEBUG: "false"
+          LOG__STRUCTURED_JSON: "true"
+          DATABASE__URL: postgresql+asyncpg://attacker:attacker-ci-password@127.0.0.1:5432/attacker
+          DATABASE__AUTO_CREATE_SCHEMA: "false"
+          CHECKPOINT__URL: postgresql://attacker:attacker-ci-password@127.0.0.1:5432/attacker
+          SECURITY__API_KEY: ci-control-key-00000000000000000000000000000000
+          SECURITY__METRICS_API_KEY: ci-metrics-key-00000000000000000000000000000000
+          SECRETS__BACKEND: file
+          SECRETS__ALLOW_ENVIRONMENT_REFERENCES: "false"
+          SECRETS__FILE_ROOT: deploy/provider-secrets
+          EQUIPMENT__REQUIRE_SIGNATURE: "true"
+          EQUIPMENT__TRUST_ROOTS_FILE: deploy/security/equipment_trust_roots.json
+          EQUIPMENT__REVOCATIONS_FILE: deploy/security/equipment_revocations.json
+        run: uv run attacker config validate-production

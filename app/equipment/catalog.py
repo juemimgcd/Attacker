@@ -221,6 +221,12 @@ class EquipmentCatalog:
             ):
                 raise ValueError("Core-shipped package checksum is not recognized")
             if (
+                self.settings.require_signature
+                and source_type != "builtin"
+                and signature_status != "verified"
+            ):
+                raise ValueError("package signature is required")
+            if (
                 package_type in {PackageType.provider, PackageType.skill}
                 and manifest_data.get("trust_level") == TrustLevel.trusted_builtin.value
                 and source_type != "builtin"
@@ -343,8 +349,6 @@ class EquipmentCatalog:
             raise SignatureRevokedError("package checksum is revoked")
         signature_path = root / "SIGNATURE.json"
         if not signature_path.is_file():
-            if self.settings.require_signature:
-                raise ValueError("package signature is required")
             return "not_required", None, None
         trust_roots_path = Path(self.settings.trust_roots_file)
         if not trust_roots_path.is_file():

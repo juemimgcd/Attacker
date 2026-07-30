@@ -81,7 +81,7 @@ class HarnessService:
         )
         health_redaction_values: tuple[str, ...] = ()
         try:
-            with self.secret_broker.lease(instance["secret_refs"]) as secrets:
+            async with self.secret_broker.lease(instance["secret_refs"]) as secrets:
                 health_redaction_values = secrets.redaction_values
                 result = await self.runner.execute(
                     package,
@@ -242,7 +242,7 @@ class HarnessService:
         provider_redaction_values: tuple[str, ...] = ()
         result = ProviderResult(status="error", error_code="provider_protocol_error")
         try:
-            with self.secret_broker.lease(instance["secret_refs"]) as secrets:
+            async with self.secret_broker.lease(instance["secret_refs"]) as secrets:
                 provider_redaction_values = secrets.redaction_values
                 raw_result = await self.runner.execute(
                     package,
@@ -860,7 +860,7 @@ class HarnessService:
                     ),
                     config=instance["config"],
                 )
-                with self.secret_broker.lease(instance["secret_refs"]) as secrets:
+                async with self.secret_broker.lease(instance["secret_refs"]) as secrets:
                     cleanup_redaction_values = secrets.redaction_values
                     result = await self.runner.execute(
                         package,

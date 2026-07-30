@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from threading import Lock
 
+from app.observability import record_equipment_counter, record_equipment_duration
+
 
 class EquipmentMetrics:
     def __init__(self) -> None:
@@ -15,6 +17,7 @@ class EquipmentMetrics:
     def increment(self, name: str, value: int = 1) -> None:
         with self._lock:
             self._counters[name] += value
+        record_equipment_counter(name, value)
 
     def observe(self, name: str, duration_ms: float) -> None:
         with self._lock:
@@ -22,6 +25,7 @@ class EquipmentMetrics:
             metric["count"] = int(metric["count"]) + 1
             metric["total"] = float(metric["total"]) + duration_ms
             metric["max"] = max(float(metric["max"]), duration_ms)
+        record_equipment_duration(name, duration_ms)
 
     def snapshot(self) -> dict[str, dict]:
         with self._lock:
