@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from time import perf_counter
@@ -9,7 +10,7 @@ from uuid import uuid4
 from app.equipment.json_schema import validate_instance
 from app.equipment.metrics import EquipmentMetrics
 from app.equipment.runner import EquipmentProtocolError, EquipmentRunner
-from app.equipment.security import SecretBroker, redact, summarize
+from app.equipment.security import SecretBroker, redact, sensitive_values, summarize
 from app.repositories.equipment_repository import EquipmentRepository
 from app.schemas.equipment_schema import (
     CapabilityContractManifest,
@@ -78,17 +79,21 @@ class HarnessService:
             budget=ExecutionBudget(max_provider_calls=1),
             config=instance["config"],
         )
+        health_redaction_values: tuple[str, ...] = ()
         try:
-            result = await self.runner.execute(
-                package,
-                method="healthcheck",
-                kwargs={"context": context},
-                workspace=self._workspace(context.operation_id),
-                timeout_seconds=float(
-                    package["manifest"].get("healthcheck", {}).get("timeout_seconds", 5)
-                ),
-            )
-        except (TimeoutError, EquipmentProtocolError, ValueError):
+            with self.secret_broker.lease(instance["secret_refs"]) as secrets:
+                health_redaction_values = secrets.redaction_values
+                result = await self.runner.execute(
+                    package,
+                    method="healthcheck",
+                    kwargs={"context": context},
+                    workspace=self._workspace(context.operation_id),
+                    timeout_seconds=float(
+                        package["manifest"].get("healthcheck", {}).get("timeout_seconds", 5)
+                    ),
+                    secret_environment=secrets.provider_environment(list(instance["secret_refs"])),
+                )
+        except (LookupError, TimeoutError, EquipmentProtocolError, ValueError) as exc:
             await self.repository.update_health(instance_id, "unhealthy")
             if self.metrics is not None:
                 self.metrics.increment("provider_instance_error")
@@ -96,7 +101,8 @@ class HarnessService:
                     "provider_instance_healthcheck",
                     (perf_counter() - started) * 1000,
                 )
-            raise
+            safe_error = str(redact(str(exc), health_redaction_values))
+            raise type(exc)(safe_error) from None
         healthy = bool(result.get("healthy", result.get("status") == "healthy"))
         await self.repository.update_health(instance_id, "healthy" if healthy else "unhealthy")
         if self.metrics is not None:
@@ -212,17 +218,32 @@ class HarnessService:
                 "package_checksum": package["checksum"],
                 "provider_instance_id": instance["instance_id"],
                 "config_revision": instance["config_revision"],
+                "secret_binding_revision": instance["secret_binding_revision"],
                 "capability": capability,
                 "contract_checksum": contract_package["checksum"],
                 "test_principal_ref": context.test_principal_ref,
+                "request_fingerprint": self._fingerprint(
+                    {
+                        "capability": capability,
+                        "payload": payload,
+                        "context": context.model_dump(mode="json"),
+                    }
+                ),
                 "input_summary": summarize(payload),
             }
         )
         if not created:
             return existing
         started = perf_counter()
+        observed_attempts = 1
+        safe_output: dict[str, Any] = {}
+        safe_evidence: list[dict[str, Any]] = []
+        safe_leases: list[dict[str, Any]] = []
+        provider_redaction_values: tuple[str, ...] = ()
+        result = ProviderResult(status="error", error_code="provider_protocol_error")
         try:
             with self.secret_broker.lease(instance["secret_refs"]) as secrets:
+                provider_redaction_values = secrets.redaction_values
                 raw_result = await self.runner.execute(
                     package,
                     method="invoke",
@@ -239,6 +260,16 @@ class HarnessService:
                     secret_environment=secrets.provider_environment(list(instance["secret_refs"])),
                 )
                 result = ProviderResult.model_validate(raw_result)
+                observed_attempts = result.physical_attempts
+                result_bytes = len(
+                    json.dumps(
+                        result.model_dump(mode="json"),
+                        separators=(",", ":"),
+                        default=str,
+                    ).encode()
+                )
+                if result_bytes > int(package["manifest"]["runtime"]["max_response_bytes"]):
+                    raise ValueError("Provider result exceeds its declared byte limit")
                 remaining_calls = (
                     min(
                         policy.max_provider_calls,
@@ -253,46 +284,94 @@ class HarnessService:
                     and result.physical_attempts != 1
                 ):
                     raise ValueError("Provider retried a Contract that forbids retries")
-                response_bytes = len(
-                    json.dumps(result.output, separators=(",", ":"), default=str).encode()
-                )
-                response_limit = min(
-                    contract.limits.response_bytes_max,
-                    int(package["manifest"]["runtime"]["max_response_bytes"]),
-                )
-                if response_bytes > response_limit:
-                    raise ValueError("Provider response exceeds the Contract limit")
-                validate_instance(
-                    result.output,
-                    self._schema(contract_package, contract.response_schema),
-                )
-                evidence_types = {item.evidence_type for item in result.evidence}
-                missing_evidence = set(contract.evidence.required) - evidence_types
-                if missing_evidence:
-                    raise ValueError(
-                        f"Provider result is missing required Evidence: {sorted(missing_evidence)}"
+                if result.status == "success":
+                    response_bytes = len(
+                        json.dumps(
+                            result.output,
+                            separators=(",", ":"),
+                            default=str,
+                        ).encode()
                     )
+                    response_limit = min(
+                        contract.limits.response_bytes_max,
+                        int(package["manifest"]["runtime"]["max_response_bytes"]),
+                    )
+                    if response_bytes > response_limit:
+                        raise ValueError("Provider response exceeds the Contract limit")
+                    validate_instance(
+                        result.output,
+                        self._schema(contract_package, contract.response_schema),
+                    )
+                    evidence_types = {item.evidence_type for item in result.evidence}
+                    missing_evidence = set(contract.evidence.required) - evidence_types
+                    if missing_evidence:
+                        raise ValueError(
+                            "Provider result is missing required Evidence: "
+                            f"{sorted(missing_evidence)}"
+                        )
+                elif result.error_code not in contract.error_codes:
+                    raise ValueError("Provider failure must use a declared Contract error code")
                 safe_output = redact(result.output, secrets.redaction_values)
-                safe_evidence = redact(
-                    [item.model_dump(mode="json") for item in result.evidence],
-                    secrets.redaction_values,
+                safe_evidence = [
+                    {
+                        **item.model_dump(mode="json"),
+                        "summary": redact(item.summary, secrets.redaction_values),
+                    }
+                    for item in result.evidence
+                ]
+                raw_leases = [item.model_dump(mode="json") for item in result.resource_leases]
+                safe_leases = [
+                    {
+                        **lease,
+                        "external_resource_id": redact(
+                            lease["external_resource_id"],
+                            secrets.redaction_values,
+                        ),
+                        "cleanup_payload": redact(
+                            lease["cleanup_payload"],
+                            secrets.redaction_values,
+                        ),
+                    }
+                    for lease in raw_leases
+                ]
+                if safe_leases != raw_leases:
+                    raise ValueError("Resource Lease contains secret or sensitive data")
+                if safe_leases and result.status != "success":
+                    raise ValueError("only successful Provider results may create Resource Leases")
+                implemented = {
+                    str(item["contract"]) for item in package["manifest"].get("implements", [])
+                }
+                unknown_cleanup = sorted(
+                    {
+                        str(lease["cleanup_contract"])
+                        for lease in safe_leases
+                        if str(lease["cleanup_contract"]) not in implemented
+                    }
                 )
+                if unknown_cleanup:
+                    raise ValueError(
+                        f"Resource Lease uses undeclared cleanup Contracts: {unknown_cleanup}"
+                    )
         except TimeoutError:
             result = ProviderResult(
                 status="timeout",
                 error_code="provider_timeout",
                 error_message="Provider execution timed out",
+                physical_attempts=observed_attempts,
             )
             safe_output = {}
             safe_evidence = []
+            safe_leases = []
         except (ValueError, EquipmentProtocolError) as exc:
             result = ProviderResult(
                 status="error",
                 error_code="provider_protocol_error",
-                error_message=str(exc),
+                error_message=str(redact(str(exc), provider_redaction_values)),
+                physical_attempts=observed_attempts,
             )
             safe_output = {}
             safe_evidence = []
+            safe_leases = []
         evidence = [
             {
                 "event_type": (
@@ -314,15 +393,28 @@ class HarnessService:
                 "evidence": safe_evidence,
             }
         ]
+        persisted_result = result.model_dump(mode="json")
+        persisted_result["output"] = safe_output
+        persisted_result["evidence"] = safe_evidence
+        persisted_result["resource_leases"] = safe_leases
+        persisted_result["external_operation_id"] = redact(
+            result.external_operation_id,
+            provider_redaction_values,
+        )
+        persisted_result["error_message"] = redact(
+            result.error_message,
+            provider_redaction_values,
+        )
         completed = await self.repository.complete_execution(
             context.operation_id,
             status=result.status,
+            result=persisted_result,
             output_summary=summarize(safe_output),
             evidence=evidence,
             physical_attempts=result.physical_attempts,
             error_code=result.error_code,
+            leases=safe_leases,
         )
-        completed["output"] = safe_output
         if self.metrics is not None:
             self.metrics.increment("provider_call")
             self.metrics.increment(
@@ -336,13 +428,6 @@ class HarnessService:
             self.metrics.observe(
                 "provider_call",
                 (perf_counter() - started) * 1000,
-            )
-        if result.resource_leases:
-            completed["resource_leases"] = await self.repository.create_leases(
-                run_id=effective_run_id,
-                operation_id=context.operation_id,
-                provider_instance_id=instance["instance_id"],
-                leases=[lease.model_dump(mode="json") for lease in result.resource_leases],
             )
         return completed
 
@@ -400,12 +485,19 @@ class HarnessService:
                 "package_version": package["version"],
                 "package_checksum": package["checksum"],
                 "test_principal_ref": context.test_principal_ref,
+                "request_fingerprint": self._fingerprint(
+                    {
+                        "payload": payload,
+                        "context": context.model_dump(mode="json"),
+                    }
+                ),
                 "input_summary": summarize(payload),
             }
         )
         if not created:
             return existing
         started = perf_counter()
+        skill_redaction_values = sensitive_values(payload)
 
         capability_results: dict[str, CapabilityResult] = {}
         request_fingerprints: dict[str, str] = {}
@@ -449,15 +541,15 @@ class HarnessService:
                     ),
                 )
                 result = SkillResult.model_validate(raw_result)
-                output_bytes = len(
+                result_bytes = len(
                     json.dumps(
-                        result.output,
+                        result.model_dump(mode="json"),
                         separators=(",", ":"),
                         default=str,
                     ).encode()
                 )
-                if output_bytes > manifest.execution.max_output_bytes:
-                    raise ValueError("Skill output exceeds its declared byte limit")
+                if result_bytes > manifest.execution.max_output_bytes:
+                    raise ValueError("Skill result exceeds its declared byte limit")
                 if not result.capability_requests:
                     if result.status == "success":
                         validate_instance(
@@ -465,12 +557,20 @@ class HarnessService:
                             self._schema(package, manifest.output_schema),
                         )
                     break
+                if result.status != "success":
+                    raise ValueError(
+                        "only a successful Skill continuation may request Capabilities"
+                    )
 
                 for capability_request in result.capability_requests:
                     capability = requirements.get(capability_request.binding)
                     if capability is None:
                         raise PolicyDeniedError(
                             f"Skill requested undeclared binding {capability_request.binding}"
+                        )
+                    if capability not in context.allowed_capabilities:
+                        raise PolicyDeniedError(
+                            f"Skill context does not allow Capability {capability}"
                         )
                     fingerprint = json.dumps(
                         capability_request.payload,
@@ -579,10 +679,33 @@ class HarnessService:
                 provider_calls=provider_calls,
             )
 
+        safe_output = redact(result.output, skill_redaction_values)
+        safe_evidence = [
+            {
+                **item.model_dump(mode="json"),
+                "summary": redact(item.summary, skill_redaction_values),
+            }
+            for item in result.evidence
+        ]
+        safe_result = result.model_dump(mode="json")
+        safe_result["output"] = safe_output
+        safe_result["evidence"] = safe_evidence
+        safe_result["capability_requests"] = [
+            {
+                **request.model_dump(mode="json"),
+                "payload": redact(request.payload, skill_redaction_values),
+            }
+            for request in result.capability_requests
+        ]
+        safe_result["error_message"] = redact(
+            result.error_message,
+            skill_redaction_values,
+        )
         completed = await self.repository.complete_execution(
             context.operation_id,
             status=result.status,
-            output_summary=summarize(result.output),
+            result=safe_result,
+            output_summary=summarize(safe_output),
             evidence=[
                 {
                     "event_type": (
@@ -595,7 +718,7 @@ class HarnessService:
                     "test_principal_ref": context.test_principal_ref,
                     "provider_calls": provider_calls,
                     "redacted": True,
-                    "evidence": [item.model_dump(mode="json") for item in result.evidence],
+                    "evidence": safe_evidence,
                 }
             ],
             physical_attempts=max(skill_attempts, 1),
@@ -631,6 +754,7 @@ class HarnessService:
                 lease["id"],
                 operation_id,
             )
+            cleanup_redaction_values: tuple[str, ...] = ()
             try:
                 if lease["run_id"] is not None:
                     provider_snapshots = [
@@ -736,13 +860,18 @@ class HarnessService:
                     ),
                     config=instance["config"],
                 )
-                result = await self.runner.execute(
-                    package,
-                    method="cleanup",
-                    kwargs={"resource": lease, "context": context},
-                    workspace=self._workspace(operation_id),
-                    timeout_seconds=30,
-                )
+                with self.secret_broker.lease(instance["secret_refs"]) as secrets:
+                    cleanup_redaction_values = secrets.redaction_values
+                    result = await self.runner.execute(
+                        package,
+                        method="cleanup",
+                        kwargs={"resource": lease, "context": context},
+                        workspace=self._workspace(operation_id),
+                        timeout_seconds=30,
+                        secret_environment=secrets.provider_environment(
+                            list(instance["secret_refs"])
+                        ),
+                    )
                 validate_instance(
                     result,
                     self._schema(
@@ -762,7 +891,12 @@ class HarnessService:
                 TimeoutError,
                 EquipmentProtocolError,
             ) as exc:
-                await self.repository.mark_lease_cleanup_failed(lease["id"], operation_id, str(exc))
+                safe_error = str(redact(str(exc), cleanup_redaction_values))
+                await self.repository.mark_lease_cleanup_failed(
+                    lease["id"],
+                    operation_id,
+                    safe_error,
+                )
                 if self.metrics is not None:
                     self.metrics.increment("cleanup_failure")
                 results.append(
@@ -770,27 +904,28 @@ class HarnessService:
                         **lease,
                         "status": "cleanup_failed",
                         "operation_id": operation_id,
-                        "error": str(exc),
+                        "error": safe_error,
                     }
                 )
         return results
 
     async def recover_pending_cleanups(self) -> list[dict[str, Any]]:
         pending = await self.repository.list_pending_leases()
-        groups: dict[str | None, str] = {}
+        groups: dict[tuple[str | None, str], set[str]] = {}
         for lease in pending:
             try:
                 execution = await self.repository.get_execution(lease["created_by_operation_id"])
                 principal_ref = execution["test_principal_ref"]
             except LookupError:
                 principal_ref = "control-plane:cleanup-recovery"
-            groups.setdefault(lease["run_id"], principal_ref)
+            groups.setdefault((lease["run_id"], principal_ref), set()).add(lease["id"])
         results: list[dict[str, Any]] = []
-        for run_id, principal_ref in groups.items():
+        for (run_id, principal_ref), lease_ids in groups.items():
             results.extend(
                 await self.cleanup_leases(
                     run_id=run_id,
                     test_principal_ref=principal_ref,
+                    lease_ids=lease_ids,
                 )
             )
         return results
@@ -989,6 +1124,16 @@ class HarnessService:
     def _schema(package: dict[str, Any], filename: str) -> dict[str, Any]:
         path = Path(package["source_path"]) / filename
         return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _fingerprint(value: Any) -> str:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
     def _workspace(self, operation_id: str) -> Path:
         safe_name = "".join(

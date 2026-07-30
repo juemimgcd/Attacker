@@ -13,10 +13,13 @@ from app.models import (
     EquipmentAuditEventRecord,
     EquipmentExecutionRecord,
     EquipmentPackageRecord,
+    EvaluationRunRecord,
     EventRecord,
+    PolicySnapshotRecord,
     ProviderInstanceRecord,
     ResourceLeaseRecord,
     RunEquipmentSnapshotRecord,
+    TargetRecord,
 )
 from app.schemas.equipment_schema import DiscoveredPackage, PackageType, ProviderInstanceCreate
 
@@ -62,6 +65,7 @@ class EquipmentRepository:
                         publisher_id=package.publisher_id,
                         enabled=(
                             package.validation_status == "valid"
+                            and package.source_type == "builtin"
                             and package.manifest.get("trust_level") == "trusted_builtin"
                         ),
                         validation_status=package.validation_status,
@@ -84,7 +88,9 @@ class EquipmentRepository:
                         event_type = "equipment_validation_failed"
                     elif record.enabled:
                         record.loaded_at = datetime.now(UTC)
-                    elif record.trust_level == "trusted_builtin":
+                    elif (
+                        record.trust_level == "trusted_builtin" and record.source_type == "builtin"
+                    ):
                         record.enabled = True
                         record.loaded_at = datetime.now(UTC)
                     if existing is None:
@@ -363,7 +369,51 @@ class EquipmentRepository:
                 )
             )
             if existing is not None:
-                return self.execution_dict(existing), False
+                expected = {
+                    "run_id": values.get("run_id"),
+                    "step_id": values.get("step_id"),
+                    "package_id": str(values["package_id"]),
+                    "package_version": str(values["package_version"]),
+                    "package_checksum": str(values["package_checksum"]),
+                    "provider_instance_id": values.get("provider_instance_id"),
+                    "config_revision": values.get("config_revision"),
+                    "capability": values.get("capability"),
+                    "capability_contract_checksum": values.get("contract_checksum"),
+                    "test_principal_ref": str(values["test_principal_ref"]),
+                }
+                if existing.request_fingerprint is not None:
+                    expected["secret_binding_revision"] = values.get("secret_binding_revision")
+                actual = {key: getattr(existing, key) for key in expected}
+                if actual != expected:
+                    raise ValueError("operation_id was reused with different execution facts")
+                persisted = self.execution_dict(existing)
+                if existing.request_fingerprint is None:
+                    persisted.update(
+                        {
+                            "status": "in_doubt",
+                            "error_code": "equipment_legacy_execution_in_doubt",
+                            "result": None,
+                            "output": {},
+                            "legacy_result_unavailable": True,
+                        }
+                    )
+                elif existing.request_fingerprint != str(values["request_fingerprint"]):
+                    raise ValueError("operation_id was reused with different execution facts")
+                elif existing.status == "running":
+                    persisted["status"] = "in_doubt"
+                    persisted["error_code"] = "equipment_execution_in_doubt"
+                lease_records = (
+                    await session.scalars(
+                        select(ResourceLeaseRecord).where(
+                            ResourceLeaseRecord.created_by_operation_id == operation_id
+                        )
+                    )
+                ).all()
+                if lease_records:
+                    persisted["resource_leases"] = [
+                        self.lease_dict(lease) for lease in lease_records
+                    ]
+                return persisted, False
             record = EquipmentExecutionRecord(
                 id=str(uuid4()),
                 run_id=values.get("run_id"),
@@ -374,13 +424,16 @@ class EquipmentRepository:
                 package_checksum=str(values["package_checksum"]),
                 provider_instance_id=values.get("provider_instance_id"),
                 config_revision=values.get("config_revision"),
+                secret_binding_revision=values.get("secret_binding_revision"),
                 capability=values.get("capability"),
                 capability_contract_checksum=values.get("contract_checksum"),
                 test_principal_ref=str(values["test_principal_ref"]),
                 status="running",
                 physical_attempts=0,
+                request_fingerprint=str(values["request_fingerprint"]),
                 input_summary_json=values.get("input_summary", {}),
                 output_summary_json={},
+                result_json={},
                 evidence_json=[],
             )
             session.add(record)
@@ -391,10 +444,12 @@ class EquipmentRepository:
         operation_id: str,
         *,
         status: str,
+        result: dict[str, Any],
         output_summary: dict[str, Any],
         evidence: list[dict[str, Any]],
         physical_attempts: int,
         error_code: str | None,
+        leases: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         async with self.session_factory.begin() as session:
             record = await session.scalar(
@@ -405,6 +460,7 @@ class EquipmentRepository:
             if record is None:
                 raise LookupError(f"execution {operation_id} not found")
             record.status = status
+            record.result_json = result
             record.output_summary_json = output_summary
             record.evidence_json = evidence
             record.physical_attempts = physical_attempts
@@ -437,6 +493,7 @@ class EquipmentRepository:
                             "package_checksum": record.package_checksum,
                             "provider_instance_id": record.provider_instance_id,
                             "config_revision": record.config_revision,
+                            "secret_binding_revision": record.secret_binding_revision,
                             "capability": record.capability,
                             "test_principal_ref": record.test_principal_ref,
                             "status": status,
@@ -467,7 +524,18 @@ class EquipmentRepository:
                         "redacted": True,
                     },
                 )
-            return self.execution_dict(record)
+            lease_records = await self._create_lease_records(
+                session,
+                run_id=record.run_id,
+                operation_id=operation_id,
+                provider_instance_id=record.provider_instance_id,
+                leases=leases or [],
+            )
+            await session.flush()
+            completed = self.execution_dict(record)
+            if lease_records:
+                completed["resource_leases"] = [self.lease_dict(lease) for lease in lease_records]
+            return completed
 
     async def get_execution(self, operation_id: str) -> dict[str, Any]:
         async with self.session_factory() as session:
@@ -476,35 +544,19 @@ class EquipmentRepository:
                     EquipmentExecutionRecord.operation_id == operation_id
                 )
             )
-        if record is None:
-            raise LookupError(f"execution {operation_id} not found")
-        return self.execution_dict(record)
-
-    async def create_leases(
-        self,
-        *,
-        run_id: str | None,
-        operation_id: str,
-        provider_instance_id: str,
-        leases: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        records: list[ResourceLeaseRecord] = []
-        async with self.session_factory.begin() as session:
-            for lease in leases:
-                record = ResourceLeaseRecord(
-                    id=str(uuid4()),
-                    run_id=run_id,
-                    created_by_operation_id=operation_id,
-                    provider_instance_id=provider_instance_id,
-                    resource_type=str(lease["resource_type"]),
-                    external_resource_id=str(lease["external_resource_id"]),
-                    cleanup_contract=str(lease["cleanup_contract"]),
-                    cleanup_payload_ref=dict(lease.get("cleanup_payload", {})),
-                    status="active",
+            if record is None:
+                raise LookupError(f"execution {operation_id} not found")
+            result = self.execution_dict(record)
+            lease_records = (
+                await session.scalars(
+                    select(ResourceLeaseRecord).where(
+                        ResourceLeaseRecord.created_by_operation_id == operation_id
+                    )
                 )
-                session.add(record)
-                records.append(record)
-        return [self.lease_dict(record) for record in records]
+            ).all()
+            if lease_records:
+                result["resource_leases"] = [self.lease_dict(lease) for lease in lease_records]
+            return result
 
     async def list_active_leases(self, run_id: str | None) -> list[dict[str, Any]]:
         async with self.session_factory() as session:
@@ -584,34 +636,35 @@ class EquipmentRepository:
             )
 
     async def save_snapshot(self, values: dict[str, Any]) -> dict[str, Any]:
+        snapshots = await self.save_snapshots([values])
+        return snapshots[0]
+
+    async def save_snapshots(self, values_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
         async with self.session_factory.begin() as session:
-            statement = select(RunEquipmentSnapshotRecord).where(
-                RunEquipmentSnapshotRecord.run_id == values["run_id"],
-                RunEquipmentSnapshotRecord.package_type == values["package_type"],
-                RunEquipmentSnapshotRecord.package_id == values["package_id"],
-            )
-            provider_instance_id = values.get("provider_instance_id")
-            if provider_instance_id is None:
-                statement = statement.where(
-                    RunEquipmentSnapshotRecord.provider_instance_id.is_(None)
+            for raw_values in values_list:
+                values = {
+                    **raw_values,
+                    "binding_key": str(raw_values.get("provider_instance_id") or ""),
+                }
+                existing = await session.scalar(
+                    select(RunEquipmentSnapshotRecord).where(
+                        RunEquipmentSnapshotRecord.run_id == values["run_id"],
+                        RunEquipmentSnapshotRecord.package_type == values["package_type"],
+                        RunEquipmentSnapshotRecord.package_id == values["package_id"],
+                        RunEquipmentSnapshotRecord.binding_key == values["binding_key"],
+                    )
                 )
-            else:
-                statement = statement.where(
-                    RunEquipmentSnapshotRecord.provider_instance_id == provider_instance_id
-                )
-            existing = await session.scalar(statement)
-            if existing is not None:
-                if (
-                    existing.checksum != values["checksum"]
-                    or existing.config_revision != values.get("config_revision")
-                    or existing.secret_binding_revision != values.get("secret_binding_revision")
-                ):
-                    raise ValueError("immutable Run equipment snapshot conflict")
-                return self.snapshot_dict(existing)
-            record = RunEquipmentSnapshotRecord(id=str(uuid4()), **values)
-            session.add(record)
+                if existing is not None:
+                    self._assert_snapshot_immutable(existing, values)
+                    results.append(self.snapshot_dict(existing))
+                    continue
+                record = RunEquipmentSnapshotRecord(id=str(uuid4()), **values)
+                session.add(record)
+                await session.flush()
+                results.append(self.snapshot_dict(record))
             await session.flush()
-            return self.snapshot_dict(record)
+        return results
 
     async def list_snapshots(self, run_id: str) -> list[dict[str, Any]]:
         async with self.session_factory() as session:
@@ -626,6 +679,50 @@ class EquipmentRepository:
                 )
             ).all()
         return [self.snapshot_dict(record) for record in records]
+
+    async def get_run_binding_facts(self, run_id: str) -> dict[str, Any]:
+        async with self.session_factory() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            target = await session.get(TargetRecord, run.target_id)
+            policy = await session.get(PolicySnapshotRecord, run.policy_id)
+            started = await session.scalar(
+                select(EventRecord).where(
+                    EventRecord.run_id == run_id,
+                    EventRecord.event_type == "run_started",
+                )
+            )
+            snapshots = (
+                await session.scalars(
+                    select(RunEquipmentSnapshotRecord).where(
+                        RunEquipmentSnapshotRecord.run_id == run_id
+                    )
+                )
+            ).all()
+        event_principals = (
+            started.evidence_json.get("test_principal_refs", []) if started is not None else []
+        )
+        snapshot_principals = {
+            snapshot.test_principal_ref
+            for snapshot in snapshots
+            if snapshot.test_principal_ref is not None
+        }
+        return {
+            "target_endpoint": target.endpoint if target is not None else None,
+            "target_config": target.config_json if target is not None else None,
+            "policy": policy.config_json if policy is not None else None,
+            "test_principal_refs": sorted(
+                {str(item) for item in event_principals} or snapshot_principals
+            ),
+            "equipment_target_refs": sorted(
+                {
+                    snapshot.target_binding_ref
+                    for snapshot in snapshots
+                    if snapshot.target_binding_ref is not None
+                }
+            ),
+        }
 
     async def get_snapshot(
         self,
@@ -699,6 +796,7 @@ class EquipmentRepository:
 
     @staticmethod
     def execution_dict(record: EquipmentExecutionRecord) -> dict[str, Any]:
+        result = record.result_json
         return {
             "id": record.id,
             "run_id": record.run_id,
@@ -709,15 +807,20 @@ class EquipmentRepository:
             "package_checksum": record.package_checksum,
             "provider_instance_id": record.provider_instance_id,
             "config_revision": record.config_revision,
+            "secret_binding_revision": record.secret_binding_revision,
             "capability": record.capability,
             "capability_contract_checksum": record.capability_contract_checksum,
             "test_principal_ref": record.test_principal_ref,
             "status": record.status,
             "physical_attempts": record.physical_attempts,
+            "request_fingerprint": record.request_fingerprint,
             "input_summary": record.input_summary_json,
             "output_summary": record.output_summary_json,
+            "result": result,
+            "output": result.get("output", {}) if result is not None else {},
             "evidence": record.evidence_json,
             "error_code": record.error_code,
+            "legacy_result_unavailable": record.request_fingerprint is None,
         }
 
     @staticmethod
@@ -748,6 +851,7 @@ class EquipmentRepository:
             "checksum": record.checksum,
             "manifest": record.manifest_json,
             "provider_instance_id": record.provider_instance_id,
+            "binding_key": record.binding_key,
             "config_revision": record.config_revision,
             "config": record.config_json,
             "secret_binding_revision": record.secret_binding_revision,
@@ -770,6 +874,65 @@ class EquipmentRepository:
         if package["package_type"] == PackageType.casepack.value:
             return set(manifest.get("required_capabilities", []))
         return {str(manifest.get("id"))}
+
+    @staticmethod
+    async def _create_lease_records(
+        session: AsyncSession,
+        *,
+        run_id: str | None,
+        operation_id: str,
+        provider_instance_id: str | None,
+        leases: list[dict[str, Any]],
+    ) -> list[ResourceLeaseRecord]:
+        if leases and provider_instance_id is None:
+            raise ValueError("Resource Leases require a Provider Instance")
+        if leases:
+            instance_exists = await session.scalar(
+                select(ProviderInstanceRecord.id).where(
+                    ProviderInstanceRecord.instance_id == provider_instance_id
+                )
+            )
+            if instance_exists is None:
+                raise ValueError("Resource Leases require a persisted Provider Instance")
+        records = [
+            ResourceLeaseRecord(
+                id=str(uuid4()),
+                run_id=run_id,
+                created_by_operation_id=operation_id,
+                provider_instance_id=str(provider_instance_id),
+                resource_type=str(lease["resource_type"]),
+                external_resource_id=str(lease["external_resource_id"]),
+                cleanup_contract=str(lease["cleanup_contract"]),
+                cleanup_payload_ref=dict(lease.get("cleanup_payload", {})),
+                status="active",
+            )
+            for lease in leases
+        ]
+        session.add_all(records)
+        return records
+
+    @staticmethod
+    def _assert_snapshot_immutable(
+        existing: RunEquipmentSnapshotRecord,
+        values: dict[str, Any],
+    ) -> None:
+        expected = {
+            "version": values["version"],
+            "checksum": values["checksum"],
+            "manifest_json": values["manifest_json"],
+            "provider_instance_id": values.get("provider_instance_id"),
+            "binding_key": values["binding_key"],
+            "config_revision": values.get("config_revision"),
+            "config_json": values.get("config_json"),
+            "secret_binding_revision": values.get("secret_binding_revision"),
+            "capability_contract_id": values.get("capability_contract_id"),
+            "capability_contract_checksum": values.get("capability_contract_checksum"),
+            "test_principal_ref": values.get("test_principal_ref"),
+            "target_binding_ref": values.get("target_binding_ref"),
+        }
+        actual = {key: getattr(existing, key) for key in expected}
+        if actual != expected:
+            raise ValueError("immutable Run equipment snapshot conflict")
 
     @staticmethod
     async def _audit(

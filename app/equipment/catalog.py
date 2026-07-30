@@ -34,6 +34,84 @@ SignatureStatus = Literal[
 ]
 SourceType = Literal["builtin", "local_directory", "offline_archive"]
 IGNORED_NAMES = {"__pycache__", ".pytest_cache", ".ruff_cache", ".git", "tests"}
+CORE_BUILTIN_PACKAGES = {
+    PackageType.provider: {
+        "http-agent-provider",
+        "isolated-state-provider",
+    },
+    PackageType.skill: {
+        "prompt-injection-evaluator",
+        "state-poisoning-evaluator",
+        "tool-policy-trace-evaluator",
+    },
+    PackageType.casepack: {
+        "attacker-baseline-v1",
+        "attacker-controls-v1",
+    },
+    PackageType.contract: {
+        "agent.invoke.v1",
+        "agent.trace.read.v1",
+        "memory.fixture.cleanup.v1",
+        "memory.fixture.read.v1",
+        "memory.fixture.write.v1",
+        "rag.document.index.v1",
+        "rag.retrieval.query.v1",
+    },
+}
+CORE_BUILTIN_CHECKSUMS = {
+    (PackageType.provider, "http-agent-provider"): (
+        "aa3ddd17717ae436edf69eef33f8138bbd448258dc929b22d96aff5902333f43"
+    ),
+    (PackageType.provider, "isolated-state-provider"): (
+        "1f224956b5cfbdca1c17b0c4056ab2848d138948332bac45143b618a2054d2d0"
+    ),
+    (PackageType.skill, "prompt-injection-evaluator"): (
+        "8f255549a752403bc4143b0f4fe532451fa625be4ce8cea448a19cb84adf727a"
+    ),
+    (PackageType.skill, "state-poisoning-evaluator"): (
+        "db0a6d6aa677c297823209beecb64584c21d4833852028c34a0192d0153bb422"
+    ),
+    (PackageType.skill, "tool-policy-trace-evaluator"): (
+        "272d387e0c123a73b78a188df1bc799ab74f536d34636862f6b8eda8fda09349"
+    ),
+    (PackageType.casepack, "attacker-baseline-v1"): (
+        "41ee30050c80129e66dc0fbb586b3ddf01f00038af6e6f46f114dbbfdf90e87a"
+    ),
+    (PackageType.casepack, "attacker-controls-v1"): (
+        "211817cc96368395323aad629eef61445561e5a40d0996f21c4ae6883e962e20"
+    ),
+    (PackageType.contract, "agent.invoke.v1"): (
+        "62429b5733fd4ce1a5d1cb5b44e9a738ac1f848fa3370bbd1cf0992ad1aa6aa9"
+    ),
+    (PackageType.contract, "agent.trace.read.v1"): (
+        "e8dbe5986a6ed2193dc129dce21ed4fb9f9f586017206cdce7658ae808eb888e"
+    ),
+    (PackageType.contract, "memory.fixture.cleanup.v1"): (
+        "81ddde45f25e365aa0401c3d97b2a0a75baf54dc6e0b233f824c083379ea86cb"
+    ),
+    (PackageType.contract, "memory.fixture.read.v1"): (
+        "c4120613a981e65100e5a1a5fc89cfaa09e97de347ebeea7941e12e0e0e12977"
+    ),
+    (PackageType.contract, "memory.fixture.write.v1"): (
+        "d52f90fad561be99819d1945b70284ee2cae534835ac318238bc931fe83f617c"
+    ),
+    (PackageType.contract, "rag.document.index.v1"): (
+        "0144cb71f8df503611f0e104fd5fd649f863d163ff7904d372cb0a5c76ee61f0"
+    ),
+    (PackageType.contract, "rag.retrieval.query.v1"): (
+        "3d27cc6a52b50313a208e4a5972ac92389642450f28bc602619ab5a4d48b590f"
+    ),
+}
+CANONICAL_TEXT_SUFFIXES = {
+    ".json",
+    ".lock",
+    ".md",
+    ".py",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 MANIFEST_NAMES = {
     PackageType.provider: "provider.yaml",
     PackageType.skill: "skill.yaml",
@@ -111,11 +189,14 @@ class EquipmentCatalog:
         publisher_id: str | None = None
         signature_id: str | None = None
         manifest_data: dict[str, Any] = {}
+        source_type: SourceType = "local_directory"
+        source_ref = str(path.resolve())
         manifest_name = MANIFEST_NAMES[package_type]
         manifest_path = path / manifest_name
         try:
             files = self._safe_files(path)
             checksum = self._checksum(path, files)
+            canonical_checksum = self._canonical_checksum(path, files)
             signature_path = path / "SIGNATURE.json"
             if signature_path.is_file():
                 signature_metadata = json.loads(signature_path.read_text(encoding="utf-8"))
@@ -129,6 +210,22 @@ class EquipmentCatalog:
                 raise TypeError("manifest root must be an object")
             manifest_data = loaded
             manifest = self._parse_manifest(package_type, manifest_data)
+            source_type, source_ref = self._source_facts(
+                path,
+                package_type,
+                str(manifest_data.get("id") or path.name),
+            )
+            package_id = str(manifest_data.get("id") or path.name)
+            if source_type == "builtin" and canonical_checksum != CORE_BUILTIN_CHECKSUMS.get(
+                (package_type, package_id)
+            ):
+                raise ValueError("Core-shipped package checksum is not recognized")
+            if (
+                package_type in {PackageType.provider, PackageType.skill}
+                and manifest_data.get("trust_level") == TrustLevel.trusted_builtin.value
+                and source_type != "builtin"
+            ):
+                raise ValueError("trusted_builtin is reserved for Core-shipped packages")
             self._validate_compatibility(
                 manifest.attacker_compatibility.min_version,
                 manifest.attacker_compatibility.max_version,
@@ -140,10 +237,14 @@ class EquipmentCatalog:
             signature_status = "revoked" if isinstance(exc, SignatureRevokedError) else "invalid"
         package_id = str(manifest_data.get("id") or path.name)
         version = str(manifest_data.get("version") or "0.0.0")
-        builtin_data_package = package_type in {
-            PackageType.contract,
-            PackageType.casepack,
-        } and "builtin" in manifest_data.get("tags", ["builtin"])
+        builtin_data_package = (
+            package_type
+            in {
+                PackageType.contract,
+                PackageType.casepack,
+            }
+            and source_type == "builtin"
+        )
         trust_level = str(
             manifest_data.get("trust_level")
             or (
@@ -153,26 +254,6 @@ class EquipmentCatalog:
             )
         )
         manifest_data.setdefault("trust_level", trust_level)
-        source_type: SourceType = (
-            "builtin" if trust_level == TrustLevel.trusted_builtin.value else "local_directory"
-        )
-        source_ref = str(path.resolve())
-        source_metadata_path = path / ".equipment-source.json"
-        if source_metadata_path.is_file():
-            try:
-                source_metadata = json.loads(source_metadata_path.read_text(encoding="utf-8"))
-                candidate_type = str(source_metadata.get("source_type", ""))
-                if candidate_type not in {
-                    "builtin",
-                    "local_directory",
-                    "offline_archive",
-                }:
-                    errors.append("invalid equipment source type")
-                else:
-                    source_type = cast(SourceType, candidate_type)
-                    source_ref = str(source_metadata.get("source_ref") or source_ref)
-            except (OSError, TypeError, json.JSONDecodeError) as exc:
-                errors.append(f"invalid equipment source metadata: {exc}")
         return DiscoveredPackage(
             package_type=package_type,
             package_id=package_id,
@@ -196,6 +277,8 @@ class EquipmentCatalog:
         total_bytes = 0
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root)
+            if "__pycache__" not in relative.parts and path.suffix.lower() in {".pyc", ".pyo"}:
+                raise ValueError(f"Python bytecode artifacts rejected: {relative.as_posix()}")
             if any(part.startswith(".") or part in IGNORED_NAMES for part in relative.parts):
                 continue
             if len(relative.parts) > self.settings.max_archive_depth:
@@ -228,9 +311,36 @@ class EquipmentCatalog:
             digest.update(content)
         return digest.hexdigest()
 
+    @staticmethod
+    def _canonical_checksum(root: Path, files: list[Path]) -> str:
+        digest = hashlib.sha256()
+        for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
+            relative = path.relative_to(root).as_posix().encode()
+            if relative == b"SIGNATURE.json":
+                continue
+            content = path.read_bytes()
+            if path.suffix.lower() in CANONICAL_TEXT_SUFFIXES:
+                try:
+                    content = (
+                        content.decode("utf-8")
+                        .replace("\r\n", "\n")
+                        .replace("\r", "\n")
+                        .encode("utf-8")
+                    )
+                except UnicodeDecodeError:
+                    pass
+            digest.update(len(relative).to_bytes(4, "big"))
+            digest.update(relative)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        return digest.hexdigest()
+
     def _signature_status(
         self, root: Path, checksum: str
     ) -> tuple[SignatureStatus, str | None, str | None]:
+        revocations = self._revocations()
+        if checksum in revocations["checksums"]:
+            raise SignatureRevokedError("package checksum is revoked")
         signature_path = root / "SIGNATURE.json"
         if not signature_path.is_file():
             if self.settings.require_signature:
@@ -243,11 +353,8 @@ class EquipmentCatalog:
         trust_roots = json.loads(trust_roots_path.read_text(encoding="utf-8"))
         publisher_id = str(signature.get("publisher_id", ""))
         signature_id = str(signature.get("signature_id", "")) or None
-        revocations = self._revocations()
-        if (
-            publisher_id in revocations["publisher_ids"]
-            or checksum in revocations["checksums"]
-            or (signature_id is not None and signature_id in revocations["signature_ids"])
+        if publisher_id in revocations["publisher_ids"] or (
+            signature_id is not None and signature_id in revocations["signature_ids"]
         ):
             raise SignatureRevokedError("package signature is revoked")
         if signature.get("algorithm") != "ed25519" or publisher_id not in trust_roots:
@@ -390,6 +497,28 @@ class EquipmentCatalog:
             PackageType.casepack: "casepacks",
         }[package_type]
         return Path(self.settings.root) / suffix
+
+    def _source_facts(
+        self,
+        path: Path,
+        package_type: PackageType,
+        package_id: str,
+    ) -> tuple[SourceType, str]:
+        resolved = path.resolve()
+        source_ref = str(resolved)
+        source_metadata_path = path / ".equipment-source.json"
+        if source_metadata_path.is_file():
+            source_metadata = json.loads(source_metadata_path.read_text(encoding="utf-8"))
+            candidate_type = str(source_metadata.get("source_type", ""))
+            if candidate_type not in {"local_directory", "offline_archive"}:
+                raise ValueError("invalid or reserved equipment source type")
+            return cast(SourceType, candidate_type), str(
+                source_metadata.get("source_ref") or source_ref
+            )
+        expected = (self._root_for(package_type) / package_id).resolve()
+        if package_id in CORE_BUILTIN_PACKAGES[package_type] and resolved == expected:
+            return "builtin", source_ref
+        return "local_directory", source_ref
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:

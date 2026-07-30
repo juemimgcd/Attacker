@@ -71,6 +71,34 @@ def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
     return value
 
 
+def sensitive_values(value: Any) -> tuple[str, ...]:
+    collected: set[str] = set()
+
+    def collect_strings(item: Any) -> None:
+        if isinstance(item, dict):
+            for nested in item.values():
+                collect_strings(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                collect_strings(nested)
+        elif isinstance(item, str) and item:
+            collected.add(item)
+
+    def walk(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                if SENSITIVE_KEY.search(str(key)):
+                    collect_strings(nested)
+                else:
+                    walk(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                walk(nested)
+
+    walk(value)
+    return tuple(sorted(collected))
+
+
 def summarize(value: Any, *, max_chars: int = 4096) -> dict[str, Any]:
     redacted = redact(value)
     encoded = json.dumps(redacted, sort_keys=True, default=str)
