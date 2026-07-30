@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import inspect
+import ast
 import json
 import platform
 import re
@@ -15,7 +15,6 @@ import yaml
 from app.equipment.catalog import MANIFEST_NAMES, EquipmentCatalog
 from app.equipment.json_schema import validate_instance
 from app.equipment.runner import EquipmentRunner
-from app.equipment.worker import _load_symbol
 from app.schemas.equipment_schema import (
     CapabilityContractManifest,
     PackageType,
@@ -128,7 +127,6 @@ async def contract_check(
             "valid": True,
             "checked_methods": [],
         }
-    symbol = _load_symbol(Path(package.source_path), str(package.manifest["entrypoint"]))
     expected_parameters = (
         {
             "describe": ["self"],
@@ -143,18 +141,16 @@ async def contract_check(
             "execute": ["self", "payload", "context"],
         }
     )
-    missing = [
-        name
-        for name in expected_parameters
-        if not hasattr(symbol, name) or not inspect.iscoroutinefunction(getattr(symbol, name))
-    ]
+    signatures = _inspect_method_signatures(
+        Path(package.source_path),
+        str(package.manifest["entrypoint"]),
+    )
+    missing = [name for name in expected_parameters if name not in signatures]
     if missing:
         raise ValueError(f"missing async contract methods: {missing}")
     signature_errors: list[str] = []
-    signatures: dict[str, list[str]] = {}
     for name, expected in expected_parameters.items():
-        actual = list(inspect.signature(getattr(symbol, name)).parameters)
-        signatures[name] = actual
+        actual = signatures[name]
         if actual != expected:
             signature_errors.append(f"{name} parameters must be {expected}, received {actual}")
     if signature_errors:
@@ -185,6 +181,40 @@ async def contract_check(
         "platform": platform.system().lower(),
         "checksum": package.checksum,
     }
+
+
+def _inspect_method_signatures(package_path: Path, entrypoint: str) -> dict[str, list[str]]:
+    module_name, separator, symbol_name = entrypoint.partition(":")
+    if not separator or not module_name or not symbol_name:
+        raise ValueError("entrypoint must use module_or_file:Symbol")
+    module_path = package_path / (
+        module_name if module_name.endswith(".py") else f"{module_name.replace('.', '/')}.py"
+    )
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+    entrypoint_class = next(
+        (node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == symbol_name),
+        None,
+    )
+    if entrypoint_class is None:
+        raise ValueError(f"entrypoint class {symbol_name} was not found")
+    signatures: dict[str, list[str]] = {}
+    for node in entrypoint_class.body:
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        parameters = [
+            argument.arg
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        ]
+        if node.args.vararg is not None:
+            parameters.append(f"*{node.args.vararg.arg}")
+        if node.args.kwarg is not None:
+            parameters.append(f"**{node.args.kwarg.arg}")
+        signatures[node.name] = parameters
+    return signatures
 
 
 async def _run_contract_scenarios(

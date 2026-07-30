@@ -1,28 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import inspect
 import json
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from pydantic import BaseModel
 
 
 def _load_symbol(package_path: Path, entrypoint: str) -> type:
+    sys.dont_write_bytecode = True
     module_name, _, symbol_name = entrypoint.partition(":")
     module_path = package_path / (
         module_name if module_name.endswith(".py") else f"{module_name.replace('.', '/')}.py"
     )
-    spec = importlib.util.spec_from_file_location(
-        f"attacker_equipment_{package_path.name}", module_path
-    )
-    if spec is None or spec.loader is None:
+    if not module_path.is_file():
         raise ImportError(f"cannot load equipment module {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = ModuleType(f"attacker_equipment_{package_path.name}")
+    module.__file__ = str(module_path)
+    code = compile(module_path.read_bytes(), str(module_path), "exec")
+    exec(code, module.__dict__)  # noqa: S102 - execute the verified source, never cached bytecode
     symbol = getattr(module, symbol_name)
     if not isinstance(symbol, type):
         raise TypeError("equipment entrypoint must be a class")

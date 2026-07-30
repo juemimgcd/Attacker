@@ -302,7 +302,7 @@ class RunEquipmentSnapshotRecord(Base):
             "run_id",
             "package_type",
             "package_id",
-            "provider_instance_id",
+            "binding_key",
             name="uq_run_equipment_binding",
         ),
     )
@@ -315,6 +315,7 @@ class RunEquipmentSnapshotRecord(Base):
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     provider_instance_id: Mapped[str | None] = mapped_column(String(200))
+    binding_key: Mapped[str] = mapped_column(String(200), nullable=False)
     config_revision: Mapped[str | None] = mapped_column(String(64))
     config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     secret_binding_revision: Mapped[str | None] = mapped_column(String(64))
@@ -340,13 +341,16 @@ class EquipmentExecutionRecord(Base):
     package_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     provider_instance_id: Mapped[str | None] = mapped_column(String(200))
     config_revision: Mapped[str | None] = mapped_column(String(64))
+    secret_binding_revision: Mapped[str | None] = mapped_column(String(64))
     capability: Mapped[str | None] = mapped_column(String(200))
     capability_contract_checksum: Mapped[str | None] = mapped_column(String(64))
     test_principal_ref: Mapped[str] = mapped_column(String(500), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     physical_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
     input_summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     output_summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    result_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(100))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

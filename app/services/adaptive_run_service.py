@@ -30,6 +30,7 @@ from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
 from app.services.observation_normalizer import ObservationNormalizer
 from app.services.policy_service import PolicyService
 from app.services.sample_loader import GrayBoxDatasetLoader
+from app.services.target_binding import canonical_target_binding, canonical_target_ref
 from app.services.tool_trace_adapter import ToolTraceAdapter
 from app.workflows.attack_graph import AttackGraph
 from app.workflows.attack_state import AttackGraphState
@@ -200,7 +201,7 @@ class AdaptiveRunService:
         await self.equipment_service.freeze_run_bindings(
             run_id=run_id,
             stage="graybox",
-            target_binding_ref=str(target.endpoint),
+            target_binding_ref=canonical_target_ref(target),
             test_principal_ref=principal_ref,
         )
 
@@ -428,10 +429,9 @@ class AdaptiveRunService:
 
     @staticmethod
     def _redacted_target_snapshot(target: TargetConfig) -> dict[str, Any]:
-        snapshot = target.model_dump(mode="json")
-        snapshot["headers"] = {key: "[REDACTED]" for key in target.headers}
-        if snapshot["auth"].get("token"):
-            snapshot["auth"]["token"] = "[REDACTED]"
+        snapshot = canonical_target_binding(target)
+        if snapshot is None:
+            raise ValueError("target binding is required")
         return snapshot
 
     @staticmethod
@@ -574,14 +574,13 @@ class DeterministicGrayBoxRunService:
                 await self.equipment_service.clone_run_bindings(
                     source_run_id=equipment_source_run_id,
                     target_run_id=run_id,
-                    target_binding_ref=str(target.endpoint),
                 )
             else:
                 principal_refs = test_principal_refs or ["default-test-principal"]
                 await self.equipment_service.freeze_run_bindings(
                     run_id=run_id,
                     stage="graybox",
-                    target_binding_ref=str(target.endpoint),
+                    target_binding_ref=canonical_target_ref(target),
                     test_principal_ref=principal_refs[0],
                     overrides=equipment_overrides,
                 )

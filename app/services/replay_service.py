@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 from app.repositories.equipment_repository import EquipmentRepository
@@ -10,6 +11,7 @@ from app.services.adaptive_run_service import DeterministicGrayBoxRunService
 from app.services.finding_fingerprint import finding_fingerprint
 from app.services.run_service import DeterministicRunService
 from app.services.stateful_run_service import StatefulRunService
+from app.services.target_binding import canonical_target_binding
 
 
 class ReplayService:
@@ -69,6 +71,19 @@ class ReplayService:
             }
         if request.mode == EquipmentReplayMode.same_binding_rerun:
             await self._require_historical_equipment(snapshots)
+        source_facts = (
+            await self.equipment_repository.get_run_binding_facts(source_run_id)
+            if self.equipment_repository is not None
+            else None
+        )
+        if (
+            request.mode == EquipmentReplayMode.same_binding_rerun
+            and request.target is not None
+            and source_facts is not None
+            and canonical_target_binding(request.target)
+            != canonical_target_binding(source_facts.get("target_config"))
+        ):
+            raise ValueError("same-binding replay target differs from the source Run")
         equipment_source_run_id = (
             source_run_id if request.mode == EquipmentReplayMode.same_binding_rerun else None
         )
@@ -86,11 +101,25 @@ class ReplayService:
         if stage == "stateful":
             if request.profile is None:
                 raise ValueError("stateful replay requires profile")
+            if (
+                request.mode == EquipmentReplayMode.same_binding_rerun
+                and source_facts is not None
+                and source_facts["policy"] is not None
+                and request.profile.value != source_facts["policy"].get("profile")
+            ):
+                raise ValueError("same-binding replay profile differs from the source Run")
             dataset = await self.repository.load_dataset(source_run_id)
+            source_target_config: dict[str, Any] = {}
+            if source_facts is not None:
+                candidate_target_config = source_facts.get("target_config")
+                if isinstance(candidate_target_config, dict):
+                    source_target_config = candidate_target_config
             replay_result = await self.stateful_run_service.run_dataset(
                 dataset=dataset,
                 profile=request.profile,
-                target_name=f"stateful-replay:{request.profile.value}",
+                target_name=str(
+                    source_target_config.get("name") or f"stateful-replay:{request.profile.value}"
+                ),
                 mode="replay_stateful",
                 equipment_source_run_id=equipment_source_run_id,
                 equipment_overrides=equipment_overrides,
@@ -116,6 +145,12 @@ class ReplayService:
                 dataset=dataset,
                 policy=policy,
                 mode="replay_graybox",
+                test_principal_refs=(
+                    source_facts["test_principal_refs"]
+                    if request.mode == EquipmentReplayMode.same_binding_rerun
+                    and source_facts is not None
+                    else None
+                ),
                 equipment_source_run_id=equipment_source_run_id,
                 equipment_overrides=equipment_overrides,
             )
@@ -128,7 +163,17 @@ class ReplayService:
             replay_run_id=replay_run_id,
             diff=diff,
         )
-        equipment_changes = self._equipment_changes(snapshots, request.equipment_bindings)
+        if self.equipment_repository is not None:
+            replay_snapshots = await self.equipment_repository.list_snapshots(replay_run_id)
+            replay_facts = await self.equipment_repository.get_run_binding_facts(replay_run_id)
+            equipment_changes = self._equipment_changes(
+                snapshots,
+                replay_snapshots,
+                source_facts or {},
+                replay_facts,
+            )
+        else:
+            equipment_changes = self._equipment_changes(snapshots, [], {}, {})
         return {
             **replay_result,
             "source_run_id": source_run_id,
@@ -160,45 +205,82 @@ class ReplayService:
 
     @staticmethod
     def _equipment_changes(
-        snapshots: list[dict[str, Any]],
-        bindings: dict[str, dict],
+        source_snapshots: list[dict[str, Any]],
+        replay_snapshots: list[dict[str, Any]],
+        source_facts: dict[str, Any],
+        replay_facts: dict[str, Any],
     ) -> dict[str, bool]:
-        dimensions = {
-            "target_changed": False,
-            "provider_changed": False,
-            "provider_instance_changed": False,
-            "provider_config_changed": False,
-            "skill_changed": False,
-            "casepack_changed": False,
-            "contract_changed": False,
-            "policy_changed": False,
-            "test_principal_changed": False,
-        }
-        for snapshot in snapshots:
-            replacement = bindings.get(snapshot["package_id"])
-            if replacement is None:
-                continue
-            package_type = snapshot["package_type"]
-            changed = any(
-                replacement.get(key) not in {None, snapshot.get(key)}
-                for key in ("version", "checksum")
+        def normalized(value: Any) -> str:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+        def packages(package_type: str, keys: tuple[str, ...]) -> list[tuple[Any, ...]]:
+            return sorted(
+                tuple(normalized(snapshot.get(key)) for key in keys)
+                for snapshot in source_snapshots
+                if snapshot["package_type"] == package_type
             )
-            if package_type == "provider":
-                dimensions["provider_changed"] |= changed
-                dimensions["provider_instance_changed"] |= replacement.get(
-                    "provider_instance_id"
-                ) not in {None, snapshot.get("provider_instance_id")}
-                dimensions["provider_config_changed"] |= replacement.get("config_revision") not in {
-                    None,
-                    snapshot.get("config_revision"),
-                }
-            elif package_type == "skill":
-                dimensions["skill_changed"] |= changed
-            elif package_type == "casepack":
-                dimensions["casepack_changed"] |= changed
-            elif package_type == "contract":
-                dimensions["contract_changed"] |= changed
-        return dimensions
+
+        def replay_packages(package_type: str, keys: tuple[str, ...]) -> list[tuple[Any, ...]]:
+            return sorted(
+                tuple(normalized(snapshot.get(key)) for key in keys)
+                for snapshot in replay_snapshots
+                if snapshot["package_type"] == package_type
+            )
+
+        identity = ("package_id", "version", "checksum")
+        provider_binding = (
+            "package_id",
+            "provider_instance_id",
+        )
+        provider_config = (
+            "package_id",
+            "provider_instance_id",
+            "config_revision",
+            "config",
+            "secret_binding_revision",
+        )
+        source_target = canonical_target_binding(source_facts.get("target_config"))
+        replay_target = canonical_target_binding(replay_facts.get("target_config"))
+        source_policy = ReplayService._semantic_policy(source_facts.get("policy"))
+        replay_policy = ReplayService._semantic_policy(replay_facts.get("policy"))
+        return {
+            "target_changed": (
+                source_facts.get("target_endpoint") != replay_facts.get("target_endpoint")
+                or source_target != replay_target
+                or source_facts.get("equipment_target_refs")
+                != replay_facts.get("equipment_target_refs")
+            ),
+            "provider_changed": (
+                packages("provider", identity) != replay_packages("provider", identity)
+            ),
+            "provider_instance_changed": (
+                packages("provider", provider_binding)
+                != replay_packages("provider", provider_binding)
+            ),
+            "provider_config_changed": (
+                packages("provider", provider_config)
+                != replay_packages("provider", provider_config)
+            ),
+            "skill_changed": (packages("skill", identity) != replay_packages("skill", identity)),
+            "casepack_changed": (
+                packages("casepack", identity) != replay_packages("casepack", identity)
+            ),
+            "contract_changed": (
+                packages("contract", identity) != replay_packages("contract", identity)
+            ),
+            "policy_changed": source_policy != replay_policy,
+            "test_principal_changed": (
+                source_facts.get("test_principal_refs") != replay_facts.get("test_principal_refs")
+            ),
+        }
+
+    @staticmethod
+    def _semantic_policy(policy: Any) -> Any:
+        if not isinstance(policy, dict):
+            return policy
+        normalized = dict(policy)
+        normalized.pop("allowed_target_ids", None)
+        return normalized
 
     async def _compare(
         self,
