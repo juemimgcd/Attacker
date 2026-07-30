@@ -1,0 +1,60 @@
+name: supply-chain
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-and-sbom:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked --python 3.12
+      - name: Audit Python dependencies
+        run: uv run pip-audit --local --skip-editable
+      - name: Generate reproducible CycloneDX SBOM
+        run: >-
+          uv run cyclonedx-py environment
+          --pyproject pyproject.toml
+          --output-reproducible
+          --output-format JSON
+          --output-file attacker-sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: attacker-python-sbom
+          path: attacker-sbom.cdx.json
+          if-no-files-found: error
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate operations shell syntax
+        run: sh -n scripts/entrypoint.sh scripts/backup.sh scripts/restore.sh
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: attacker:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Validate production Compose model
+        run: docker compose -f docker-compose.production.yml config --quiet
+      - name: Scan image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: attacker:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL

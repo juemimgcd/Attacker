@@ -133,7 +133,11 @@ class EquipmentService:
                 if self.catalog.checksum_path(destination) != package.checksum:
                     raise ValueError(f"equipment archive checksum conflict: {package.checksum}")
                 continue
-            shutil.copytree(package.source_path, destination)
+            shutil.copytree(
+                package.source_path,
+                destination,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
 
     async def validate_package(self, package_type: PackageType, package_id: str) -> dict[str, Any]:
         package = await self.repository.get_package(package_type, package_id)
@@ -212,34 +216,28 @@ class EquipmentService:
         ):
             raise ValueError("Provider Instance package checksum does not match the catalog")
 
-        snapshots: list[dict[str, Any]] = []
-        for package in (skill, casepack):
-            snapshots.append(
-                await self.repository.save_snapshot(
-                    self._package_snapshot(
-                        run_id=run_id,
-                        package=package,
-                        target_binding_ref=target_binding_ref,
-                        test_principal_ref=test_principal_ref,
-                    )
-                )
+        snapshot_values = [
+            self._package_snapshot(
+                run_id=run_id,
+                package=package,
+                target_binding_ref=target_binding_ref,
+                test_principal_ref=test_principal_ref,
             )
-
-        snapshots.append(
-            await self.repository.save_snapshot(
-                {
-                    **self._package_snapshot(
-                        run_id=run_id,
-                        package=provider,
-                        target_binding_ref=target_binding_ref,
-                        test_principal_ref=test_principal_ref,
-                    ),
-                    "provider_instance_id": instance["instance_id"],
-                    "config_revision": instance["config_revision"],
-                    "config_json": instance["config"],
-                    "secret_binding_revision": instance["secret_binding_revision"],
-                }
-            )
+            for package in (skill, casepack)
+        ]
+        snapshot_values.append(
+            {
+                **self._package_snapshot(
+                    run_id=run_id,
+                    package=provider,
+                    target_binding_ref=target_binding_ref,
+                    test_principal_ref=test_principal_ref,
+                ),
+                "provider_instance_id": instance["instance_id"],
+                "config_revision": instance["config_revision"],
+                "config_json": instance["config"],
+                "secret_binding_revision": instance["secret_binding_revision"],
+            }
         )
 
         implemented = {str(item["contract"]) for item in provider["manifest"].get("implements", [])}
@@ -253,22 +251,20 @@ class EquipmentService:
                 capability,
                 overrides,
             )
-            snapshots.append(
-                await self.repository.save_snapshot(
-                    {
-                        **self._package_snapshot(
-                            run_id=run_id,
-                            package=contract,
-                            target_binding_ref=target_binding_ref,
-                            test_principal_ref=test_principal_ref,
-                        ),
-                        "provider_instance_id": instance["instance_id"],
-                        "capability_contract_id": capability,
-                        "capability_contract_checksum": contract["checksum"],
-                    }
-                )
+            snapshot_values.append(
+                {
+                    **self._package_snapshot(
+                        run_id=run_id,
+                        package=contract,
+                        target_binding_ref=target_binding_ref,
+                        test_principal_ref=test_principal_ref,
+                    ),
+                    "provider_instance_id": instance["instance_id"],
+                    "capability_contract_id": capability,
+                    "capability_contract_checksum": contract["checksum"],
+                }
             )
-        return snapshots
+        return await self.repository.save_snapshots(snapshot_values)
 
     async def _selected_package(
         self,
@@ -294,12 +290,11 @@ class EquipmentService:
         *,
         source_run_id: str,
         target_run_id: str,
-        target_binding_ref: str,
     ) -> list[dict[str, Any]]:
         source_snapshots = await self.repository.list_snapshots(source_run_id)
         if not source_snapshots:
             raise ValueError(f"source Run {source_run_id} has no equipment snapshots")
-        cloned: list[dict[str, Any]] = []
+        cloned_values: list[dict[str, Any]] = []
         for snapshot in source_snapshots:
             package = await self.repository.get_package(
                 PackageType(snapshot["package_type"]),
@@ -307,27 +302,25 @@ class EquipmentService:
                 snapshot["version"],
             )
             self.materialize_package(package, snapshot["checksum"])
-            cloned.append(
-                await self.repository.save_snapshot(
-                    {
-                        "run_id": target_run_id,
-                        "package_type": snapshot["package_type"],
-                        "package_id": snapshot["package_id"],
-                        "version": snapshot["version"],
-                        "checksum": snapshot["checksum"],
-                        "manifest_json": snapshot["manifest"],
-                        "provider_instance_id": snapshot["provider_instance_id"],
-                        "config_revision": snapshot["config_revision"],
-                        "config_json": snapshot["config"],
-                        "secret_binding_revision": snapshot["secret_binding_revision"],
-                        "capability_contract_id": snapshot["capability_contract_id"],
-                        "capability_contract_checksum": snapshot["capability_contract_checksum"],
-                        "test_principal_ref": snapshot["test_principal_ref"],
-                        "target_binding_ref": target_binding_ref,
-                    }
-                )
+            cloned_values.append(
+                {
+                    "run_id": target_run_id,
+                    "package_type": snapshot["package_type"],
+                    "package_id": snapshot["package_id"],
+                    "version": snapshot["version"],
+                    "checksum": snapshot["checksum"],
+                    "manifest_json": snapshot["manifest"],
+                    "provider_instance_id": snapshot["provider_instance_id"],
+                    "config_revision": snapshot["config_revision"],
+                    "config_json": snapshot["config"],
+                    "secret_binding_revision": snapshot["secret_binding_revision"],
+                    "capability_contract_id": snapshot["capability_contract_id"],
+                    "capability_contract_checksum": snapshot["capability_contract_checksum"],
+                    "test_principal_ref": snapshot["test_principal_ref"],
+                    "target_binding_ref": snapshot["target_binding_ref"],
+                }
             )
-        return cloned
+        return await self.repository.save_snapshots(cloned_values)
 
     async def _enabled_package(
         self,

@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from app.repositories.run_repository import RunRepository
 from app.schemas.attack_sample_schema import (
@@ -32,6 +31,7 @@ from app.services.attack_executor import AttackExecutor
 from app.services.evaluator_service import EvaluatorService
 from app.services.prompt_governance import redact_sensitive_text
 from app.services.sample_loader import BlackBoxDatasetLoader
+from app.services.target_binding import canonical_target_binding, canonical_target_ref
 from app.services.target_connector.http_connector import HTTPTargetConnector
 
 if TYPE_CHECKING:
@@ -294,13 +294,12 @@ class DeterministicRunService:
             await self.equipment_service.clone_run_bindings(
                 source_run_id=source_run_id,
                 target_run_id=run_id,
-                target_binding_ref=str(target.endpoint),
             )
             return
         await self.equipment_service.freeze_run_bindings(
             run_id=run_id,
             stage="blackbox",
-            target_binding_ref=str(target.endpoint),
+            target_binding_ref=canonical_target_ref(target),
             test_principal_ref="core:blackbox",
             overrides=overrides,
         )
@@ -471,51 +470,15 @@ class DeterministicRunService:
             return redact_sensitive_text(value, secret_values)
         return value
 
-    @classmethod
-    def _redact_structure(
-        cls,
-        value: Any,
-        redacted_keys: set[str],
-    ) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: (
-                    "[REDACTED]"
-                    if cls._is_redacted_key(key, redacted_keys)
-                    else cls._redact_structure(item, redacted_keys)
-                )
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [cls._redact_structure(item, redacted_keys) for item in value]
-        return value
-
-    @classmethod
+    @staticmethod
     def _redact_target_snapshot(
-        cls,
         target: TargetConfig,
         redacted_keys: set[str],
         secret_values: set[str],
     ) -> dict[str, Any]:
-        snapshot = target.model_dump(mode="json")
-        snapshot["name"] = redact_sensitive_text(snapshot["name"], secret_values)
-        snapshot["endpoint"] = cls._redact_endpoint(
-            snapshot["endpoint"],
-            redacted_keys,
-            secret_values,
-        )
-        snapshot["headers"] = cls._redact(
-            snapshot["headers"],
-            redacted_keys,
-            secret_values,
-        )
-        snapshot["auth"] = cls._redact_structure(snapshot["auth"], redacted_keys)
-        request_template = snapshot["request_template"]
-        request_template["body_template"] = cls._redact(
-            request_template["body_template"],
-            redacted_keys,
-            secret_values,
-        )
+        snapshot = canonical_target_binding(target)
+        if snapshot is None:
+            raise ValueError("target binding is required")
         return snapshot
 
     @classmethod
@@ -589,50 +552,6 @@ class DeterministicRunService:
                 secret_values,
             )
         return AttackRunResult.model_validate(result_data)
-
-    @classmethod
-    def _redact_endpoint(
-        cls,
-        endpoint: str,
-        redacted_keys: set[str],
-        secret_values: set[str],
-    ) -> str:
-        parsed = urlsplit(endpoint)
-        host = parsed.hostname or ""
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        netloc = host
-        if parsed.port is not None:
-            netloc = f"{netloc}:{parsed.port}"
-        query = urlencode(
-            [
-                (
-                    key,
-                    (
-                        "[REDACTED]"
-                        if cls._is_redacted_key(key, redacted_keys)
-                        else redact_sensitive_text(value, secret_values)
-                    ),
-                )
-                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-            ],
-            doseq=True,
-        )
-        return urlunsplit(
-            (
-                parsed.scheme,
-                netloc,
-                quote(
-                    redact_sensitive_text(unquote(parsed.path), secret_values),
-                    safe="/:@-._~",
-                ),
-                query,
-                quote(
-                    redact_sensitive_text(unquote(parsed.fragment), secret_values),
-                    safe="-._~",
-                ),
-            )
-        )
 
     @classmethod
     def _redact_single_case_dataset(

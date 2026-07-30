@@ -40,7 +40,7 @@ AI Agent 的风险不只存在于最终回答中，还可能发生在工具调�
 | 确定性运行 | 固定 Dataset、Policy 和 Evaluator，不依赖 LLM 决策，适合作为安全回归基线 |
 | 自适应运行 | 由 LangGraph 编排下一步，所有候选仍受 allowlist、审批与硬预算约束 |
 | 人工审批 | 高风险步骤可暂停，审批后恢复同一工作流，并在执行前重新校验 Policy |
-| 证据与报告 | 从 SQLite 事实源生成 JSON / Markdown 报告，Finding 可追溯到最短 Evidence 路径 |
+| 证据与报告 | 从 SQL 事实源生成 JSON / Markdown 报告，Finding 可追溯到最短 Evidence 路径 |
 | Replay | 使用持久化快照重新评测，分类展示风险修复、新增、持续与回归 |
 | 装备目录 | 从本地目录加载经过 Manifest、JSON Schema、兼容性与 checksum 校验的 Provider、Skill 和 Case Pack |
 
@@ -55,7 +55,7 @@ Attacker V1 已交付三个评测阶段，共包含 **30 条攻击与安全对�
 | 带状态 Agent | 8 | Memory、RAG、身份隔离、Checkpoint |
 | **合计** | **30** | 覆盖无状态到持久状态的 Agent 风险链路 |
 
-内置装备目录同时提供 **2 个 Provider、3 个 Evaluator Skill 和 2 个 Case Pack**。当前版本定位为单实例、授权环境中的安全评测服务；生产边界见[安全模型](#安全模型)。
+内置装备目录同时提供 **2 个 Provider、3 个 Evaluator Skill 和 2 个 Case Pack**。本地开发默认使用 SQLite；生产模式支持 PostgreSQL、持久化 Job、受控 Secret 引用、可观测性与备份恢复。部署边界见[安全模型](#安全模型)与[生产部署](#生产部署)。
 
 ## 评测模型
 
@@ -71,7 +71,7 @@ flowchart LR
     G --> E
     F --> H["Deterministic Evaluator"]
     H --> I["Evidence + Finding"]
-    I --> J[("SQLite 事实源")]
+    I --> J[("SQL 事实源")]
     J --> K["JSON / Markdown Report"]
     J --> L["Replay Diff"]
 ```
@@ -89,7 +89,7 @@ flowchart LR
 
 ### 事实与恢复分离
 
-SQLite 保存“实际发生了什么”，LangGraph checkpoint 保存“工作流从哪里继续”。报告与 Replay 只读取业务事实；checkpoint 丢失不会改变已经落库的 Finding 与 Evidence。
+SQLAlchemy 业务库保存“实际发生了什么”，LangGraph checkpoint 保存“工作流从哪里继续”。报告与 Replay 只读取业务事实；checkpoint 丢失不会改变已经落库的 Finding 与 Evidence。本地默认使用 SQLite，生产模式使用 PostgreSQL 保存业务事实与 checkpoint。
 
 ## 快速开始
 
@@ -285,25 +285,60 @@ uv run attacker skill dry-run state-poisoning-evaluator --payload '{"documents":
 - 服务级 API Key 只是单密钥部署基础，不等同于完整用户身份体系或 RBAC；
 - 不受信任装备默认禁用；只有经过评审的 Linux 容器后端才可承载强隔离执行。
 
-当前 V1 **不包含** PostgreSQL 多实例协调、分布式 worker、OIDC/JWT/RBAC、外部 Secrets Manager、完整可观测性、自动备份恢复和高可用编排。在公网、多租户或关键生产环境部署前，应先补齐这些能力并完成独立安全评审。
+生产配置门禁会拒绝 SQLite、自动建表、弱控制密钥和未签名外部装备。身份平面、OIDC/JWT、用户体系和 RBAC 仍不属于当前交付范围；在公网、多租户或关键生产环境部署前，应完成目标环境验证和独立安全评审。
+
+## 生产部署
+
+当前版本在保留单 API Key、暂不引入身份平面的前提下，提供以下生产基础：
+
+- PostgreSQL SQLAlchemy 业务数据库和 PostgreSQL LangGraph checkpoint；
+- 基于数据库租约、`FOR UPDATE SKIP LOCKED`、心跳和过期恢复的持久化 Run Job；
+- `env:`（仅本地）、受限 `file:` 和 Vault KV v2 `vault:` Secret 引用；
+- request ID、结构化日志、Prometheus 指标与可选 OpenTelemetry OTLP；
+- liveness、依赖 readiness、非 root 容器及 PostgreSQL/API/worker Compose；
+- 校验 checksum 的 PostgreSQL 与装备归档备份、空目标恢复脚本。
+
+队列提交示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/jobs \
+  -H "X-API-Key: $ATTACKER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"request_id":"stateful-20260730-001","kind":"stateful","payload":{"profile":"hardened"}}'
+```
+
+Durable Job 不接受 password、token、API key 等原始 Secret 字段；敏感执行必须通过 Provider Instance Secret 引用绑定。
+
+以下能力尚未交付：
+
+- OIDC/JWT、用户体系、RBAC 和审批人组织权限；
+- PostgreSQL、Vault、入口、遥测和存储后端自身的跨可用区高可用；
+- Kubernetes/Helm、自动水平扩缩容和平台级网络策略；
+- 由本仓库直接运营的集中日志、告警后端和 Secret 自动轮换；
+- 已在目标生产环境完成的负载、混沌、渗透和灾备恢复证明。
+
+生产部署、升级、回滚、Worker 排空、SLO、告警和灾备步骤见 [Production Runbook](docs/operations/production-runbook.md)。
 
 ## 项目结构
 
 ```text
 .
 ├── app/
-│   ├── api/                 # Run、Approval、Replay、Equipment API
+│   ├── api/                 # Run、Job、Approval、Replay、Metrics API
 │   ├── core/                # 应用生命周期
 │   ├── equipment/           # 装备发现、校验、执行与 Catalog
-│   ├── infrastructure/      # 数据库与模型 Provider 适配
-│   ├── repositories/        # SQLite 事实存储
-│   ├── services/            # Policy、Evaluator、Report、Replay
+│   ├── infrastructure/      # 数据库、Checkpoint、Secret 与模型适配
+│   ├── repositories/        # SQL 事实存储与持久化 Job
+│   ├── services/            # Policy、Evaluator、Report、Replay、Job
 │   └── workflows/           # LangGraph 自适应工作流
 ├── contracts/               # 版本化 Capability Contract
 ├── equipment/               # 内置 Provider、Skill 与 Case Pack
 ├── samples/                 # 三阶段评测数据集
 ├── alembic/                 # 数据库迁移
-├── docs/                    # 架构与扩展文档
+├── deploy/                  # Prometheus、OTel 与安全配置
+├── scripts/                 # 启动、备份与恢复脚本
+├── docs/                    # 架构、扩展与生产运维文档
+├── docker-compose.production.yml
 └── tests/                   # API、Repository 与 Service 验证
 ```
 
@@ -324,6 +359,7 @@ GitHub Actions 会在 push 和 pull request 上执行同一组检查。现有测
 
 - [架构设计](docs/architecture.md)：运行模式、状态图、Policy、Evidence 与恢复边界；
 - [装备开发指南](docs/equipment-development.md)：Provider、Skill、Case Pack 与 Capability Contract；
+- [生产运维手册](docs/operations/production-runbook.md)：部署、升级、回滚、SLO、告警与灾备；
 - [V1 验收范围](target/summary.md)：三阶段交付边界与验收标准；
 - [技术栈](TECH_STACK.md)：主要组件与技术选择；
 - [项目提案](PROJECT_PROPOSAL.md)：项目背景与目标。

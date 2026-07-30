@@ -71,7 +71,6 @@ class StatefulRunService:
                 await self.equipment_service.clone_run_bindings(
                     source_run_id=equipment_source_run_id,
                     target_run_id=run_id,
-                    target_binding_ref=target_name,
                 )
             else:
                 await self.equipment_service.freeze_run_bindings(

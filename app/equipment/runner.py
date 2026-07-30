@@ -51,6 +51,10 @@ class EquipmentRunner:
         }
         workspace.mkdir(parents=True, exist_ok=True)
         if trust == TrustLevel.trusted_builtin:
+            if package.get("source_type") != "builtin":
+                raise PermissionError(
+                    "trusted_builtin execution requires Core-owned package provenance"
+                )
             with provider_secret_scope(secret_environment or {}):
                 return await asyncio.wait_for(execute_request(request), timeout=timeout_seconds)
         if trust == TrustLevel.untrusted:

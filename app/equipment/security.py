@@ -5,10 +5,10 @@ import json
 import os
 import re
 import socket
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 SENSITIVE_KEY = re.compile(
@@ -71,6 +71,34 @@ def redact(value: Any, secrets: tuple[str, ...] = ()) -> Any:
     return value
 
 
+def sensitive_values(value: Any) -> tuple[str, ...]:
+    collected: set[str] = set()
+
+    def collect_strings(item: Any) -> None:
+        if isinstance(item, dict):
+            for nested in item.values():
+                collect_strings(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                collect_strings(nested)
+        elif isinstance(item, str) and item:
+            collected.add(item)
+
+    def walk(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, nested in item.items():
+                if SENSITIVE_KEY.search(str(key)):
+                    collect_strings(nested)
+                else:
+                    walk(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                walk(nested)
+
+    walk(value)
+    return tuple(sorted(collected))
+
+
 def summarize(value: Any, *, max_chars: int = 4096) -> dict[str, Any]:
     redacted = redact(value)
     encoded = json.dumps(redacted, sort_keys=True, default=str)
@@ -94,28 +122,54 @@ class SecretLease:
         return tuple(self._values.values())
 
     def close(self) -> None:
+        for name in self._values:
+            self._values[name] = ""
         self._values.clear()
 
 
-class SecretBroker:
-    def __init__(self, backend: Mapping[str, str] | None = None) -> None:
-        self._backend = dict(backend or {})
+class SecretResolver(Protocol):
+    async def resolve(self, reference: str) -> str: ...
 
-    @contextmanager
-    def lease(self, secret_refs: Mapping[str, str]) -> Iterator[SecretLease]:
+
+class SecretBroker:
+    def __init__(
+        self,
+        backend: Mapping[str, str] | None = None,
+        *,
+        resolver: SecretResolver | None = None,
+        allow_environment_references: bool = True,
+    ) -> None:
+        self._backend = dict(backend or {})
+        self._resolver = resolver
+        self._allow_environment_references = allow_environment_references
+
+    @asynccontextmanager
+    async def lease(self, secret_refs: Mapping[str, str]) -> AsyncIterator[SecretLease]:
         resolved: dict[str, str] = {}
-        for name, reference in secret_refs.items():
-            if reference.startswith("env:"):
-                environment_name = reference.removeprefix("env:")
-                if environment_name not in os.environ:
-                    raise LookupError(f"secret environment reference {reference} is unavailable")
-                resolved[name] = os.environ[environment_name]
-            elif reference not in self._backend:
-                raise LookupError(f"secret reference {reference} is unavailable")
-            else:
-                resolved[name] = self._backend[reference]
-        lease = SecretLease(resolved)
+        lease: SecretLease | None = None
         try:
+            for name, reference in secret_refs.items():
+                if reference.startswith("env:"):
+                    if not self._allow_environment_references:
+                        raise PermissionError("environment secret references are disabled")
+                    environment_name = reference.removeprefix("env:")
+                    if environment_name not in os.environ:
+                        raise LookupError(
+                            f"secret environment reference {reference} is unavailable"
+                        )
+                    resolved[name] = os.environ[environment_name]
+                elif reference in self._backend:
+                    resolved[name] = self._backend[reference]
+                elif self._resolver is not None:
+                    resolved[name] = await self._resolver.resolve(reference)
+                else:
+                    raise LookupError(f"secret reference {reference} is unavailable")
+            lease = SecretLease(resolved)
+            resolved.clear()
             yield lease
         finally:
-            lease.close()
+            for name in resolved:
+                resolved[name] = ""
+            resolved.clear()
+            if lease is not None:
+                lease.close()

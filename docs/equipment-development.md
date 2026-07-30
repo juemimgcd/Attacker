@@ -37,6 +37,16 @@ Provider config and Skill input/output files use JSON Schema. The v1 runtime sup
 
 A subprocess is not a security sandbox. On Windows, `untrusted` packages are rejected. Linux deployment must supply a reviewed container backend with a non-root user, read-only root, resource limits, network default-deny, minimal mounts, seccomp/AppArmor, `no-new-privileges`, and teardown.
 
+`trusted_builtin` is Core-owned provenance, not a permission an enterprise Manifest can
+grant itself. Core accepts built-in packages only at a shipped package path with a pinned
+ID and Core trust checksum. The trust checksum uses stable path ordering and canonical
+UTF-8 text line endings, so Core provenance is identical on Windows and Linux. Persisted
+package revision checksums remain byte-exact for compatibility with existing catalogs,
+signatures, archives, Run snapshots, and revocation entries. Python bytecode caches are
+ignored for legacy compatibility but never archived or used to load an entrypoint; bytecode
+artifacts outside a cache directory are rejected. Offline and local executable packages
+must use `trusted_enterprise` or, where available, `untrusted`.
+
 ## Supply-chain controls
 
 Discovery rejects unsafe paths, symlinks, excessive depth/file count/size, missing entrypoints, malformed Python, incompatible versions, unknown contracts, and immutable version checksum conflicts.
@@ -76,10 +86,26 @@ redacts the result, persists Evidence and Resource Leases, and re-enters the Ski
 secret, or unrestricted network handle. Reusing a request ID with a different payload is
 rejected.
 
+Provider completion, its bounded redacted result, and Resource Leases commit in one
+database transaction. Reusing an equipment `operation_id` requires the same package,
+instance, principal, Contract, and input fingerprint. A duplicate of an unfinished
+operation is returned as `in_doubt` and is never invoked again implicitly.
+Executions created before request fingerprints and structured results were introduced are
+also returned as `in_doubt` with `legacy_result_unavailable`; Core does not guess an input
+identity or claim an empty legacy result is complete. Repeated completed Provider calls
+return the Resource Leases already committed with the original execution.
+
 Resource cleanup is limited to persisted Resource Leases. Cleanup operation IDs are stable,
 attempt counts and errors are retained, and startup recovery retries active or failed
 leases using the frozen Provider revision. A cleanup failure remains visible in reports and
 does not remove an already supported Finding.
+
+Same-binding Replay rejects different non-secret Target behavior, including name, endpoint,
+method, header names, authentication shape, timeout, and request template, while allowing
+credential values to be resupplied or rotated. It preserves the source equipment target
+and principal bindings. Upgrade Comparison reports changes by comparing persisted source
+and replay Run facts, including Provider, Instance, config, Skill, Case Pack, Contract,
+Target, semantic Policy, and Test Principal dimensions.
 
 ## CI contract
 

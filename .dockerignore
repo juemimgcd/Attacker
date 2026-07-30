@@ -1,0 +1,17 @@
+.git
+.github
+.pytest_cache
+.pytest-tmp
+.ruff_cache
+.venv
+.worktrees
+__pycache__
+*.py[cod]
+data
+logs
+pytest-basetemp
+tests
+ERGraphs
+target
+steps
+docs/superpowers
