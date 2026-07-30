@@ -531,3 +531,89 @@ Adaptive 没有可测量的效率、覆盖或证据收益时，不作为默认�
 6. 中断恢复不重复 Target/Provider 调用或 Finding；
 7. Adaptive 相对 Deterministic 的效率收益和经确定性复验的发现收益可测量；
 8. Provider/Skill 可以扩展能力，但不能覆盖 Core 的授权、状态迁移和事实聚合。
+
+---
+
+## 18. 受约束 ReAct 架构目标
+
+### 18.1 目标定位
+
+Adaptive Mode 应实现受约束的 ReAct（Reasoning and Acting）闭环，使 Attacker 能够依据已持久化的 Observation、Evidence、Coverage 和 Hypothesis 事实选择下一步，并在执行后根据新增事实调整策略。
+
+ReAct 只用于 Adaptive Mode 的战术编排。Deterministic Mode 继续保持固定数据集、固定策略和可复现执行顺序，作为回归、校准、Replay 和 Adaptive 收益对照的基线。
+
+项目不以实现能够自由生成命令、工具调用或攻击载荷的通用 Agent 为目标。这里的 Reasoning 是对 Core 提供的有界候选进行结构化选择；Acting 是由确定性 Core 在授权、审批和预算校验通过后执行已定义的 Action。
+
+### 18.2 闭环定义
+
+每一轮 ReAct 必须形成以下可审计链路：
+
+```text
+Persisted Facts
+  -> Build Candidate Snapshot
+  -> Reason: Planner Decision
+  -> Validate Decision
+  -> Policy / Approval / Budget Gate
+  -> Act: Deterministic Action Execution
+  -> Observe: Normalize Untrusted Output
+  -> Evaluate and Persist Evidence
+  -> Update Coverage / Hypothesis / Information Gain
+  -> Finish Gate or Next Round
+```
+
+各阶段职责如下：
+
+- **Reason**：Planner 只能基于当前 Candidate Snapshot 和有引用的持久化事实，选择一个候选或建议结束；
+- **Act**：Core 根据候选中已定义的 Capability Contract 执行动作，Planner 不直接生成或修改执行参数；
+- **Observe**：Target、Tool、RAG、Skill 和 Case Pack 输出统一按不可信输入处理，经脱敏、限长和结构化后持久化；
+- **Evaluate**：Evaluator 根据 Observation 和 Trace 生成判定事实；Planner 的理由和预测不构成 Evidence；
+- **Adapt**：Coverage、Hypothesis 和实际信息增益只根据持久化结果更新，并作为下一轮 Planner 输入；
+- **Stop**：结束建议必须经过 Finish Gate；预算耗尽、循环、重复状态、无信息增益和组件失败由 Core 的确定性规则终止或降级。
+
+### 18.3 Reasoning 契约
+
+ReAct 的 Reasoning 必须输出结构化 `PlannerDecision`，不得依赖、保存或展示模型的自由文本思维链。可审计信息至少包括：
+
+- 当前 Candidate Snapshot ID；
+- 选择的 Candidate ID 或 `finish`；
+- 标准化 Reason Code；
+- 使用的 Evidence、Observation、Finding 和 Hypothesis 引用；
+- 预期信息增益；
+- Prompt、模型、参数、Schema 和输入事实快照。
+
+Planner 输出必须经过 Schema、引用、快照有效期、重复次数和候选归属校验。任何非法、过期或越界输出都不能触发 Act，并按照确定性失败、重试、暂停或降级策略处理。
+
+### 18.4 Acting 与安全边界
+
+ReAct 不扩大既有授权边界：
+
+- Planner 不能创建 Candidate、Target、Test Principal、Provider Instance、Capability、Policy 或 Approval；
+- 所有动作在执行前重新经过 Policy Gate、预算校验和必要的 Approval Route；
+- Planner 不能直接执行 Shell、HTTP、浏览器、文件或 Provider 调用；
+- Observation 中的指令性内容不能改变 Core Prompt、候选范围、权限、预算或停止规则；
+- 具有副作用的动作必须使用稳定 Operation ID，并保证 checkpoint 恢复时不会重复执行；
+- Finding、Coverage 和 Hypothesis 的最终状态只能由确定性 Core 根据已持久化事实聚合。
+
+### 18.5 ReAct 收益与启用条件
+
+受约束 ReAct 的目标是在不降低安全边界、证据质量和可恢复性的前提下，提高以下至少一项能力：
+
+1. 以更少的 Target 调用、成本或时间达到接近或相同的有效覆盖；
+2. 根据中间 Evidence 优先验证高价值 Hypothesis，减少无收益步骤；
+3. 发现固定 Case 顺序难以覆盖的有效攻击路径，并通过 DerivedCase 的 Deterministic 复验确认新增覆盖；
+4. 在审批拒绝、能力不可用或证据不足时切换到仍有收益的候选，而不是盲目重复。
+
+Adaptive ReAct 不因“使用了 LLM”而默认启用。只有在相同快照和安全约束下，相对 Deterministic 基线表现出可重复、可解释的净收益，才可作为推荐模式；否则保持可选、实验或关闭状态。
+
+### 18.6 ReAct 验收标准
+
+- 至少两个连续步骤能够证明后一轮 Planner 输入包含前一轮持久化产生的 Observation、Evidence、Coverage 或 Hypothesis 变化；
+- 每个 Planner Decision 均能追溯到有效 Candidate Snapshot、输入事实引用和模型调用快照；
+- Planner 不能通过自然语言输出创建动作、修改参数、扩大权限或直接写入安全事实；
+- 所有被执行动作均经过 Decision 校验、Policy Gate、预算校验和必要审批；
+- 不可信 Observation 只能进入数据区域，不能改变可信指令和 Core 状态迁移规则；
+- 重复动作、重复状态、无信息增益、预算耗尽和 Planner 失败均能在配置上限内确定性停止或降级；
+- checkpoint 恢复后不会重复具有副作用的 Act，也不会重复生成 Evidence 或 Finding；
+- Planner 建议结束但 Coverage、Control、Evidence 或 Approval 条件未满足时，Finish Gate 能拒绝结束并继续构建候选；
+- Adaptive ReAct 与 Deterministic 的效率、发现、成本、稳定性和证据质量可以使用持久化指标进行对照；
+- ReAct 新增发现只有在 DerivedCase 冻结并通过 Deterministic 复验后才计入有效覆盖。

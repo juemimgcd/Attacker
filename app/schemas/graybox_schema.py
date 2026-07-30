@@ -6,12 +6,15 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_val
 
 from app.schemas.adaptive_agent_schema import (
     Candidate,
+    HypothesisFact,
     InformationGain,
+    InformationGainMetrics,
     PlannerCallSnapshot,
     PlannerReasonCode,
     UntrustedObservation,
 )
 from app.schemas.attack_sample_schema import CaseKind, RiskLevel
+from app.schemas.attack_state_schema import CoverageStatus
 from app.schemas.judge_schema import TargetResponse
 from app.schemas.target_schema import TargetConfig
 
@@ -152,6 +155,8 @@ class AttackPolicy(BaseModel):
     max_planner_failures: int = Field(default=3, ge=1, le=20)
     max_repeated_decisions: int = Field(default=3, ge=1, le=20)
     max_action_repeats: int = Field(default=1, ge=1, le=20)
+    max_consecutive_no_gain_steps: int = Field(default=3, ge=1, le=100)
+    max_repeated_states: int = Field(default=3, ge=1, le=100)
     stop_on_critical: bool = False
     allow_early_finish: bool = False
 
@@ -166,11 +171,19 @@ class FindingSummary(BaseModel):
 
 class PlannerContext(BaseModel):
     candidate_snapshot_id: str
-    candidates: list[Candidate]
-    observations: list[UntrustedObservation]
-    evidence_refs: list[str]
-    finding_refs: list[str]
-    hypothesis_refs: list[str]
+    candidates: list[Candidate] = Field(max_length=100)
+    observations: list[UntrustedObservation] = Field(max_length=20)
+    evidence_refs: list[str] = Field(max_length=200)
+    finding_refs: list[str] = Field(max_length=100)
+    hypothesis_refs: list[str] = Field(max_length=100)
+    coverage: dict[str, CoverageStatus] = Field(default_factory=dict)
+    coverage_refs: list[str] = Field(default_factory=list, max_length=100)
+    information_gain_refs: list[str] = Field(default_factory=list, max_length=100)
+    hypotheses: list[HypothesisFact] = Field(default_factory=list, max_length=100)
+    information_gains: list[InformationGainMetrics] = Field(
+        default_factory=list,
+        max_length=100,
+    )
     remaining_steps: int
 
 
@@ -187,14 +200,30 @@ class PlannerDecision(BaseModel):
 
     @model_validator(mode="after")
     def validate_candidate_id(self) -> "PlannerDecision":
+        execute_reason_codes = {
+            PlannerReasonCode.deterministic_order,
+            PlannerReasonCode.coverage_gap,
+            PlannerReasonCode.evidence_gap,
+            PlannerReasonCode.hypothesis_validation,
+            PlannerReasonCode.control_pair,
+        }
+        finish_reason_codes = {
+            PlannerReasonCode.all_requirements_satisfied,
+            PlannerReasonCode.no_candidates,
+            PlannerReasonCode.budget_exhausted,
+        }
         if self.action == "execute" and self.candidate_id is None:
             raise ValueError("execute requires candidate_id")
         if self.action == "execute" and self.expected_information_gain is None:
             raise ValueError("execute requires expected_information_gain")
+        if self.action == "execute" and self.reason_code not in execute_reason_codes:
+            raise ValueError("execute requires an execution reason code")
         if self.action == "finish" and self.candidate_id is not None:
             raise ValueError("finish cannot include candidate_id")
         if self.action == "finish" and self.expected_information_gain is not None:
             raise ValueError("finish cannot include expected_information_gain")
+        if self.action == "finish" and self.reason_code not in finish_reason_codes:
+            raise ValueError("finish requires a finish reason code")
         return self
 
 
@@ -217,7 +246,7 @@ class PlannerConfig(BaseModel):
     model: str = "planner"
     timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     temperature: float = Field(default=0, ge=0, le=2)
-    prompt_template_version: str = "planner-v2"
+    prompt_template_version: Literal["1.0.0", "planner-v2"] = "1.0.0"
 
     @model_validator(mode="after")
     def validate_http_config(self) -> "PlannerConfig":

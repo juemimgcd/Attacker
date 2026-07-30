@@ -64,6 +64,7 @@ class HypothesisService:
     def actual_gain(
         *,
         previous_coverage: dict[str, CoverageStatus],
+        previous_hypothesis: HypothesisFact,
         current_coverage: tuple[CoverageFact, ...],
         evaluation: GrayBoxEvaluationResult,
         target_call_cost: int,
@@ -77,8 +78,16 @@ class HypothesisService:
         )
         return InformationGainMetrics(
             coverage_delta=coverage_delta,
-            evidence_completeness_delta=int(evaluation.evidence_complete),
-            confirmed_finding_delta=int(evaluation.violated and evaluation.evidence_complete),
+            evidence_completeness_delta=int(
+                evaluation.evidence_complete
+                and previous_hypothesis.status
+                in {HypothesisStatus.pending, HypothesisStatus.inconclusive}
+            ),
+            confirmed_finding_delta=int(
+                evaluation.violated
+                and evaluation.evidence_complete
+                and previous_hypothesis.status != HypothesisStatus.supported
+            ),
             target_call_cost=target_call_cost,
             planner_cost=planner_cost,
             duration_delta=duration_delta,

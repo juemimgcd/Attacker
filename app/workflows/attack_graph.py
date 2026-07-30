@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
@@ -7,7 +9,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.repositories.adaptive_repository import AdaptiveRepository
-from app.schemas.adaptive_agent_schema import CandidateSnapshot, ObservationSource
+from app.schemas.adaptive_agent_schema import (
+    CandidateSnapshot,
+    ObservationSource,
+    PlannerReasonCode,
+)
 from app.schemas.attack_sample_schema import CaseKind
 from app.schemas.attack_state_schema import CoverageStatus, RunBudgetSnapshot
 from app.schemas.graybox_schema import (
@@ -124,6 +130,9 @@ class AttackGraph:
             "action_repeat_counts": state.get("action_repeat_counts", {}),
             "recent_similarity_keys": state.get("recent_similarity_keys", []),
             "information_gain_refs": facts["information_gain_refs"],
+            "last_state_fingerprint": state.get("last_state_fingerprint"),
+            "consecutive_no_gain_steps": state.get("consecutive_no_gain_steps", 0),
+            "repeated_state_count": state.get("repeated_state_count", 0),
             "test_principal_refs": state.get(
                 "test_principal_refs",
                 ["default-test-principal"],
@@ -204,29 +213,53 @@ class AttackGraph:
             snapshot_id=str(state["candidate_snapshot_id"]),
         )
         facts = await self.repository.load_adaptive_facts(state["run_id"])
+        candidates = list(snapshot.candidates[:100])
+        observations = facts["observations"][-20:]
+        finding_refs = facts["finding_refs"][-100:]
+        hypothesis_refs = list(
+            dict.fromkeys(
+                hypothesis_ref
+                for candidate in candidates
+                for hypothesis_ref in candidate.hypothesis_refs
+            )
+        )[:100]
+        coverage_tags = sorted(
+            {tag for candidate in candidates for tag in candidate.coverage_tags}
+        )[:100]
         context = PlannerContext(
             candidate_snapshot_id=snapshot.snapshot_id,
-            candidates=list(snapshot.candidates),
-            observations=facts["observations"],
+            candidates=candidates,
+            observations=observations,
             evidence_refs=[
-                *facts["observation_refs"],
-                *facts["finding_refs"],
+                *(observation.observation_ref for observation in observations),
+                *finding_refs,
             ],
-            finding_refs=facts["finding_refs"],
-            hypothesis_refs=[fact.hypothesis_ref for fact in facts["hypotheses"].values()],
+            finding_refs=finding_refs,
+            hypothesis_refs=hypothesis_refs,
+            coverage={
+                tag: facts["coverage"][tag] for tag in coverage_tags if tag in facts["coverage"]
+            },
+            coverage_refs=[
+                facts["coverage_ref_by_tag"][tag]
+                for tag in coverage_tags
+                if tag in facts["coverage_ref_by_tag"]
+            ],
+            information_gain_refs=facts["information_gain_refs"][-100:],
+            hypotheses=[
+                facts["hypotheses"][candidate.action_id]
+                for candidate in candidates
+                if candidate.action_id in facts["hypotheses"]
+            ],
+            information_gains=facts["information_gains"][-100:],
             remaining_steps=max(remaining_steps, 0),
         )
         planner_index = state["planner_call_count"] + 1
         operation_id = f"{state['run_id']}:planner:{planner_index}"
-        try:
-            result = await runtime.planner.plan(context)
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
-            await self.repository.record_planner_error(
-                run_id=state["run_id"],
-                operation_id=operation_id,
-                error_type=type(exc).__name__,
-                message=str(exc),
-            )
+        persisted_outcome = await self.repository.load_planner_outcome(
+            run_id=state["run_id"],
+            operation_id=operation_id,
+        )
+        if persisted_outcome and persisted_outcome["event_type"] == "planner_error":
             failures = state["planner_failures"] + 1
             terminal = failures >= runtime.policy.max_planner_failures
             return {
@@ -236,15 +269,48 @@ class AttackGraph:
                 "status": "aborted" if terminal else "running",
                 "terminal_reason": "planner failure limit exhausted" if terminal else None,
             }
+        if persisted_outcome is None:
+            try:
+                result = await runtime.planner.plan(context)
+            except (
+                httpx.HTTPError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                IndexError,
+            ) as exc:
+                await self.repository.record_planner_error(
+                    run_id=state["run_id"],
+                    operation_id=operation_id,
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                )
+                failures = state["planner_failures"] + 1
+                terminal = failures >= runtime.policy.max_planner_failures
+                return {
+                    "planner_call_count": planner_index,
+                    "planner_failures": failures,
+                    "next_action": "finalize" if terminal else "retry",
+                    "status": "aborted" if terminal else "running",
+                    "terminal_reason": ("planner failure limit exhausted" if terminal else None),
+                }
+        else:
+            result = persisted_outcome["result"]
 
         decision = result.decision
-        rejection_reason = self._validate_decision(snapshot, decision)
-        if rejection_reason is None:
-            rejection_reason = await self.repository.validate_planner_references(
-                run_id=state["run_id"],
-                evidence_refs=decision.evidence_refs,
-                hypothesis_refs=decision.hypothesis_refs,
+        if persisted_outcome and persisted_outcome["event_type"] == "planner_rejected":
+            rejection_reason = (
+                persisted_outcome.get("rejection_reason") or "persisted planner rejection"
             )
+        else:
+            rejection_reason = self._validate_decision(snapshot, context, decision)
+            if rejection_reason is None and (decision.evidence_refs or decision.hypothesis_refs):
+                rejection_reason = await self.repository.validate_planner_references(
+                    run_id=state["run_id"],
+                    evidence_refs=decision.evidence_refs,
+                    hypothesis_refs=decision.hypothesis_refs,
+                )
         history = [
             *state["decision_history"],
             decision.candidate_id or decision.action,
@@ -284,17 +350,16 @@ class AttackGraph:
                 "terminal_reason": None,
             }
         candidate = next(
-            item for item in snapshot.candidates if item.candidate_id == decision.candidate_id
+            item for item in context.candidates if item.candidate_id == decision.candidate_id
         )
         case_id = candidate.action_id
+        action_attempt = state["action_repeat_counts"].get(case_id, 0) + 1
         return {
             "planner_call_count": planner_index,
             "planner_token_count": state["planner_token_count"] + planner_tokens,
             "decision_history": history,
             "current_case_id": case_id,
-            "current_operation_id": (
-                f"{state['run_id']}:case:{case_id}:{len(state['completed_case_ids']) + 1}"
-            ),
+            "current_operation_id": f"{state['run_id']}:case:{case_id}:{action_attempt}",
             "current_step_started_at": datetime.now(UTC).isoformat(),
             "current_step_id": None,
             "evaluation_event_id": None,
@@ -448,7 +513,7 @@ class AttackGraph:
             run_id=state["run_id"],
             case_id=case.id,
             operation_id=operation_id,
-            sequence=len(state["completed_case_ids"]) + 1,
+            sequence=state["graph_step_count"],
         )
         try:
             await self.repository.load_target_execution(operation_id)
@@ -617,6 +682,7 @@ class AttackGraph:
         started_at = datetime.fromisoformat(str(state["current_step_started_at"]))
         gain = self.hypothesis_service.actual_gain(
             previous_coverage=facts["coverage"],
+            previous_hypothesis=previous_hypothesis,
             current_coverage=coverage_facts,
             evaluation=evaluation,
             target_call_cost=1,
@@ -626,7 +692,7 @@ class AttackGraph:
                 0,
             ),
         )
-        _, gain_ref = await self.repository.record_coverage_and_gain(
+        _, gain_ref, persisted_gain = await self.repository.record_coverage_and_gain(
             run_id=state["run_id"],
             operation_id=operation_id,
             coverage_facts=coverage_facts,
@@ -634,6 +700,19 @@ class AttackGraph:
             step_id=state.get("current_step_id"),
         )
         updated_facts = await self.repository.load_adaptive_facts(state["run_id"])
+        state_fingerprint = self._state_fingerprint(updated_facts)
+        has_information_gain = any(
+            (
+                persisted_gain.coverage_delta > 0,
+                persisted_gain.evidence_completeness_delta > 0,
+                persisted_gain.confirmed_finding_delta > 0,
+            )
+        )
+        repeated_state_count = (
+            state["repeated_state_count"] + 1
+            if state.get("last_state_fingerprint") == state_fingerprint
+            else 0
+        )
         return {
             "coverage": {tag: status.value for tag, status in updated_facts["coverage"].items()},
             "hypothesis_refs": [
@@ -648,6 +727,11 @@ class AttackGraph:
                     ]
                 )
             ),
+            "last_state_fingerprint": state_fingerprint,
+            "consecutive_no_gain_steps": (
+                0 if has_information_gain else state["consecutive_no_gain_steps"] + 1
+            ),
+            "repeated_state_count": repeated_state_count,
             "next_action": "decide",
         }
 
@@ -668,7 +752,7 @@ class AttackGraph:
             run_id=state["run_id"],
             case=case,
             operation_id=str(state["current_operation_id"]),
-            sequence=len(state["completed_case_ids"]) + 1,
+            sequence=state["graph_step_count"],
             outcome=outcome,
             reason=policy.reason,
             policy=policy,
@@ -703,6 +787,12 @@ class AttackGraph:
         elif state["target_call_count"] >= runtime.policy.max_target_calls:
             terminal_reason = "target call budget exhausted"
             status = "aborted"
+        elif state["consecutive_no_gain_steps"] >= runtime.policy.max_consecutive_no_gain_steps:
+            terminal_reason = "consecutive no-information-gain limit reached"
+            status = "aborted"
+        elif state["repeated_state_count"] >= runtime.policy.max_repeated_states:
+            terminal_reason = "repeated normalized state limit reached"
+            status = "aborted"
         elif runtime.policy.stop_on_critical and any(
             summary["risk_level"] == "critical" for summary in state["finding_summaries"]
         ):
@@ -730,22 +820,77 @@ class AttackGraph:
     @staticmethod
     def _validate_decision(
         snapshot: CandidateSnapshot,
+        context: PlannerContext,
         decision: PlannerDecision,
     ) -> str | None:
         if decision.candidate_snapshot_id != snapshot.snapshot_id:
             return "planner referenced an expired or unknown candidate snapshot"
-        if not decision.evidence_refs:
+        empty_run_finish = (
+            decision.action == "finish"
+            and decision.reason_code == PlannerReasonCode.no_candidates
+            and not context.candidates
+        )
+        if not decision.evidence_refs and not empty_run_finish:
             return "planner decision must cite persisted evidence"
+        current_evidence_refs = {
+            *context.evidence_refs,
+            *context.coverage_refs,
+            *context.information_gain_refs,
+        }
+        missing_evidence = sorted(set(decision.evidence_refs) - current_evidence_refs)
+        if missing_evidence:
+            return "planner cited evidence outside the current context"
+        missing_hypotheses = sorted(set(decision.hypothesis_refs) - set(context.hypothesis_refs))
+        if missing_hypotheses:
+            return "planner cited hypotheses outside the current context"
         if decision.action == "finish":
             return None
         candidate_ids = [
             candidate.candidate_id
-            for candidate in snapshot.candidates
+            for candidate in context.candidates
             if candidate.candidate_id == decision.candidate_id
         ]
         if len(candidate_ids) != 1:
             return "planner selected a candidate outside the current snapshot"
         return None
+
+    @staticmethod
+    def _state_fingerprint(facts: dict[str, Any]) -> str:
+        latest_observation = facts["observations"][-1] if facts["observations"] else None
+        latest_gain = facts["information_gains"][-1] if facts["information_gains"] else None
+        payload = {
+            "coverage": {tag: status.value for tag, status in sorted(facts["coverage"].items())},
+            "hypotheses": {
+                action_id: hypothesis.status.value
+                for action_id, hypothesis in sorted(facts["hypotheses"].items())
+            },
+            "evidence_gaps": sorted(facts["evidence_gaps"]),
+            "latest_observation": (
+                {
+                    "source": latest_observation.source.value,
+                    "summary": latest_observation.summary,
+                }
+                if latest_observation
+                else None
+            ),
+            "latest_information_gain": (
+                {
+                    "coverage_delta": latest_gain.coverage_delta,
+                    "evidence_completeness_delta": (latest_gain.evidence_completeness_delta),
+                    "confirmed_finding_delta": latest_gain.confirmed_finding_delta,
+                }
+                if latest_gain
+                else None
+            ),
+            "finding_fingerprints": facts["finding_fingerprints"],
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _after_plan(state: AttackGraphState) -> str:

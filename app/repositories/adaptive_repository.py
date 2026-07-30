@@ -190,7 +190,9 @@ class AdaptiveRepository:
         cases: list[GrayBoxCase],
     ) -> dict[str, HypothesisFact]:
         hypotheses: dict[str, HypothesisFact] = {}
+        coverage_tags: set[str] = set()
         for case in sorted(cases, key=lambda item: item.id):
+            coverage_tags.update(case.coverage_tags or [case.category])
             template_id = case.hypothesis_template_id or f"{case.category}.v1"
             event_id = await self.append_event(
                 run_id=run_id,
@@ -220,6 +222,17 @@ class AdaptiveRepository:
                         f"case_id={case.id}; hypothesis_template_id={template_id}; "
                         f"coverage_tags={','.join(case.coverage_tags or [case.category])}"
                     )[:2_000],
+                },
+            )
+        for tag in sorted(coverage_tags):
+            await self.append_event(
+                run_id=run_id,
+                operation_id=f"{run_id}:coverage:{tag}:initial",
+                event_type="coverage_updated",
+                evidence={
+                    "tag": tag,
+                    "status": CoverageStatus.not_started.value,
+                    "evidence_refs": [],
                 },
             )
         return hypotheses
@@ -312,7 +325,7 @@ class AdaptiveRepository:
         coverage_facts: tuple[CoverageFact, ...],
         gain: InformationGainMetrics,
         step_id: str | None,
-    ) -> tuple[list[str], str]:
+    ) -> tuple[list[str], str, InformationGainMetrics]:
         coverage_refs: list[str] = []
         for fact in coverage_facts:
             coverage_refs.append(
@@ -331,7 +344,19 @@ class AdaptiveRepository:
             step_id=step_id,
             evidence=gain.model_dump(mode="json"),
         )
-        return coverage_refs, gain_ref
+        persisted_gain = await self.load_information_gain(operation_id)
+        return coverage_refs, gain_ref, persisted_gain
+
+    async def load_information_gain(self, operation_id: str) -> InformationGainMetrics:
+        async with self.session_factory() as session:
+            event = await session.scalar(
+                select(EventRecord).where(
+                    EventRecord.operation_id == f"{operation_id}:information_gain"
+                )
+            )
+            if event is None:
+                raise LookupError(f"information gain {operation_id} not found")
+            return InformationGainMetrics.model_validate(event.evidence_json)
 
     async def record_finish_rejected(
         self,
@@ -385,8 +410,10 @@ class AdaptiveRepository:
 
         hypotheses: dict[str, HypothesisFact] = {}
         coverage: dict[str, CoverageStatus] = {}
+        coverage_refs: dict[str, str] = {}
         observations: list[UntrustedObservation] = []
         information_gain_refs: list[str] = []
+        information_gains: list[InformationGainMetrics] = []
         for event in events:
             if event.event_type in {"hypothesis_created", "hypothesis_updated"}:
                 evidence = event.evidence_json
@@ -399,9 +426,9 @@ class AdaptiveRepository:
                     evidence_refs=tuple(evidence.get("evidence_refs", [])),
                 )
             elif event.event_type == "coverage_updated":
-                coverage[str(event.evidence_json["tag"])] = CoverageStatus(
-                    str(event.evidence_json["status"])
-                )
+                tag = str(event.evidence_json["tag"])
+                coverage[tag] = CoverageStatus(str(event.evidence_json["status"]))
+                coverage_refs[tag] = event.id
             elif event.event_type == "observation_normalized":
                 observations.append(
                     UntrustedObservation(
@@ -412,6 +439,7 @@ class AdaptiveRepository:
                 )
             elif event.event_type == "information_gain_measured":
                 information_gain_refs.append(event.id)
+                information_gains.append(InformationGainMetrics.model_validate(event.evidence_json))
 
         evidence_gaps = {
             tag for tag, status in coverage.items() if status == CoverageStatus.inconclusive
@@ -419,11 +447,17 @@ class AdaptiveRepository:
         return {
             "hypotheses": hypotheses,
             "coverage": coverage,
+            "coverage_ref_by_tag": coverage_refs,
+            "coverage_refs": [coverage_refs[tag] for tag in sorted(coverage_refs)],
             "observations": observations[-20:],
             "observation_refs": [item.observation_ref for item in observations],
             "finding_refs": [finding.id for finding in findings],
+            "finding_fingerprints": sorted(
+                {finding.fingerprint for finding in findings if finding.fingerprint is not None}
+            ),
             "evidence_gaps": evidence_gaps,
             "information_gain_refs": information_gain_refs,
+            "information_gains": information_gains,
         }
 
     async def validate_planner_references(
@@ -472,6 +506,43 @@ class AdaptiveRepository:
         if invalid_hypotheses:
             return f"planner referenced non-hypothesis facts: {', '.join(invalid_hypotheses)}"
         return None
+
+    async def load_planner_outcome(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+    ) -> dict[str, Any] | None:
+        async with self.session_factory() as session:
+            event = await session.scalar(
+                select(EventRecord).where(
+                    EventRecord.run_id == run_id,
+                    EventRecord.operation_id == operation_id,
+                )
+            )
+        if event is None:
+            return None
+        if event.event_type == "planner_error":
+            return {
+                "event_type": event.event_type,
+                "error_type": event.evidence_json.get("error_type"),
+                "message": event.evidence_json.get("message"),
+            }
+        if event.event_type not in {"planner_decided", "planner_rejected"}:
+            raise ValueError(f"unexpected planner event type: {event.event_type}")
+        evidence = event.evidence_json
+        return {
+            "event_type": event.event_type,
+            "result": PlannerResult.model_validate(
+                {
+                    "decision": evidence["decision"],
+                    "backend": evidence["backend"],
+                    "usage": evidence["usage"],
+                    "call_snapshot": evidence["call_snapshot"],
+                }
+            ),
+            "rejection_reason": evidence.get("rejection_reason"),
+        }
 
     async def record_planner_result(
         self,

@@ -119,6 +119,9 @@ class AdaptiveRunService:
             "action_repeat_counts": {},
             "recent_similarity_keys": [],
             "information_gain_refs": [],
+            "last_state_fingerprint": None,
+            "consecutive_no_gain_steps": 0,
+            "repeated_state_count": 0,
             "test_principal_refs": request.test_principal_refs,
             "finding_summaries": [],
             "current_case_id": None,
@@ -230,7 +233,7 @@ class AdaptiveRunService:
                 )
             planner_config = PlannerConfig.model_validate(stored_planner)
         else:
-            for field in ("backend", "model", "endpoint"):
+            for field in ("backend", "model", "endpoint", "prompt_template_version"):
                 stored_value = stored_planner.get(field)
                 override_value = planner_override.model_dump(mode="json").get(field)
                 if stored_value is not None and stored_value != override_value:

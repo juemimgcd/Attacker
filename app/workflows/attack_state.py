@@ -18,6 +18,9 @@ class AttackGraphState(TypedDict):
     action_repeat_counts: dict[str, int]
     recent_similarity_keys: list[str]
     information_gain_refs: list[str]
+    last_state_fingerprint: str | None
+    consecutive_no_gain_steps: int
+    repeated_state_count: int
     test_principal_refs: list[str]
     finding_summaries: list[dict[str, str]]
     current_case_id: str | None
