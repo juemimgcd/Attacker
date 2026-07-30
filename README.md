@@ -1,123 +1,180 @@
+<div align="center">
+
 # Attacker
 
-Attacker 是一个面向 AI Agent 的授权安全评测服务。它执行结构化攻击与安全对照用例，通过确定性 Evaluator、Policy Gate 和可恢复工作流记录证据，并从 SQLite 生成 Finding、报告和 Replay 差异。
+### Evidence-driven security evaluation for AI Agents
 
-> 仅用于明确授权的目标与隔离测试环境。项目默认拒绝未显式授权的公网或不可解析 Target。
+面向 AI Agent 的授权安全评测平台：用确定性策略、可追溯证据与可回放结果，持续验证 Agent 的安全边界。
 
-## V1 状态
+[![CI](https://github.com/juemimgcd/Attacker/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/juemimgcd/Attacker/actions/workflows/ci.yml)
+[![Equipment Contract](https://github.com/juemimgcd/Attacker/actions/workflows/equipment-contract.yml/badge.svg?branch=master)](https://github.com/juemimgcd/Attacker/actions/workflows/equipment-contract.yml)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.136+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![License](https://img.shields.io/github/license/juemimgcd/Attacker)](LICENSE)
 
-三个评测阶段已经完成：
+[功能概览](#功能概览) · [评测模型](#评测模型) · [快速开始](#快速开始) · [API 示例](#api-示例) · [装备扩展](#装备扩展) · [文档](#文档)
 
-| 阶段 | 用例数 | 覆盖范围 |
+</div>
+
+> [!IMPORTANT]
+> Attacker 仅用于已获得明确授权的目标和隔离测试环境。系统默认只允许本机、回环或私网 Target；评测公网目标必须显式授权并启用相应配置。
+
+## 为什么是 Attacker
+
+AI Agent 的风险不只存在于最终回答中，还可能发生在工具调用、参数传递、审批、Memory、RAG 和恢复流程里。Attacker 将这些边界放进同一条可审计评测链路：
+
+- **Evidence before claims**：每个 Finding 都必须引用已持久化的 Evidence Event；
+- **Policy before execution**：Planner 的建议不是授权，任何 Target 副作用都要经过 Policy Gate；
+- **Deterministic by default**：固定数据集、策略和 Evaluator，可复现地执行回归评测；
+- **Bounded autonomy**：自适应 Planner 只能在批准的 Case、Tool、Target 和预算内行动；
+- **Replay for regression**：对修复前后的运行做 `fixed`、`new`、`persistent`、`regressed` 差异分析；
+- **Secrets stay ephemeral**：Target 凭据不会写入事件、报告或 checkpoint，恢复时必须重新提供。
+
+## 功能概览
+
+| 能力 | 说明 |
+|---|---|
+| 黑盒评测 | 通过标准 Request/Response 检测 Prompt Injection、系统提示泄露、敏感信息暴露、上下文污染与资源预算风险 |
+| 灰盒评测 | 使用脱敏 Tool/Policy/Approval Trace 验证工具越权、危险参数、审批绕过与 Planner 循环 |
+| 带状态评测 | 验证 Memory/RAG 污染、身份与命名空间隔离、checkpoint 恢复及测试数据清理 |
+| 确定性运行 | 固定 Dataset、Policy 和 Evaluator，不依赖 LLM 决策，适合作为安全回归基线 |
+| 自适应运行 | 由 LangGraph 编排下一步，所有候选仍受 allowlist、审批与硬预算约束 |
+| 人工审批 | 高风险步骤可暂停，审批后恢复同一工作流，并在执行前重新校验 Policy |
+| 证据与报告 | 从 SQLite 事实源生成 JSON / Markdown 报告，Finding 可追溯到最短 Evidence 路径 |
+| Replay | 使用持久化快照重新评测，分类展示风险修复、新增、持续与回归 |
+| 装备目录 | 从本地目录加载经过 Manifest、JSON Schema、兼容性与 checksum 校验的 Provider、Skill 和 Case Pack |
+
+### 当前状态
+
+Attacker V1 已交付三个评测阶段，共包含 **30 条攻击与安全对照用例**：
+
+| 阶段 | 用例数 | 主要观测边界 |
 |---|---:|---|
-| 纯黑盒 | 12 | Prompt Injection、系统提示泄露、敏感数据、上下文污染、资源预算 |
-| 灰盒 Agent | 10 | Tool/Policy Trace、越权工具、危险参数、审批绕过、Planner 循环 |
-| 带状态 Agent | 8 | Memory/RAG 污染、身份隔离、Checkpoint 恢复、Replay |
-| **合计** | **30** | 每个阶段均包含攻击和正常/安全对照 |
+| 纯黑盒 | 12 | Prompt、Response、Session、资源预算 |
+| 灰盒 Agent | 10 | Tool、Policy、Approval、Planner |
+| 带状态 Agent | 8 | Memory、RAG、身份隔离、Checkpoint |
+| **合计** | **30** | 覆盖无状态到持久状态的 Agent 风险链路 |
 
-V1 已包含：
+内置装备目录同时提供 **2 个 Provider、3 个 Evaluator Skill 和 2 个 Case Pack**。当前版本定位为单实例、授权环境中的安全评测服务；生产边界见[安全模型](#安全模型)。
 
-- FastAPI 运行、审批、报告和 Replay API；
-- SQLite + SQLAlchemy 唯一在线事实源；
-- Alembic `0003` 数据库结构；
-- JSON 和 Markdown 报告；
-- Finding 到 Evidence Event 的引用；
-- LangGraph 自适应工作流、checkpoint、interrupt 和恢复后 Policy 重校验；
-- tenant/user/session/namespace 状态隔离与测试数据清理证据；
-- black-box、gray-box 和 stateful Run 的 Replay；
-- fixed、new、persistent、regressed 差异分类；
-- 可选的服务端 API Key；
-- pytest、Ruff、Pyright 和 GitHub Actions CI。
+## 评测模型
 
-详细边界和验收标准见 [target/summary.md](target/summary.md)，架构见 [docs/architecture.md](docs/architecture.md)。
-
-## 运行模型
-
-```text
-Target + Dataset + Policy
-  -> Evaluation Run
-  -> Event-backed Finding
-  -> SQLite
-  -> JSON / Markdown Report
-  -> Replay Diff
+```mermaid
+flowchart LR
+    A["Target + Dataset + Policy"] --> B{"运行模式"}
+    B -->|Deterministic| C["固定顺序执行"]
+    B -->|Adaptive| D["LangGraph Planner"]
+    C --> E["Policy Gate"]
+    D --> E
+    E -->|允许| F["Target / Tool 调用"]
+    E -->|需审批| G["Human Review"]
+    G --> E
+    F --> H["Deterministic Evaluator"]
+    H --> I["Evidence + Finding"]
+    I --> J[("SQLite 事实源")]
+    J --> K["JSON / Markdown Report"]
+    J --> L["Replay Diff"]
 ```
 
-- **Deterministic Mode**：固定 Dataset、Policy 和 Evaluator，不依赖 LLM 决策。
-- **Adaptive Mode**：LangGraph 只负责编排下一步；Target、Case、Tool、审批和预算仍由 Policy Gate 决定。
-- **Replay**：数据集和策略来自持久化快照；HTTP Target 地址和凭据必须由调用者重新提供。Replay 不读取历史 checkpoint，也不从数据库恢复秘密。
+### 两个运行模式
 
-对 adaptive gray-box 源 Run 执行 Replay 时，会使用持久化的 Case/Policy 和确定性灰盒执行器；这样比较的是相同安全事实在新 Target 上的变化，而不是 Planner 随机性。
+- **Deterministic Mode**：按照固定顺序执行已批准 Case，不调用 Planner 模型。适合回归评测、Evaluator 校准和自适应运行基线。
+- **Adaptive Mode**：Planner 只决定“下一条已批准 Case 是什么”。Core 负责 Prompt 约束、结构化响应验证、预算、Policy、审批、状态迁移和停止条件。
 
-## Agent 模型 Provider 边界
+### 三个观测阶段
 
-Planner 和可选 Model Judge 通过窄 `model.inference.v1` 契约调用模型。Attacker Core
-负责构造受控 Prompt、执行预算与 Policy 校验、验证结构化响应并决定状态迁移；Provider
-只负责鉴权、协议适配、受限重试、健康检查以及 token、延迟和用量归一化。
+- **Black-box** 只依赖目标的输入与输出，不推断不可见的内部工具行为；
+- **Gray-box** 要求目标提供脱敏 Tool/Policy/Approval Trace，内部风险结论必须由 Trace 支撑；
+- **Stateful** 增加隔离测试专用的 Memory/RAG/Checkpoint 证据，验证跨会话与持久状态风险。
 
-- Provider 不能创建 Candidate、授权、Finding、停止条件或 Graph 路由；
-- 每次物理请求（包括 Provider 内部重试）都计入独立 Provider 调用预算；
-- Provider 返回的估算成本计入 Run 的 `max_cost` 硬预算；
-- 每次尝试只记录状态、错误类别和延迟，不把凭据或原始错误响应写入事件；
-- Planner 与 Model Judge 使用独立 Prompt Profile、模型身份和用量统计；
-- 确定性 Planner 不调用模型，物理 Provider 调用数为零。
-- checkpoint 恢复会先读取稳定 operation 对应的 Planner Event，不重复模型请求。
+### 事实与恢复分离
 
-## 环境要求
+SQLite 保存“实际发生了什么”，LangGraph checkpoint 保存“工作流从哪里继续”。报告与 Replay 只读取业务事实；checkpoint 丢失不会改变已经落库的 Finding 与 Evidence。
+
+## 快速开始
+
+### 环境要求
 
 - Python `>=3.12,<3.13`
 - [uv](https://docs.astral.sh/uv/)
 
-安装锁定依赖：
+### 1. 获取项目并安装依赖
 
-```powershell
+```bash
+git clone https://github.com/juemimgcd/Attacker.git
+cd Attacker
 uv sync --locked --python 3.12
 ```
 
-创建数据库：
+### 2. 初始化数据库
 
-```powershell
+```bash
 uv run alembic upgrade head
 ```
 
-启动服务：
+### 3. 启动服务
 
-```powershell
+```bash
 uv run uvicorn main:app --reload
 ```
 
-默认地址：
+服务启动后可访问：
 
-- OpenAPI：`http://127.0.0.1:8000/docs`
-- 健康检查：`GET http://127.0.0.1:8000/health`
+- OpenAPI：<http://127.0.0.1:8000/docs>
+- 健康检查：<http://127.0.0.1:8000/health>
+
+### 4. 运行内置状态评测
+
+下面的请求使用内置隔离 profile，不需要连接外部 Target：
+
+```bash
+curl -X POST http://127.0.0.1:8000/runs/stateful \
+  -H "Content-Type: application/json" \
+  -d '{"profile":"hardened","dataset_path":"samples/stateful/phase3.yaml"}'
+```
+
+可用 profile：
+
+- `vulnerable`：预置易受攻击行为；
+- `hardened`：预置加固行为；
+- `regressed`：预置安全回归行为。
 
 ## 配置
 
-复制 `.env.example` 为 `.env` 后按需修改：
+复制示例配置后按需修改：
 
-```dotenv
-APP__APP_NAME=attacker
-APP__APP_ENV=local
-APP__DEBUG=true
-APP__API_PREFIX=
-
-DATABASE__URL=sqlite+aiosqlite:///data/attacker.sqlite3
-CHECKPOINT__DATABASE_PATH=data/langgraph_checkpoints.sqlite3
-
-# 留空时适合本机开发；设置后业务接口必须携带 X-API-Key。
-SECURITY__API_KEY=replace-with-a-random-secret
+```bash
+# Linux / macOS
+cp .env.example .env
 ```
 
-启用 API Key 后，以下接口需要请求头：
+```powershell
+# Windows PowerShell
+Copy-Item .env.example .env
+```
+
+常用配置：
+
+| 配置项 | 默认值 | 用途 |
+|---|---|---|
+| `DATABASE__URL` | `sqlite+aiosqlite:///data/attacker.sqlite3` | 业务与审计事实存储 |
+| `CHECKPOINT__DATABASE_PATH` | `data/langgraph_checkpoints.sqlite3` | LangGraph 控制流 checkpoint |
+| `SECURITY__API_KEY` | 空 | 设置后使用 `X-API-Key` 保护业务接口 |
+| `EQUIPMENT__ROOT` | `equipment` | 本地装备目录 |
+| `EQUIPMENT__ALLOW_UNTRUSTED` | `false` | 是否允许不受信任装备；默认关闭 |
+| `EQUIPMENT__REQUIRE_CHECKSUM` | `true` | 是否强制验证装备内容 checksum |
+
+启用 API Key 后，运行、审批、Replay、装备管理和测试接口需要携带：
 
 ```http
 X-API-Key: replace-with-a-random-secret
 ```
 
-`/health`、`/docs` 和 `/openapi.json` 保持公开。运行、审批、Replay 和测试接口受保护。
+`/health`、`/docs` 和 `/openapi.json` 保持公开。
 
 ## API 示例
 
-### 纯黑盒运行
+### 启动黑盒评测
 
 ```http
 POST /runs/deterministic
@@ -139,22 +196,7 @@ X-API-Key: replace-with-a-random-secret
 }
 ```
 
-### 确定性灰盒运行
-
-```http
-POST /runs/graybox/deterministic
-Content-Type: application/json
-
-{
-  "target": {
-    "name": "local-agent",
-    "endpoint": "http://localhost:9000/agent"
-  },
-  "dataset_path": "samples/graybox/phase2.yaml"
-}
-```
-
-### 自适应灰盒运行
+### 启动自适应灰盒评测
 
 ```http
 POST /runs/adaptive
@@ -178,161 +220,96 @@ Content-Type: application/json
 }
 ```
 
-若运行进入人工审批：
+将 Planner backend 设为 `deterministic` 时不会产生物理模型请求，适合先验证完整自适应工作流。
+
+### 审批与恢复
 
 ```http
 GET /runs/{run_id}/approvals
-```
-
-```http
 POST /runs/{run_id}/approvals/{approval_id}
-Content-Type: application/json
-
-{
-  "approved": true,
-  "resolved_by": "security-reviewer",
-  "reason": "authorized isolated evaluation",
-  "target": {
-    "name": "local-agent",
-    "endpoint": "http://localhost:9000/agent"
-  }
-}
-```
-
-进程重启后恢复审批时需要重新提供 Target；原始凭据不会写入 checkpoint 或业务数据库。
-
-等待审批时 Run 状态为 `waiting_approval`，且没有终止 `stop_reason`。Planner 按策略进入
-`pause` 时，Run 状态为 `paused`，可恢复同一个 LangGraph thread：
-
-```http
 POST /runs/{run_id}/resume
-Content-Type: application/json
-
-{
-  "target": {
-    "name": "local-agent",
-    "endpoint": "http://localhost:9000/agent"
-  },
-  "planner": {
-    "backend": "deterministic"
-  }
-}
-```
-
-仅当进程重启后需要重新注入运行时 Target/Planner 配置时才需要提供这些字段。恢复配置
-必须与 Run 快照中的 Target 名称、地址以及 Planner backend/provider/model 匹配。
-
-授权方可以请求三种有界硬停止，调用方不能直接指定 Graph 路由或任意停止原因：
-
-```http
 POST /runs/{run_id}/control
-Content-Type: application/json
-
-{
-  "action": "cancel",
-  "reason": "authorized evaluation window ended"
-}
 ```
 
-`action` 可取：
+进程重启后恢复审批或暂停运行时，需要重新提供 Target 与必要的 Planner 运行时配置。恢复配置必须与 Run 快照匹配，原始凭据不会从数据库或 checkpoint 中恢复。
 
-- `cancel`；
-- `revoke_target_authorization`；
-- `terminate_policy`。
-
-控制请求持久化为幂等 Event，并在下一次 Planner、Approval 或 Target 副作用边界前由 Core
-执行。已经在 `waiting_approval` 或 `paused` 的 Run 会直接安全结束。
-
-### 带状态运行
+### 报告与 Replay
 
 ```http
-POST /runs/stateful
-Content-Type: application/json
-
-{
-  "profile": "hardened",
-  "dataset_path": "samples/stateful/phase3.yaml"
-}
-```
-
-可用 profile：
-
-- `vulnerable`
-- `hardened`
-- `regressed`
-
-### Replay
-
-Stateful Run：
-
-```http
+GET  /runs/{run_id}/report.json
+GET  /runs/{run_id}/report.md
 POST /runs/{source_run_id}/replay
-Content-Type: application/json
-
-{
-  "profile": "hardened"
-}
+GET  /runs/{run_id}/replay
 ```
 
-Black-box 或 gray-box Run：
+Replay 差异语义：
 
-```http
-POST /runs/{source_run_id}/replay
-Content-Type: application/json
+| 分类 | 含义 |
+|---|---|
+| `fixed` | 源 Run 存在、Replay 中不再出现的 Finding |
+| `new` | Replay 中新出现的攻击 Finding |
+| `persistent` | 源 Run 与 Replay 中都存在的 Finding |
+| `regressed` | Replay 中新出现的安全对照 Finding |
 
-{
-  "target": {
-    "name": "patched-local-agent",
-    "endpoint": "http://localhost:9000/agent",
-    "auth": {
-      "type": "bearer",
-      "token": "resupplied-at-runtime"
-    }
-  }
-}
+## 装备扩展
+
+Attacker Core 拥有 Capability Contract、Policy Gate、预算、审批、Evidence、Finding、快照、Replay 与清理边界。Provider、Evaluator Skill 和 Case Pack 只能通过受控装备契约扩展这些能力，不能创建授权、绕过 Policy 或决定工作流路由。
+
+服务启动时会发现 `contracts/` 与 `equipment/` 下的本地装备，并验证：
+
+- Manifest 与 JSON Schema；
+- Attacker 版本兼容性；
+- Capability Contract 引用；
+- 入口文件与内容 checksum；
+- Provider Instance 的配置 revision 与 Secret 引用边界。
+
+常用命令：
+
+```bash
+uv run attacker equipment reload
+uv run attacker equipment list --type provider
+uv run attacker provider-instance healthcheck isolated-state-default
+uv run attacker skill dry-run state-poisoning-evaluator --payload '{"documents":[]}'
 ```
 
-Replay 结果：
+完整契约、开发流程和安全边界见 [Equipment Development](docs/equipment-development.md)。
 
-```http
-GET /runs/{run_id}/replay
+## 安全模型
+
+- Target 必须显式配置；系统不会扫描未知资产，也不会从目标响应中发现新 endpoint；
+- 公网 Target 默认拒绝，必须显式设置 `allow_public_target=true`；
+- 高风险步骤未获批准时无法执行，批准后仍会再次经过 Policy Gate；
+- Planner 不能越过 Target、Case、Tool、预算与风险等级 allowlist；
+- Target 与 Planner 凭据在快照、事件、报告和 checkpoint 中均会脱敏；
+- 状态测试数据按 run、tenant、user、session 与 namespace 隔离并留下清理证据；
+- 服务级 API Key 只是单密钥部署基础，不等同于完整用户身份体系或 RBAC；
+- 不受信任装备默认禁用；只有经过评审的 Linux 容器后端才可承载强隔离执行。
+
+当前 V1 **不包含** PostgreSQL 多实例协调、分布式 worker、OIDC/JWT/RBAC、外部 Secrets Manager、完整可观测性、自动备份恢复和高可用编排。在公网、多租户或关键生产环境部署前，应先补齐这些能力并完成独立安全评审。
+
+## 项目结构
+
+```text
+.
+├── app/
+│   ├── api/                 # Run、Approval、Replay、Equipment API
+│   ├── core/                # 应用生命周期
+│   ├── equipment/           # 装备发现、校验、执行与 Catalog
+│   ├── infrastructure/      # 数据库与模型 Provider 适配
+│   ├── repositories/        # SQLite 事实存储
+│   ├── services/            # Policy、Evaluator、Report、Replay
+│   └── workflows/           # LangGraph 自适应工作流
+├── contracts/               # 版本化 Capability Contract
+├── equipment/               # 内置 Provider、Skill 与 Case Pack
+├── samples/                 # 三阶段评测数据集
+├── alembic/                 # 数据库迁移
+├── docs/                    # 架构与扩展文档
+└── tests/                   # API、Repository 与 Service 验证
 ```
 
-差异含义：
+## 开发与验证
 
-- `fixed`：源 Run 存在、Replay 不再存在；
-- `new`：Replay 新出现的攻击 Finding；
-- `persistent`：源 Run 和 Replay 都存在；
-- `regressed`：Replay 新出现的安全对照 Finding。
-
-### 报告
-
-```http
-GET /runs/{run_id}/report.json
-GET /runs/{run_id}/report.md
-```
-
-报告只读取 SQLite 中的 Run、Step、Event、Finding、状态证据与 Replay 关联，不依赖 LangGraph checkpoint。
-
-Adaptive 报告额外包含由持久化事件计算的指标：
-
-- Planner decision/rejection/fallback/error 与模型物理尝试、token、成本和延迟；
-- Candidate 数量、过滤原因、Snapshot 生成/过期/拒绝；
-- Coverage、实际信息增益、预测偏差、循环和无增益计数；
-- Evaluator conflict/inconclusive、停止原因、恢复次数；
-- DerivedCase 冻结、确定性复验和有效发现数；
-- 每个 Finding 的最短 Evidence 路径长度。
-
-指标不使用 Prompt、Target 原始响应或 Secret 作为标签。设置 `baseline_run_id` 后，只有
-Dataset、Target、Test Principal、Policy、Evaluator、Candidate 宇宙和装备快照一致的
-Adaptive/Deterministic Run 才会计算效率收益。发现收益只统计带持久化 Evidence 的
-`derived_case_verified`；不可比或没有可测收益时，报告不会推荐 Adaptive 作为默认模式。
-
-## 开发验证
-
-完整本地检查：
-
-```powershell
+```bash
 uv sync --locked --python 3.12
 uv run ruff check .
 uv run ruff format --check .
@@ -341,46 +318,20 @@ uv run pytest -q
 uv run python -m compileall -q app conf alembic
 ```
 
-GitHub Actions 对 push 和 pull request 执行同一组检查。测试使用临时 SQLite 数据库，不调用外部 Target。
+GitHub Actions 会在 push 和 pull request 上执行同一组检查。现有测试使用临时 SQLite 数据库，不调用外部 Target。
 
-## Harness 与企业装备
+## 文档
 
-服务启动时从 `contracts/` 和 `equipment/` 发现本地离线装备，验证 Manifest、JSON
-Schema、Attacker 兼容性、入口文件、Capability 引用与内容 checksum，并把结果写入
-SQLite Catalog。内置目录包含 2 个 Provider、3 个 evaluator Skill 和 2 个数据型 Case
-Pack。
+- [架构设计](docs/architecture.md)：运行模式、状态图、Policy、Evidence 与恢复边界；
+- [装备开发指南](docs/equipment-development.md)：Provider、Skill、Case Pack 与 Capability Contract；
+- [V1 验收范围](target/summary.md)：三阶段交付边界与验收标准；
+- [技术栈](TECH_STACK.md)：主要组件与技术选择；
+- [项目提案](PROJECT_PROPOSAL.md)：项目背景与目标。
 
-```powershell
-uv run attacker equipment reload
-uv run attacker equipment list --type provider
-uv run attacker provider-instance healthcheck isolated-state-default
-uv run attacker skill dry-run state-poisoning-evaluator --payload '{\"documents\":[]}'
-```
+## 参与贡献
 
-查询与管理 API 位于 `/equipment/*`，沿用服务的 `X-API-Key` 保护。管理接口只操作本地
-已存在目录，不接受远程包 URL。Provider Instance 的非敏感配置和 Secret 引用分别生成
-不可变 revision；Run 使用 package/instance/contract 快照。完整开发和安全边界见
-[`docs/equipment-development.md`](docs/equipment-development.md)。
+欢迎通过 [Issues](https://github.com/juemimgcd/Attacker/issues) 提交缺陷、能力建议或新的安全评测场景。提交 Pull Request 前，请先运行[开发与验证](#开发与验证)中的完整检查，并确保新增能力不扩大 Target 授权范围或绕过 Core 的 Policy 与 Evidence 边界。
 
-## V1 安全边界
+## License
 
-- Target 默认为本机、回环或私网；公网 Target 需要显式设置 `allow_public_target=true`。
-- Target 和 Planner 凭据在快照、事件、报告和 checkpoint 中被脱敏。
-- 高风险步骤在未审批时不能执行。
-- Planner 不能越过 Target、Case、Tool 和预算 allowlist。
-- 状态测试数据按 run、tenant、user、session 和 namespace 隔离并清理。
-- 服务 API Key 是单密钥部署基础，不等同于完整用户身份系统或 RBAC。
-
-## 生产化路线图
-
-当前 V1 定位为单实例、授权环境中的评测服务。以下内容不属于 V1 已交付能力：
-
-- PostgreSQL 和多实例事务/锁；
-- 分布式任务队列和 worker 调度；
-- OIDC/JWT、用户体系、RBAC 和审批人组织权限；
-- 外部 secrets manager 与自动密钥轮换；
-- 指标、链路追踪、告警和集中日志；
-- 数据备份、恢复、归档和保留策略；
-- 容器编排、水平扩缩容和高可用部署。
-
-在公网、多租户或关键生产环境部署前，应先完成上述能力和独立安全评审。
+本项目基于 [MIT License](LICENSE) 开源。
