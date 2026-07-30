@@ -1,0 +1,1 @@
+{"type":"object","required":["response"],"properties":{"response":{"type":"string"},"trace_id":{"type":"string"},"metadata":{"type":"object"}},"additionalProperties":false}

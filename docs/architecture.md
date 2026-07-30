@@ -480,12 +480,18 @@ Connector 不负责 Case 选择、Policy 决策、Finding 判定和报告。
 
 ### 不复制
 
-- Providers 市场；
-- Skills、Hooks、Channels；
+- 公共 Providers/Skills 市场或从未知 URL 自助安装代码；
+- 通用 Agent Skills、Hooks、Channels；
 - 通用 Memory；
 - 多租户与 Token Pool；
 - 任意工具发现；
 - 与 v1 无关的基础设施。
+
+Attacker vNext 仅增加面向安全评测的受控装备契约：Core 拥有 Capability Contract、
+Policy Gate、预算、审批、Evidence/Finding、持久化快照、Replay 和清理边界；部署方可从
+本地目录或离线包提供 Provider/Skill/Case Pack。企业代码不能通过装备扩展绕过 Core，
+`trusted_enterprise` 子进程只提供故障隔离，`untrusted` 代码必须在平台支持的强沙箱中
+运行。详细边界见 [Equipment Development](equipment-development.md)。
 
 ## 15. 架构验收
 

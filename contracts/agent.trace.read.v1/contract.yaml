@@ -1,0 +1,12 @@
+schema_version: capability-contract.v1
+id: agent.trace.read.v1
+version: 1.0.0
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+request_schema: request.schema.json
+response_schema: response.schema.json
+side_effect: read
+risk_level: low
+idempotency: {operation_id_required: true, provider_retry: allowed}
+evidence: {required: [tool_trace]}
+limits: {timeout_seconds_max: 30, response_bytes_max: 1048576}
+error_codes: [trace_not_found, trace_protocol_error]

@@ -1,0 +1,4 @@
+datasets:
+  - {stage: blackbox, source: samples/blackbox/phase1.yaml}
+  - {stage: graybox, source: samples/graybox/phase2.yaml}
+  - {stage: stateful, source: samples/stateful/phase3.yaml}

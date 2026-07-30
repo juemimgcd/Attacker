@@ -1,0 +1,7 @@
+- instance_id: isolated-state-default
+  display_name: Isolated State Default
+  environment: test
+  config: {scope_prefix: "attacker"}
+  secret_refs: {}
+  allowed_hosts: []
+  enabled: true

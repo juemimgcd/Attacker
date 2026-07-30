@@ -1,0 +1,9 @@
+schema_version: casepack.v1
+id: attacker-controls-v1
+name: Attacker Control Cases
+version: 1.0.0
+description: Control-case selection for overblocking and false-positive calibration.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+cases_file: cases.yaml
+required_capabilities: [agent.invoke.v1]
+tags: [builtin, controls, calibration]

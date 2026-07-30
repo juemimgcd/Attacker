@@ -36,6 +36,25 @@ class SecuritySettings(BaseSettings):
     api_key: SecretStr | None = None
 
 
+class EquipmentSettings(BaseSettings):
+    root: str = "equipment"
+    contracts_root: str = "contracts"
+    workspace_root: str = "data/equipment-workspaces"
+    archive_root: str = "data/equipment-archive"
+    allow_executable_packages: bool = True
+    require_checksum: bool = True
+    allow_untrusted: bool = False
+    require_signature: bool = False
+    trust_roots_file: str = "conf/equipment_trust_roots.json"
+    revocations_file: str = "conf/equipment_revocations.json"
+    max_package_files: int = Field(default=500, gt=0)
+    max_package_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    max_archive_depth: int = Field(default=8, gt=0)
+    max_stdout_bytes: int = Field(default=1_048_576, gt=0)
+    max_stderr_bytes: int = Field(default=262_144, gt=0)
+    sandbox_image: str | None = None
+
+
 # 定义单个模型职责的独立配置、预算和输入限制。
 class ModelRoleSettings(BaseSettings):
     model_id: str = "unconfigured"
@@ -68,6 +87,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    equipment: EquipmentSettings = Field(default_factory=EquipmentSettings)
     agent_models: AgentModelSettings = Field(default_factory=AgentModelSettings)
 
 

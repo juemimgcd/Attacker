@@ -1,0 +1,33 @@
+name: equipment-contract
+
+on:
+  push:
+    paths:
+      - "app/equipment/**"
+      - "contracts/**"
+      - "equipment/**"
+  pull_request:
+    paths:
+      - "app/equipment/**"
+      - "contracts/**"
+      - "equipment/**"
+
+jobs:
+  builtin-contracts:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run attacker equipment validate equipment/providers/http-agent-provider --type provider
+      - run: uv run attacker equipment validate equipment/providers/isolated-state-provider --type provider
+      - run: uv run attacker equipment contract-test equipment/providers/http-agent-provider --type provider
+      - run: uv run attacker equipment contract-test equipment/providers/isolated-state-provider --type provider
+      - run: uv run attacker equipment contract-test equipment/skills/prompt-injection-evaluator --type skill
+      - run: uv run attacker equipment contract-test equipment/skills/tool-policy-trace-evaluator --type skill
+      - run: uv run attacker equipment contract-test equipment/skills/state-poisoning-evaluator --type skill

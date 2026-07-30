@@ -1,0 +1,12 @@
+schema_version: capability-contract.v1
+id: memory.fixture.cleanup.v1
+version: 1.0.0
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+request_schema: request.schema.json
+response_schema: response.schema.json
+side_effect: resource_cleanup
+risk_level: high
+idempotency: {operation_id_required: true, provider_retry: allowed}
+evidence: {required: [cleanup_result]}
+limits: {timeout_seconds_max: 30, response_bytes_max: 262144}
+error_codes: [lease_not_found, cleanup_scope_denied, cleanup_failed]

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import hashlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.repositories.stateful_repository import StatefulRepository
 from app.schemas.stateful_schema import (
@@ -16,10 +18,19 @@ from app.services.sample_loader import StatefulDatasetLoader
 from app.services.stateful_adapters import MemoryAdapter, RAGAdapter
 from app.services.stateful_evaluator_service import StatefulEvaluatorService
 
+if TYPE_CHECKING:
+    from app.services.equipment_service import EquipmentService
+
 
 class StatefulRunService:
-    def __init__(self, repository: StatefulRepository) -> None:
+    def __init__(
+        self,
+        repository: StatefulRepository,
+        *,
+        equipment_service: EquipmentService | None = None,
+    ) -> None:
         self.repository = repository
+        self.equipment_service = equipment_service
         self.loader = StatefulDatasetLoader()
         self.memory = MemoryAdapter(repository)
         self.rag = RAGAdapter(repository)
@@ -46,6 +57,8 @@ class StatefulRunService:
         profile: StatefulProfile,
         target_name: str,
         mode: str,
+        equipment_source_run_id: str | None = None,
+        equipment_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         run_id = await self.repository.create_run(
             dataset=dataset,
@@ -53,6 +66,21 @@ class StatefulRunService:
             target_name=target_name,
             mode=mode,
         )
+        if self.equipment_service is not None:
+            if equipment_source_run_id is not None:
+                await self.equipment_service.clone_run_bindings(
+                    source_run_id=equipment_source_run_id,
+                    target_run_id=run_id,
+                    target_binding_ref=target_name,
+                )
+            else:
+                await self.equipment_service.freeze_run_bindings(
+                    run_id=run_id,
+                    stage="stateful",
+                    target_binding_ref=target_name,
+                    test_principal_ref=f"stateful:{profile.value}",
+                    overrides=equipment_overrides,
+                )
         protected_scope = f"{run_id}:protected-control"
         await self.repository.write_fixture(
             run_id=run_id,

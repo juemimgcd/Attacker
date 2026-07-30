@@ -1,0 +1,12 @@
+schema_version: capability-contract.v1
+id: rag.retrieval.query.v1
+version: 1.0.0
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+request_schema: request.schema.json
+response_schema: response.schema.json
+side_effect: read
+risk_level: low
+idempotency: {operation_id_required: true, provider_retry: allowed}
+evidence: {required: [retrieval_trace]}
+limits: {timeout_seconds_max: 30, response_bytes_max: 1048576}
+error_codes: [retrieval_scope_denied, retrieval_failed]

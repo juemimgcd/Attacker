@@ -227,3 +227,157 @@ class ReplayRecord(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     diff_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EquipmentPackageRecord(Base):
+    __tablename__ = "equipment_packages"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_type",
+            "package_id",
+            "version",
+            name="uq_equipment_packages_identity",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    package_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    package_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="local_directory")
+    source_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    trust_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    signature_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_present")
+    publisher_id: Mapped[str | None] = mapped_column(String(200))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    validation_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    validation_errors_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    loaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderInstanceRecord(Base):
+    __tablename__ = "provider_instances"
+    __table_args__ = (
+        UniqueConstraint(
+            "instance_id",
+            "provider_package_id",
+            "provider_version",
+            "package_checksum",
+            "config_revision",
+            "secret_binding_revision",
+            name="uq_provider_instance_revision",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    provider_package_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    provider_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    package_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    environment: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    config_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    secret_binding_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    secret_refs_json: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    allowed_hosts_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    health_status: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class RunEquipmentSnapshotRecord(Base):
+    __tablename__ = "run_equipment_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "package_type",
+            "package_id",
+            "provider_instance_id",
+            name="uq_run_equipment_binding",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False, index=True)
+    package_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    package_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    provider_instance_id: Mapped[str | None] = mapped_column(String(200))
+    config_revision: Mapped[str | None] = mapped_column(String(64))
+    config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    secret_binding_revision: Mapped[str | None] = mapped_column(String(64))
+    capability_contract_id: Mapped[str | None] = mapped_column(String(200))
+    capability_contract_checksum: Mapped[str | None] = mapped_column(String(64))
+    test_principal_ref: Mapped[str | None] = mapped_column(String(500))
+    target_binding_ref: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class EquipmentExecutionRecord(Base):
+    __tablename__ = "equipment_executions"
+    __table_args__ = (
+        UniqueConstraint("operation_id", name="uq_equipment_executions_operation_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), index=True)
+    step_id: Mapped[str | None] = mapped_column(ForeignKey("steps.id"))
+    operation_id: Mapped[str] = mapped_column(String(340), nullable=False)
+    package_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    package_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    package_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_instance_id: Mapped[str | None] = mapped_column(String(200))
+    config_revision: Mapped[str | None] = mapped_column(String(64))
+    capability: Mapped[str | None] = mapped_column(String(200))
+    capability_contract_checksum: Mapped[str | None] = mapped_column(String(64))
+    test_principal_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    physical_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    input_summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    output_summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ResourceLeaseRecord(Base):
+    __tablename__ = "resource_leases"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), index=True)
+    created_by_operation_id: Mapped[str] = mapped_column(String(340), nullable=False)
+    provider_instance_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    external_resource_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    cleanup_contract: Mapped[str] = mapped_column(String(200), nullable=False)
+    cleanup_payload_ref: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    last_cleanup_operation_id: Mapped[str | None] = mapped_column(String(340))
+    cleanup_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cleanup_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EquipmentAuditEventRecord(Base):
+    __tablename__ = "equipment_audit_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String(340), unique=True, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    package_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

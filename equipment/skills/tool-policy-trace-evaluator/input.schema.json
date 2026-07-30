@@ -1,0 +1,1 @@
+{"type":"object","required":["case","response","trace_result"],"properties":{"case":{"type":"object"},"response":{"type":"object"},"trace_result":{"type":"object"}},"additionalProperties":false}

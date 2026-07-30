@@ -1,6 +1,7 @@
 from fastapi import Depends, FastAPI
 
 from app.api.approvals import router as approvals_router
+from app.api.equipment import router as equipment_router
 from app.api.health import router as health_router
 from app.api.replays import router as replays_router
 from app.api.runs import router as runs_router
@@ -37,6 +38,11 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         replays_router,
+        prefix=settings.app.api_prefix,
+        dependencies=protected,
+    )
+    app.include_router(
+        equipment_router,
         prefix=settings.app.api_prefix,
         dependencies=protected,
     )

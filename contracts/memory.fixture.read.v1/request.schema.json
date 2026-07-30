@@ -1,0 +1,1 @@
+{"type":"object","required":["namespace"],"properties":{"namespace":{"type":"string"}},"additionalProperties":false}

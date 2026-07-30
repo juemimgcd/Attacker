@@ -1,0 +1,13 @@
+schema_version: capability-contract.v1
+id: memory.fixture.write.v1
+version: 1.0.0
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+request_schema: request.schema.json
+response_schema: response.schema.json
+side_effect: resource_create
+risk_level: high
+idempotency: {operation_id_required: true, provider_retry: forbidden}
+evidence: {required: [state_fixture]}
+cleanup_contract: memory.fixture.cleanup.v1
+limits: {timeout_seconds_max: 30, response_bytes_max: 262144}
+error_codes: [fixture_scope_denied, fixture_write_failed]

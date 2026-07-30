@@ -343,6 +343,25 @@ uv run python -m compileall -q app conf alembic
 
 GitHub Actions 对 push 和 pull request 执行同一组检查。测试使用临时 SQLite 数据库，不调用外部 Target。
 
+## Harness 与企业装备
+
+服务启动时从 `contracts/` 和 `equipment/` 发现本地离线装备，验证 Manifest、JSON
+Schema、Attacker 兼容性、入口文件、Capability 引用与内容 checksum，并把结果写入
+SQLite Catalog。内置目录包含 2 个 Provider、3 个 evaluator Skill 和 2 个数据型 Case
+Pack。
+
+```powershell
+uv run attacker equipment reload
+uv run attacker equipment list --type provider
+uv run attacker provider-instance healthcheck isolated-state-default
+uv run attacker skill dry-run state-poisoning-evaluator --payload '{\"documents\":[]}'
+```
+
+查询与管理 API 位于 `/equipment/*`，沿用服务的 `X-API-Key` 保护。管理接口只操作本地
+已存在目录，不接受远程包 URL。Provider Instance 的非敏感配置和 Secret 引用分别生成
+不可变 revision；Run 使用 package/instance/contract 快照。完整开发和安全边界见
+[`docs/equipment-development.md`](docs/equipment-development.md)。
+
 ## V1 安全边界
 
 - Target 默认为本机、回环或私网；公网 Target 需要显式设置 `allow_public_target=true`。

@@ -1,0 +1,4 @@
+selectors:
+  - {dataset: samples/blackbox/phase1.yaml, kind: control}
+  - {dataset: samples/graybox/phase2.yaml, kind: control}
+  - {dataset: samples/stateful/phase3.yaml, kind: control}

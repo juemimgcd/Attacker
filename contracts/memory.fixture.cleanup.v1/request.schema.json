@@ -1,0 +1,1 @@
+{"type":"object","required":["resource_id"],"properties":{"resource_id":{"type":"string"}},"additionalProperties":false}
