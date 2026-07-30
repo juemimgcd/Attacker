@@ -32,6 +32,24 @@ from app.services.prompt_governance import (
     prompt_governance_service,
 )
 
+MAX_PLANNER_CONTEXT_BYTES = 131_072
+
+
+def _input_fact_refs(context: PlannerContext) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            [
+                context.candidate_snapshot_id,
+                *context.evidence_refs,
+                *context.finding_refs,
+                *context.hypothesis_refs,
+                *context.coverage_refs,
+                *context.information_gain_refs,
+                *(item.observation_ref for item in context.observations),
+            ]
+        )
+    )
+
 
 class PlannerAdapterError(RuntimeError):
     def __init__(
@@ -130,7 +148,7 @@ class DeterministicPlannerAdapter:
             model_id="deterministic",
             model_parameters={},
             schema_version="planner-decision-v2",
-            input_fact_refs=input_refs,
+            input_fact_refs=_input_fact_refs(context),
         )
 
 
@@ -162,6 +180,8 @@ class OpenAICompatiblePlannerAdapter:
         operation_id: str = "planner",
         max_physical_attempts: int = 1,
     ) -> PlannerResult:
+        if len(context.model_dump_json().encode("utf-8")) > MAX_PLANNER_CONTEXT_BYTES:
+            raise ValueError("planner context exceeds the Core byte limit")
         prompt = self._build_prompt(context)
         call_snapshot = self._call_snapshot(prompt.snapshot)
         allowed_attempts = min(
@@ -237,6 +257,13 @@ class OpenAICompatiblePlannerAdapter:
                     "candidates": [
                         candidate.model_dump(mode="json") for candidate in context.candidates
                     ],
+                    "coverage": {tag: status.value for tag, status in context.coverage.items()},
+                    "hypotheses": [
+                        hypothesis.model_dump(mode="json") for hypothesis in context.hypotheses
+                    ],
+                    "information_gains": [
+                        gain.model_dump(mode="json") for gain in context.information_gains
+                    ],
                     "remaining_steps": context.remaining_steps,
                 },
                 observations=[
@@ -253,6 +280,8 @@ class OpenAICompatiblePlannerAdapter:
                             *context.evidence_refs,
                             *context.finding_refs,
                             *context.hypothesis_refs,
+                            *context.coverage_refs,
+                            *context.information_gain_refs,
                         ]
                     )
                 ),

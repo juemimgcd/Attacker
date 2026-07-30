@@ -337,7 +337,13 @@ class AdaptiveRunService:
                 )
             planner_config = PlannerConfig.model_validate(stored_planner)
         else:
-            for field in ("backend", "provider_id", "model", "endpoint"):
+            for field in (
+                "backend",
+                "provider_id",
+                "model",
+                "endpoint",
+                "prompt_template_version",
+            ):
                 stored_value = stored_planner.get(field)
                 override_value = planner_override.model_dump(mode="json").get(field)
                 if stored_value is not None and stored_value != override_value:

@@ -1,4 +1,5 @@
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 from app.repositories.run_repository import RunRepository
@@ -41,6 +42,7 @@ class ReportService:
             "approval_requests": len(rows["approvals"]),
             "finding_evidence_link_rate": (linked_findings / len(findings) if findings else 1.0),
         }
+        rows["react_summary"] = self._react_metrics(rows)
         step_outcomes = Counter(step["outcome"] for step in rows["steps"])
         rows["summary"]["step_outcomes"] = dict(step_outcomes)
         if "stateful" in run["mode"]:
@@ -85,6 +87,7 @@ class ReportService:
             rows["adaptive_observability"] = self.adaptive_observability.build(rows)
         if baseline_run_id:
             baseline_rows = await self.repository.get_report_rows(baseline_run_id)
+            baseline_metrics = self._react_metrics(baseline_rows)
             baseline_cases = {finding["case_id"] for finding in baseline_rows["findings"]}
             adaptive_cases = {finding["case_id"] for finding in findings}
             rows["comparison"] = {
@@ -92,6 +95,24 @@ class ReportService:
                 "adaptive_only_finding_case_ids": sorted(adaptive_cases - baseline_cases),
                 "baseline_only_finding_case_ids": sorted(baseline_cases - adaptive_cases),
                 "shared_finding_case_ids": sorted(adaptive_cases & baseline_cases),
+                "quality": {
+                    "adaptive": {
+                        "duration_seconds": rows["react_summary"]["duration_seconds"],
+                        "finding_count": len(findings),
+                        "finding_evidence_link_rate": rows["summary"]["finding_evidence_link_rate"],
+                        "covered_tags": rows["react_summary"]["covered_tags"],
+                        "actual_information_gain": rows["react_summary"]["actual_information_gain"],
+                    },
+                    "baseline": {
+                        "duration_seconds": baseline_metrics["duration_seconds"],
+                        "finding_count": len(baseline_rows["findings"]),
+                        "finding_evidence_link_rate": self._finding_evidence_link_rate(
+                            baseline_rows
+                        ),
+                        "covered_tags": baseline_metrics["covered_tags"],
+                        "actual_information_gain": baseline_metrics["actual_information_gain"],
+                    },
+                },
                 "usage": {
                     "adaptive": {
                         "planner_calls": run.get("planner_call_count", 0),
@@ -109,6 +130,132 @@ class ReportService:
                 **self.adaptive_observability.compare(rows, baseline_rows),
             }
         return rows
+
+    @staticmethod
+    def _finding_evidence_link_rate(rows: dict[str, Any]) -> float:
+        evidence_ids = {event["id"] for event in rows["events"]}
+        findings = rows["findings"]
+        linked = sum(
+            bool(finding["evidence_event_ids"])
+            and set(finding["evidence_event_ids"]).issubset(evidence_ids)
+            for finding in findings
+        )
+        return linked / len(findings) if findings else 1.0
+
+    @classmethod
+    def _react_metrics(cls, rows: dict[str, Any]) -> dict[str, Any]:
+        events = rows["events"]
+        planner_decisions = [
+            event
+            for event in events
+            if event["event_type"] in {"planner_decided", "planner_rejected"}
+        ]
+        traceable_decisions = sum(
+            bool(event["evidence"].get("call_snapshot", {}).get("input_fact_refs"))
+            and bool(event["evidence"].get("call_snapshot", {}).get("prompt_checksum"))
+            for event in planner_decisions
+        )
+        latest_coverage: dict[str, str] = {}
+        latest_evidence_complete: dict[str, bool] = {}
+        seen_covered_tags: set[str] = set()
+        seen_conclusive_cases: set[str] = set()
+        seen_finding_cases: set[str] = set()
+        no_gain_steps = 0
+        for step in rows["steps"]:
+            result = step.get("result") or {}
+            case = result.get("case") or {}
+            evaluation = result.get("evaluation") or {}
+            case_id = str(step["case_id"])
+            evidence_complete = bool(evaluation.get("evidence_complete", False))
+            latest_evidence_complete[case_id] = evidence_complete
+            coverage_tags = case.get("coverage_tags") or [case.get("category")]
+            new_coverage = False
+            for tag in coverage_tags:
+                if tag:
+                    normalized_tag = str(tag)
+                    latest_coverage[normalized_tag] = (
+                        "covered" if evidence_complete else "inconclusive"
+                    )
+                    if evidence_complete and normalized_tag not in seen_covered_tags:
+                        seen_covered_tags.add(normalized_tag)
+                        new_coverage = True
+            new_evidence = evidence_complete and case_id not in seen_conclusive_cases
+            if new_evidence:
+                seen_conclusive_cases.add(case_id)
+            new_finding = (
+                evidence_complete
+                and bool(evaluation.get("violated", False))
+                and case_id not in seen_finding_cases
+            )
+            if new_finding:
+                seen_finding_cases.add(case_id)
+            if not any((new_coverage, new_evidence, new_finding)):
+                no_gain_steps += 1
+        verified_derived_case_ids = {
+            str(event["evidence"]["derived_case"]["derived_case_id"])
+            for event in events
+            if event["event_type"] == "derived_case_verified"
+        }
+        frozen_derived_case_ids = {
+            str(event["evidence"]["derived_case"]["derived_case_id"])
+            for event in events
+            if event["event_type"] == "derived_case_frozen"
+        }
+        covered_tags = sorted(tag for tag, status in latest_coverage.items() if status == "covered")
+        conclusive_hypotheses = {
+            case_id
+            for case_id, evidence_complete in latest_evidence_complete.items()
+            if evidence_complete
+        }
+        confirmed_finding_fingerprints = {
+            finding["fingerprint"]
+            for finding in rows["findings"]
+            if not finding.get("is_control", False)
+        }
+        run = rows["run"]
+        duration_seconds = cls._duration_seconds(
+            run.get("started_at"),
+            run.get("completed_at"),
+        )
+        return {
+            "planner_decisions": len(planner_decisions),
+            "planner_acceptances": sum(
+                event["event_type"] == "planner_decided" for event in planner_decisions
+            ),
+            "planner_rejections": sum(
+                event["event_type"] == "planner_rejected" for event in planner_decisions
+            ),
+            "planner_errors": sum(event["event_type"] == "planner_error" for event in events),
+            "finish_gate_rejections": sum(
+                event["event_type"] == "planner_finish_rejected" for event in events
+            ),
+            "traceable_decision_rate": (
+                traceable_decisions / len(planner_decisions) if planner_decisions else 1.0
+            ),
+            "actual_information_gain": {
+                "coverage_delta": len(covered_tags),
+                "evidence_completeness_delta": len(conclusive_hypotheses),
+                "confirmed_finding_delta": len(confirmed_finding_fingerprints),
+                "no_gain_steps": no_gain_steps,
+            },
+            "covered_tags": covered_tags,
+            "verified_derived_case_ids": sorted(verified_derived_case_ids),
+            "unverified_derived_case_ids": sorted(
+                frozen_derived_case_ids - verified_derived_case_ids
+            ),
+            "duration_seconds": duration_seconds,
+        }
+
+    @staticmethod
+    def _duration_seconds(started_at: str | None, completed_at: str | None) -> float | None:
+        if not started_at or not completed_at:
+            return None
+        return max(
+            (
+                datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)
+            ).total_seconds(),
+            0,
+        )
 
     async def build_markdown(self, run_id: str) -> str:
         report = await self.build_json(run_id)
@@ -153,6 +300,32 @@ class ReportService:
                 f"{case['kind']} | **{step['outcome']}** |"
             )
 
+        react = report["react_summary"]
+        lines.extend(
+            [
+                "",
+                "## ReAct",
+                "",
+                (
+                    f"- Planner decisions/rejections: "
+                    f"{react['planner_decisions']}/{react['planner_rejections']}"
+                ),
+                f"- Traceable decision rate: {react['traceable_decision_rate']:.0%}",
+                f"- Finish Gate rejections: {react['finish_gate_rejections']}",
+                f"- Covered tags: {len(react['covered_tags'])}",
+                (
+                    "- Actual information gain: "
+                    f"{react['actual_information_gain']['coverage_delta']} coverage, "
+                    f"{react['actual_information_gain']['evidence_completeness_delta']} evidence, "
+                    f"{react['actual_information_gain']['confirmed_finding_delta']} findings"
+                ),
+                (
+                    "- Deterministically verified DerivedCases: "
+                    f"{len(react['verified_derived_case_ids'])}"
+                ),
+                (f"- Frozen, unverified DerivedCases: {len(react['unverified_derived_case_ids'])}"),
+            ]
+        )
         lines.extend(["", "## Findings", ""])
         if not report["findings"]:
             lines.append("No violations produced a Finding.")

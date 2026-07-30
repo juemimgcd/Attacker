@@ -15,6 +15,7 @@ from app.schemas.adaptive_agent_schema import (
     CandidateSnapshot,
     InformationGain,
     ObservationSource,
+    PlannerReasonCode,
 )
 from app.schemas.attack_sample_schema import CaseKind
 from app.schemas.attack_state_schema import (
@@ -294,16 +295,44 @@ class AttackGraph:
             snapshot_id=str(state["candidate_snapshot_id"]),
         )
         facts = await self.repository.load_adaptive_facts(state["run_id"])
+        candidates = list(snapshot.candidates[:100])
+        observations = facts["observations"][-20:]
+        finding_refs = facts["finding_refs"][-100:]
+        hypothesis_refs = list(
+            dict.fromkeys(
+                hypothesis_ref
+                for candidate in candidates
+                for hypothesis_ref in candidate.hypothesis_refs
+            )
+        )[:100]
+        coverage_tags = sorted(
+            {tag for candidate in candidates for tag in candidate.coverage_tags}
+        )[:100]
         context = PlannerContext(
             candidate_snapshot_id=snapshot.snapshot_id,
-            candidates=list(snapshot.candidates),
-            observations=facts["observations"],
+            candidates=candidates,
+            observations=observations,
             evidence_refs=[
-                *facts["observation_refs"],
-                *facts["finding_refs"],
+                *(observation.observation_ref for observation in observations),
+                *finding_refs,
             ],
-            finding_refs=facts["finding_refs"],
-            hypothesis_refs=[fact.hypothesis_ref for fact in facts["hypotheses"].values()],
+            finding_refs=finding_refs,
+            hypothesis_refs=hypothesis_refs,
+            coverage={
+                tag: facts["coverage"][tag] for tag in coverage_tags if tag in facts["coverage"]
+            },
+            coverage_refs=[
+                facts["coverage_ref_by_tag"][tag]
+                for tag in coverage_tags
+                if tag in facts["coverage_ref_by_tag"]
+            ],
+            information_gain_refs=facts["information_gain_refs"][-100:],
+            hypotheses=[
+                facts["hypotheses"][candidate.action_id]
+                for candidate in candidates
+                if candidate.action_id in facts["hypotheses"]
+            ],
+            information_gains=facts["information_gains"][-100:],
             remaining_steps=max(remaining_steps, 0),
         )
         planner_index = state["planner_call_count"] + 1
@@ -421,7 +450,7 @@ class AttackGraph:
                 )
 
             decision = result.decision
-            rejection_reason = self._validate_decision(snapshot, decision)
+            rejection_reason = self._validate_decision(snapshot, context, decision)
             if rejection_reason is None:
                 rejection_reason = await self.repository.validate_planner_references(
                     run_id=state["run_id"],
@@ -490,12 +519,11 @@ class AttackGraph:
                 "stop_reason": None,
             }
         candidate = next(
-            item for item in snapshot.candidates if item.candidate_id == decision.candidate_id
+            item for item in context.candidates if item.candidate_id == decision.candidate_id
         )
         case_id = candidate.action_id
-        case_operation_id = (
-            f"{state['run_id']}:case:{case_id}:{len(state['completed_case_ids']) + 1}"
-        )
+        action_attempt = state["action_repeat_counts"].get(case_id, 0) + 1
+        case_operation_id = f"{state['run_id']}:case:{case_id}:{action_attempt}"
         await self.repository.append_event(
             run_id=state["run_id"],
             operation_id=f"{case_operation_id}:decision",
@@ -737,7 +765,7 @@ class AttackGraph:
             run_id=state["run_id"],
             case_id=case.id,
             operation_id=operation_id,
-            sequence=len(state["completed_case_ids"]) + 1,
+            sequence=state["graph_step_count"],
         )
         try:
             await self.repository.load_target_execution(operation_id)
@@ -907,6 +935,7 @@ class AttackGraph:
         started_at = datetime.fromisoformat(str(state["current_step_started_at"]))
         gain = self.hypothesis_service.actual_gain(
             previous_coverage=facts["coverage"],
+            previous_hypothesis=previous_hypothesis,
             current_coverage=coverage_facts,
             evaluation=evaluation,
             target_call_cost=1,
@@ -916,7 +945,7 @@ class AttackGraph:
                 0,
             ),
         )
-        _, gain_ref = await self.repository.record_coverage_and_gain(
+        _, gain_ref, _ = await self.repository.record_coverage_and_gain(
             run_id=state["run_id"],
             operation_id=operation_id,
             coverage_facts=coverage_facts,
@@ -967,7 +996,7 @@ class AttackGraph:
             run_id=state["run_id"],
             case=case,
             operation_id=str(state["current_operation_id"]),
-            sequence=len(state["completed_case_ids"]) + 1,
+            sequence=state["graph_step_count"],
             outcome=outcome,
             reason=policy.reason,
             policy=policy,
@@ -1328,17 +1357,34 @@ class AttackGraph:
     @staticmethod
     def _validate_decision(
         snapshot: CandidateSnapshot,
+        context: PlannerContext,
         decision: PlannerDecision,
     ) -> str | None:
         if decision.candidate_snapshot_id != snapshot.snapshot_id:
             return "planner referenced an expired or unknown candidate snapshot"
-        if not decision.evidence_refs:
+        empty_run_finish = (
+            decision.action == "finish"
+            and decision.reason_code == PlannerReasonCode.no_candidates
+            and not context.candidates
+        )
+        if not decision.evidence_refs and not empty_run_finish:
             return "planner decision must cite persisted evidence"
+        current_evidence_refs = {
+            *context.evidence_refs,
+            *context.coverage_refs,
+            *context.information_gain_refs,
+        }
+        missing_evidence = sorted(set(decision.evidence_refs) - current_evidence_refs)
+        if missing_evidence:
+            return "planner cited evidence outside the current context"
+        missing_hypotheses = sorted(set(decision.hypothesis_refs) - set(context.hypothesis_refs))
+        if missing_hypotheses:
+            return "planner cited hypotheses outside the current context"
         if decision.action == "finish":
             return None
         candidate_ids = [
             candidate.candidate_id
-            for candidate in snapshot.candidates
+            for candidate in context.candidates
             if candidate.candidate_id == decision.candidate_id
         ]
         if len(candidate_ids) != 1:
@@ -1353,7 +1399,7 @@ class AttackGraph:
             separators=(",", ":"),
             sort_keys=True,
         )
-        return hashlib.sha256(canonical.encode()).hexdigest()
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _after_plan(state: AttackGraphState) -> str:
