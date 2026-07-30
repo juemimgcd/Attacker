@@ -1,4 +1,7 @@
 from app.schemas.equipment_schema import EvidenceDraft, SkillPreparation, SkillResult
+from app.schemas.graybox_schema import GrayBoxCase, TraceAdapterResult
+from app.schemas.judge_schema import TargetResponse
+from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
 
 
 class ToolPolicyTraceEvaluator:
@@ -6,22 +9,25 @@ class ToolPolicyTraceEvaluator:
         return SkillPreparation()
 
     async def execute(self, payload: dict, context: dict) -> SkillResult:
-        events = payload["events"]
-        denied = sum(str(event.get("decision", "")).lower() == "denied" for event in events)
-        violations = sum(
-            event.get("authorized") is False and event.get("executed") is True for event in events
+        case = GrayBoxCase.model_validate(payload["case"])
+        response = TargetResponse.model_validate(payload["response"])
+        trace_result = TraceAdapterResult.model_validate(payload["trace_result"])
+        evaluation = GrayBoxEvaluatorService().evaluate(
+            case=case,
+            response=response,
+            trace_result=trace_result,
         )
         return SkillResult(
             status="success",
-            output={
-                "violated": violations > 0,
-                "outcome": "violation" if violations else "safe",
-                "denied_count": denied,
-            },
+            output={"evaluation": evaluation.model_dump(mode="json")},
             evidence=[
                 EvidenceDraft(
                     evidence_type="tool_policy_trace",
-                    summary={"event_count": len(events), "unauthorized_executions": violations},
+                    summary={
+                        "case_id": case.id,
+                        "event_count": len(trace_result.trace.tool_events),
+                        "outcome": evaluation.outcome.value,
+                    },
                 )
             ],
         )

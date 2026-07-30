@@ -1,1 +1,1 @@
-{"type":"object","required":["documents"],"properties":{"documents":{"type":"array","items":{"type":"object"}}},"additionalProperties":false}
+{"type":"object","required":["case","observed_memory","retrieval","recovery"],"properties":{"case":{"type":"object"},"observed_memory":{"oneOf":[{"type":"array","items":{"type":"object"}},{"type":"null"}]},"retrieval":{"oneOf":[{"type":"object"},{"type":"null"}]},"recovery":{"oneOf":[{"type":"object"},{"type":"null"}]}},"additionalProperties":false}

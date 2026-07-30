@@ -46,6 +46,7 @@ class EquipmentSettings(BaseSettings):
     allow_untrusted: bool = False
     require_signature: bool = False
     trust_roots_file: str = "conf/equipment_trust_roots.json"
+    revocations_file: str = "conf/equipment_revocations.json"
     max_package_files: int = Field(default=500, gt=0)
     max_package_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
     max_archive_depth: int = Field(default=8, gt=0)

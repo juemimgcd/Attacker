@@ -44,19 +44,50 @@ Discovery rejects unsafe paths, symlinks, excessive depth/file count/size, missi
 When `EQUIPMENT__REQUIRE_SIGNATURE=true`, every package must contain `SIGNATURE.json`:
 
 ```json
-{"publisher_id":"internal-security","algorithm":"ed25519","signature":"BASE64_SIGNATURE"}
+{"publisher_id":"internal-security","signature_id":"release-2026-07","algorithm":"ed25519","signature":"BASE64_SIGNATURE"}
 ```
 
 The signature covers the lowercase SHA-256 checksum string of all package files except `SIGNATURE.json`. `EQUIPMENT__TRUST_ROOTS_FILE` is a JSON object mapping publisher IDs to base64 Ed25519 public keys. A signature authenticates source and integrity; it does not make code safe and does not reduce the required runtime isolation.
+
+`EQUIPMENT__REVOCATIONS_FILE` points to a local JSON revocation document. Its
+`publisher_ids`, `checksums`, and `signature_ids` arrays are checked on every discovery.
+A revoked package is invalid and cannot be selected for a new Run. Offline ZIP imports
+retain an immutable archive source reference; reusing an existing package ID/version with
+different content is rejected without modifying the previously registered package.
 
 Provider Instance `secret_refs` may bind a deployment environment reference such as
 `{"agent_token": "env:ENTERPRISE_AGENT_TOKEN"}`. Core resolves it only for the current
 Provider call; the Skill context, package/config snapshot, Event, report, and replay retain
 only the reference and `secret_binding_revision`.
 
+## Run bindings and Capability Broker
+
+At Run creation, Core freezes the selected Provider and Skill manifests, Case Pack,
+Capability Contracts, checksums, Provider Instance, non-sensitive config, config revision,
+secret-binding revision, test principal, and target binding. Catalog reloads and deployment
+disable operations affect only new Runs. Active Runs load archived package bytes and the
+exact frozen Provider Instance revision.
+
+Skills request external work declaratively by returning a bounded
+`capability_requests` list. Each request names a Manifest binding and stable request ID.
+Core resolves the binding, enforces Run Policy and Contract schemas, invokes the Provider,
+redacts the result, persists Evidence and Resource Leases, and re-enters the Skill with
+`capability_results`. A Skill never receives a Provider object, database session, raw
+secret, or unrestricted network handle. Reusing a request ID with a different payload is
+rejected.
+
+Resource cleanup is limited to persisted Resource Leases. Cleanup operation IDs are stable,
+attempt counts and errors are retained, and startup recovery retries active or failed
+leases using the frozen Provider revision. A cleanup failure remains visible in reports and
+does not remove an already supported Finding.
+
 ## CI contract
 
-Package CI should run local validation on Windows and Linux, then exercise every declared Capability against its Core contract request/response schemas. Repository checks remain:
+Package CI should run local validation and `contract-test` on Windows and Linux.
+Contract checks validate the exact async adapter method signatures and every declared
+Capability reference in addition to manifest and JSON Schema validation. Deployment-owned
+offline scenarios should then exercise each declared Capability against its request and
+response schemas. Repository checks remain:
 
 ```powershell
 uv run ruff format --check .

@@ -1,7 +1,7 @@
 schema_version: skill.v1
 id: tool-policy-trace-evaluator
 name: Tool Policy Trace Evaluator
-version: 1.0.0
+version: 1.1.0
 description: Structured adapter for phase-two Tool and Policy Trace evaluation.
 attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
 entrypoint: handler.py:ToolPolicyTraceEvaluator

@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.equipment.metrics import EquipmentMetrics
 from app.equipment.sdk import provider_secret_scope
 from app.equipment.worker import execute_request
 from app.schemas.equipment_schema import TrustLevel
@@ -23,8 +24,13 @@ class EquipmentProtocolError(RuntimeError):
 
 
 class EquipmentRunner:
-    def __init__(self, settings: EquipmentSettings) -> None:
+    def __init__(
+        self,
+        settings: EquipmentSettings,
+        metrics: EquipmentMetrics | None = None,
+    ) -> None:
         self.settings = settings
+        self.metrics = metrics
 
     async def execute(
         self,
@@ -207,14 +213,20 @@ class EquipmentRunner:
         except TimeoutError:
             process.kill()
             await process.wait()
+            if self.metrics is not None:
+                self.metrics.increment("sandbox_termination")
             raise TimeoutError("sandbox execution timed out") from None
         except asyncio.CancelledError:
             process.kill()
             await process.wait()
+            if self.metrics is not None:
+                self.metrics.increment("sandbox_termination")
             raise
         except EquipmentProtocolError:
             process.kill()
             await process.wait()
+            if self.metrics is not None:
+                self.metrics.increment("sandbox_termination")
             raise
         try:
             response = json.loads(stdout)

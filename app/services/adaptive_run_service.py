@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import hashlib
 import ipaddress
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langgraph.types import Command
 
@@ -31,6 +33,9 @@ from app.services.sample_loader import GrayBoxDatasetLoader
 from app.services.tool_trace_adapter import ToolTraceAdapter
 from app.workflows.attack_graph import AttackGraph
 from app.workflows.attack_state import AttackGraphState
+
+if TYPE_CHECKING:
+    from app.services.equipment_service import EquipmentService
 
 
 @dataclass
@@ -66,8 +71,10 @@ class AdaptiveRunService:
         *,
         repository: AdaptiveRepository,
         checkpointer: Any,
+        equipment_service: EquipmentService | None = None,
     ) -> None:
         self.repository = repository
+        self.equipment_service = equipment_service
         self.loader = GrayBoxDatasetLoader()
         self.registry = AdaptiveRuntimeRegistry()
         self.graph = AttackGraph(
@@ -91,6 +98,11 @@ class AdaptiveRunService:
             evaluator_snapshot=self._evaluator_snapshot(),
             candidate_universe_checksum=self._candidate_universe_checksum(dataset.cases),
             equipment_snapshot=self._equipment_snapshot(dataset.cases),
+        )
+        await self._freeze_equipment(
+            run_id,
+            request.target,
+            request.test_principal_refs,
         )
         hypotheses = await self.repository.initialize_hypotheses(
             run_id=run_id,
@@ -175,6 +187,22 @@ class AdaptiveRunService:
             },
         )
         return await self._status(run_id, result)
+
+    async def _freeze_equipment(
+        self,
+        run_id: str,
+        target: TargetConfig,
+        test_principal_refs: list[str],
+    ) -> None:
+        if self.equipment_service is None:
+            return
+        principal_ref = test_principal_refs[0] if test_principal_refs else "default-test-principal"
+        await self.equipment_service.freeze_run_bindings(
+            run_id=run_id,
+            stage="graybox",
+            target_binding_ref=str(target.endpoint),
+            test_principal_ref=principal_ref,
+        )
 
     async def resume(
         self,
@@ -489,8 +517,14 @@ class AdaptiveRunService:
 
 
 class DeterministicGrayBoxRunService:
-    def __init__(self, repository: AdaptiveRepository) -> None:
+    def __init__(
+        self,
+        repository: AdaptiveRepository,
+        *,
+        equipment_service: EquipmentService | None = None,
+    ) -> None:
         self.repository = repository
+        self.equipment_service = equipment_service
         self.loader = GrayBoxDatasetLoader()
         self.policy_service = PolicyService()
         self.connector = GrayBoxConnector()
@@ -518,6 +552,8 @@ class DeterministicGrayBoxRunService:
         mode: str,
         baseline_run_id: str | None = None,
         test_principal_refs: list[str] | None = None,
+        equipment_source_run_id: str | None = None,
+        equipment_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         AdaptiveRunService._validate_target(target)
         run_id, target_id, _, policy = await self.repository.create_run(
@@ -533,6 +569,22 @@ class DeterministicGrayBoxRunService:
             ),
             equipment_snapshot=AdaptiveRunService._equipment_snapshot(dataset.cases),
         )
+        if self.equipment_service is not None:
+            if equipment_source_run_id is not None:
+                await self.equipment_service.clone_run_bindings(
+                    source_run_id=equipment_source_run_id,
+                    target_run_id=run_id,
+                    target_binding_ref=str(target.endpoint),
+                )
+            else:
+                principal_refs = test_principal_refs or ["default-test-principal"]
+                await self.equipment_service.freeze_run_bindings(
+                    run_id=run_id,
+                    stage="graybox",
+                    target_binding_ref=str(target.endpoint),
+                    test_principal_ref=principal_refs[0],
+                    overrides=equipment_overrides,
+                )
         started_at = datetime.now(UTC)
         secret_values = AdaptiveRunService._secret_values(target)
         target_calls = 0

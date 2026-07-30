@@ -5,7 +5,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import yaml
 from cryptography.exceptions import InvalidSignature
@@ -25,6 +25,14 @@ from app.schemas.equipment_schema import (
 from conf.settings import EquipmentSettings
 
 ATTACKER_VERSION = "0.1.0"
+SignatureStatus = Literal[
+    "not_present",
+    "not_required",
+    "verified",
+    "invalid",
+    "revoked",
+]
+SourceType = Literal["builtin", "local_directory", "offline_archive"]
 IGNORED_NAMES = {"__pycache__", ".pytest_cache", ".ruff_cache", ".git", "tests"}
 MANIFEST_NAMES = {
     PackageType.provider: "provider.yaml",
@@ -32,6 +40,10 @@ MANIFEST_NAMES = {
     PackageType.casepack: "casepack.yaml",
     PackageType.contract: "contract.yaml",
 }
+
+
+class SignatureRevokedError(ValueError):
+    pass
 
 
 class EquipmentCatalog:
@@ -95,14 +107,21 @@ class EquipmentCatalog:
     def _load_package(self, path: Path, package_type: PackageType) -> DiscoveredPackage:
         errors: list[str] = []
         checksum = ""
+        signature_status: SignatureStatus = "not_present"
+        publisher_id: str | None = None
+        signature_id: str | None = None
         manifest_data: dict[str, Any] = {}
         manifest_name = MANIFEST_NAMES[package_type]
         manifest_path = path / manifest_name
         try:
             files = self._safe_files(path)
             checksum = self._checksum(path, files)
-            if self.settings.require_signature:
-                self._verify_signature(path, checksum)
+            signature_path = path / "SIGNATURE.json"
+            if signature_path.is_file():
+                signature_metadata = json.loads(signature_path.read_text(encoding="utf-8"))
+                publisher_id = str(signature_metadata.get("publisher_id", "")) or None
+                signature_id = str(signature_metadata.get("signature_id", "")) or None
+            signature_status, publisher_id, signature_id = self._signature_status(path, checksum)
             if manifest_path not in files:
                 raise ValueError(f"{manifest_name} is required")
             loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
@@ -116,8 +135,9 @@ class EquipmentCatalog:
             )
             self._validate_references(path, manifest, package_type)
             self._validate_executable(path, manifest, package_type)
-        except (OSError, ValueError, ValidationError, yaml.YAMLError) as exc:
+        except (OSError, TypeError, ValueError, ValidationError, yaml.YAMLError) as exc:
             errors.append(str(exc))
+            signature_status = "revoked" if isinstance(exc, SignatureRevokedError) else "invalid"
         package_id = str(manifest_data.get("id") or path.name)
         version = str(manifest_data.get("version") or "0.0.0")
         builtin_data_package = package_type in {
@@ -133,16 +153,41 @@ class EquipmentCatalog:
             )
         )
         manifest_data.setdefault("trust_level", trust_level)
+        source_type: SourceType = (
+            "builtin" if trust_level == TrustLevel.trusted_builtin.value else "local_directory"
+        )
+        source_ref = str(path.resolve())
+        source_metadata_path = path / ".equipment-source.json"
+        if source_metadata_path.is_file():
+            try:
+                source_metadata = json.loads(source_metadata_path.read_text(encoding="utf-8"))
+                candidate_type = str(source_metadata.get("source_type", ""))
+                if candidate_type not in {
+                    "builtin",
+                    "local_directory",
+                    "offline_archive",
+                }:
+                    errors.append("invalid equipment source type")
+                else:
+                    source_type = cast(SourceType, candidate_type)
+                    source_ref = str(source_metadata.get("source_ref") or source_ref)
+            except (OSError, TypeError, json.JSONDecodeError) as exc:
+                errors.append(f"invalid equipment source metadata: {exc}")
         return DiscoveredPackage(
             package_type=package_type,
             package_id=package_id,
             version=version,
             source_path=str(path.resolve()),
+            source_type=source_type,
+            source_ref=source_ref,
             checksum=checksum or hashlib.sha256(str(path).encode()).hexdigest(),
             manifest=manifest_data,
             enabled=False,
             validation_status="invalid" if errors else "valid",
             validation_errors=errors,
+            signature_status=signature_status,
+            publisher_id=publisher_id,
+            signature_id=signature_id,
         )
 
     def _safe_files(self, root: Path) -> list[Path]:
@@ -183,16 +228,28 @@ class EquipmentCatalog:
             digest.update(content)
         return digest.hexdigest()
 
-    def _verify_signature(self, root: Path, checksum: str) -> None:
+    def _signature_status(
+        self, root: Path, checksum: str
+    ) -> tuple[SignatureStatus, str | None, str | None]:
         signature_path = root / "SIGNATURE.json"
         if not signature_path.is_file():
-            raise ValueError("package signature is required")
+            if self.settings.require_signature:
+                raise ValueError("package signature is required")
+            return "not_required", None, None
         trust_roots_path = Path(self.settings.trust_roots_file)
         if not trust_roots_path.is_file():
             raise ValueError("equipment trust roots are not configured")
         signature = json.loads(signature_path.read_text(encoding="utf-8"))
         trust_roots = json.loads(trust_roots_path.read_text(encoding="utf-8"))
         publisher_id = str(signature.get("publisher_id", ""))
+        signature_id = str(signature.get("signature_id", "")) or None
+        revocations = self._revocations()
+        if (
+            publisher_id in revocations["publisher_ids"]
+            or checksum in revocations["checksums"]
+            or (signature_id is not None and signature_id in revocations["signature_ids"])
+        ):
+            raise SignatureRevokedError("package signature is revoked")
         if signature.get("algorithm") != "ed25519" or publisher_id not in trust_roots:
             raise ValueError("package signature publisher or algorithm is not trusted")
         try:
@@ -205,6 +262,17 @@ class EquipmentCatalog:
             )
         except (InvalidSignature, ValueError, KeyError) as exc:
             raise ValueError("package signature verification failed") from exc
+        return "verified", publisher_id, signature_id
+
+    def _revocations(self) -> dict[str, set[str]]:
+        path = Path(self.settings.revocations_file)
+        if not path.is_file():
+            return {"publisher_ids": set(), "checksums": set(), "signature_ids": set()}
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            key: {str(value) for value in loaded.get(key, [])}
+            for key in ("publisher_ids", "checksums", "signature_ids")
+        }
 
     @staticmethod
     def _parse_manifest(package_type: PackageType, data: dict[str, Any]):
@@ -305,10 +373,12 @@ class EquipmentCatalog:
             package_id=path.name,
             version="0.0.0",
             source_path=str(path.resolve()),
+            source_ref=str(path.resolve()),
             checksum=hashlib.sha256(str(path).encode()).hexdigest(),
             manifest={},
             validation_status="invalid",
             validation_errors=errors,
+            signature_status="invalid",
         )
 
     def _root_for(self, package_type: PackageType) -> Path:

@@ -1,7 +1,7 @@
 schema_version: provider.v1
 id: isolated-state-provider
 name: Isolated State Provider
-version: 1.0.0
+version: 1.1.0
 description: Provides deterministic test-only Memory and RAG fixture contracts.
 attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
 entrypoint: adapter.py:IsolatedStateProvider

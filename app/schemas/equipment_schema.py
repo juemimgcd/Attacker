@@ -169,11 +169,16 @@ class DiscoveredPackage(BaseModel):
     package_id: str
     version: str
     source_path: str
+    source_type: Literal["builtin", "local_directory", "offline_archive"] = "local_directory"
+    source_ref: str
     checksum: str
     manifest: dict[str, Any]
     enabled: bool = False
     validation_status: Literal["valid", "invalid"]
     validation_errors: list[str] = Field(default_factory=list)
+    signature_status: Literal["not_present", "not_required", "verified", "invalid", "revoked"]
+    publisher_id: str | None = None
+    signature_id: str | None = None
 
 
 class ProviderInstanceCreate(BaseModel):
@@ -289,10 +294,27 @@ class SkillPreparation(BaseModel):
     message: str | None = None
 
 
+class CapabilityRequest(BaseModel):
+    request_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+    binding: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapabilityResult(BaseModel):
+    request_id: str
+    binding: str
+    capability: str
+    status: Literal["success", "denied", "error", "timeout"]
+    output: dict[str, Any] = Field(default_factory=dict)
+    operation_id: str
+    error_code: str | None = None
+
+
 class SkillResult(BaseModel):
     status: Literal["success", "denied", "error", "timeout"]
     output: dict[str, Any] = Field(default_factory=dict)
     evidence: list[EvidenceDraft] = Field(default_factory=list)
+    capability_requests: list[CapabilityRequest] = Field(default_factory=list)
     provider_calls: int = Field(default=0, ge=0)
     error_code: str | None = None
     error_message: str | None = None

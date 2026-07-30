@@ -79,4 +79,4 @@ class IsolatedStateProvider:
         )
 
     async def cleanup(self, resource: dict, context: ProviderContext | dict) -> dict:
-        return {"cleaned": True, "resource_id": resource.get("external_resource_id")}
+        return {"cleaned": True}

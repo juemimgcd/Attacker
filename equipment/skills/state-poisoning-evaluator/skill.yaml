@@ -1,7 +1,7 @@
 schema_version: skill.v1
 id: state-poisoning-evaluator
 name: State Poisoning Evaluator
-version: 1.0.0
+version: 1.1.0
 description: Structured adapter for phase-three Memory and RAG state evaluation.
 attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
 entrypoint: handler.py:StatePoisoningEvaluator

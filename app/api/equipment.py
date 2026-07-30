@@ -149,6 +149,11 @@ async def list_contracts(request: Request) -> list[dict[str, Any]]:
     return await _list(request, PackageType.contract)
 
 
+@router.get("/metrics")
+async def get_equipment_metrics(request: Request) -> dict[str, Any]:
+    return request.app.state.equipment_metrics.snapshot()
+
+
 @router.post("/reload")
 async def reload_equipment(request: Request) -> dict[str, Any]:
     try:

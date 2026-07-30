@@ -91,7 +91,7 @@ async def _run(args: argparse.Namespace) -> Any:
             )
             return {"created": str(destination.resolve())}
         if args.command == "equipment" and args.equipment_command == "contract-test":
-            return contract_check(
+            return await contract_check(
                 catalog,
                 Path(args.path),
                 PackageType(args.type),

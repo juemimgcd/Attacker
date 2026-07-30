@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
 from app.equipment.json_schema import validate_instance
+from app.equipment.metrics import EquipmentMetrics
 from app.equipment.runner import EquipmentProtocolError, EquipmentRunner
 from app.equipment.security import SecretBroker, redact, summarize
 from app.repositories.equipment_repository import EquipmentRepository
 from app.schemas.equipment_schema import (
     CapabilityContractManifest,
+    CapabilityResult,
     ExecutionBudget,
     HarnessPolicy,
     PackageType,
@@ -37,14 +40,17 @@ class HarnessService:
         runner: EquipmentRunner,
         settings: EquipmentSettings,
         secret_broker: SecretBroker | None = None,
+        metrics: EquipmentMetrics | None = None,
     ) -> None:
         self.repository = repository
         self.equipment_service = equipment_service
         self.runner = runner
         self.settings = settings
         self.secret_broker = secret_broker or SecretBroker()
+        self.metrics = metrics
 
     async def healthcheck(self, instance_id: str) -> dict[str, Any]:
+        started = perf_counter()
         instance = await self.repository.get_provider_instance(instance_id)
         package = await self.repository.get_package(
             PackageType.provider,
@@ -72,17 +78,35 @@ class HarnessService:
             budget=ExecutionBudget(max_provider_calls=1),
             config=instance["config"],
         )
-        result = await self.runner.execute(
-            package,
-            method="healthcheck",
-            kwargs={"context": context},
-            workspace=self._workspace(context.operation_id),
-            timeout_seconds=float(
-                package["manifest"].get("healthcheck", {}).get("timeout_seconds", 5)
-            ),
-        )
+        try:
+            result = await self.runner.execute(
+                package,
+                method="healthcheck",
+                kwargs={"context": context},
+                workspace=self._workspace(context.operation_id),
+                timeout_seconds=float(
+                    package["manifest"].get("healthcheck", {}).get("timeout_seconds", 5)
+                ),
+            )
+        except (TimeoutError, EquipmentProtocolError, ValueError):
+            await self.repository.update_health(instance_id, "unhealthy")
+            if self.metrics is not None:
+                self.metrics.increment("provider_instance_error")
+                self.metrics.observe(
+                    "provider_instance_healthcheck",
+                    (perf_counter() - started) * 1000,
+                )
+            raise
         healthy = bool(result.get("healthy", result.get("status") == "healthy"))
         await self.repository.update_health(instance_id, "healthy" if healthy else "unhealthy")
+        if self.metrics is not None:
+            self.metrics.increment(
+                "provider_instance_healthy" if healthy else "provider_instance_error"
+            )
+            self.metrics.observe(
+                "provider_instance_healthcheck",
+                (perf_counter() - started) * 1000,
+            )
         return {"instance_id": instance_id, **result}
 
     async def invoke_provider(
@@ -95,19 +119,71 @@ class HarnessService:
         run_id: str | None = None,
         step_id: str | None = None,
     ) -> dict[str, Any]:
-        instance = await self.repository.get_provider_instance(context.provider_instance_id)
-        package = await self.repository.get_package(
-            PackageType.provider,
-            context.provider_package_id,
-            context.provider_version,
-        )
-        package = self.equipment_service.materialize_package(package, context.provider_checksum)
-        contract_package = await self.repository.get_package(
-            PackageType.contract, capability, "1.0.0"
-        )
-        contract_package = self.equipment_service.materialize_package(
-            contract_package, context.capability_contract_checksum
-        )
+        effective_run_id = run_id or (context.run_id if context.run_id != "dry-run" else None)
+        frozen = effective_run_id is not None
+        if frozen:
+            provider_snapshot = await self.repository.get_snapshot(
+                effective_run_id,
+                PackageType.provider,
+                context.provider_package_id,
+                provider_instance_id=context.provider_instance_id,
+            )
+            contract_snapshot = await self.repository.get_snapshot(
+                effective_run_id,
+                PackageType.contract,
+                capability,
+                provider_instance_id=context.provider_instance_id,
+            )
+            self._verify_frozen_provider_context(
+                context=context,
+                capability=capability,
+                provider_snapshot=provider_snapshot,
+                contract_snapshot=contract_snapshot,
+            )
+            instance = await self.repository.get_provider_instance_revision(
+                context.provider_instance_id,
+                provider_snapshot["checksum"],
+                str(provider_snapshot["config_revision"]),
+                str(provider_snapshot["secret_binding_revision"]),
+            )
+            package = await self.repository.get_package(
+                PackageType.provider,
+                provider_snapshot["package_id"],
+                provider_snapshot["version"],
+            )
+            package = self.equipment_service.materialize_package(
+                package,
+                provider_snapshot["checksum"],
+            )
+            contract_package = await self.repository.get_package(
+                PackageType.contract,
+                capability,
+                contract_snapshot["version"],
+            )
+            contract_package = self.equipment_service.materialize_package(
+                contract_package,
+                contract_snapshot["checksum"],
+            )
+        else:
+            instance = await self.repository.get_provider_instance(context.provider_instance_id)
+            package = await self.repository.get_package(
+                PackageType.provider,
+                context.provider_package_id,
+                context.provider_version,
+            )
+            package = self.equipment_service.materialize_package(
+                package,
+                context.provider_checksum,
+            )
+            contract_package = await self.repository.get_package(
+                PackageType.contract,
+                capability,
+                "1.0.0",
+            )
+            contract_package = self.equipment_service.materialize_package(
+                contract_package,
+                context.capability_contract_checksum,
+            )
         contract = CapabilityContractManifest.model_validate(contract_package["manifest"])
         self._gate_provider(
             capability=capability,
@@ -116,6 +192,7 @@ class HarnessService:
             package=package,
             instance=instance,
             contract_package=contract_package,
+            frozen=frozen,
         )
         context = context.model_copy(
             update={
@@ -127,8 +204,8 @@ class HarnessService:
         validate_instance(payload, request_schema)
         existing, created = await self.repository.begin_execution(
             {
-                "run_id": run_id,
-                "step_id": step_id,
+                "run_id": effective_run_id,
+                "step_id": step_id if effective_run_id is not None else None,
                 "operation_id": context.operation_id,
                 "package_id": package["package_id"],
                 "package_version": package["version"],
@@ -143,6 +220,7 @@ class HarnessService:
         )
         if not created:
             return existing
+        started = perf_counter()
         try:
             with self.secret_broker.lease(instance["secret_refs"]) as secrets:
                 raw_result = await self.runner.execute(
@@ -161,7 +239,13 @@ class HarnessService:
                     secret_environment=secrets.provider_environment(list(instance["secret_refs"])),
                 )
                 result = ProviderResult.model_validate(raw_result)
-                remaining_calls = policy.max_provider_calls - context.budget.provider_calls_used
+                remaining_calls = (
+                    min(
+                        policy.max_provider_calls,
+                        context.budget.max_provider_calls,
+                    )
+                    - context.budget.provider_calls_used
+                )
                 if result.physical_attempts > remaining_calls:
                     raise ValueError("Provider physical attempts exceed the remaining budget")
                 if (
@@ -238,13 +322,297 @@ class HarnessService:
             physical_attempts=result.physical_attempts,
             error_code=result.error_code,
         )
+        completed["output"] = safe_output
+        if self.metrics is not None:
+            self.metrics.increment("provider_call")
+            self.metrics.increment(
+                "provider_physical_attempt",
+                result.physical_attempts,
+            )
+            if result.status != "success":
+                self.metrics.increment("provider_error")
+            if result.status == "timeout":
+                self.metrics.increment("provider_timeout")
+            self.metrics.observe(
+                "provider_call",
+                (perf_counter() - started) * 1000,
+            )
         if result.resource_leases:
             completed["resource_leases"] = await self.repository.create_leases(
-                run_id=run_id,
+                run_id=effective_run_id,
                 operation_id=context.operation_id,
                 provider_instance_id=instance["instance_id"],
                 leases=[lease.model_dump(mode="json") for lease in result.resource_leases],
             )
+        return completed
+
+    async def execute_skill(
+        self,
+        *,
+        skill_id: str,
+        payload: dict[str, Any],
+        context: SkillContext,
+        policy: HarnessPolicy,
+        run_id: str | None = None,
+        step_id: str | None = None,
+    ) -> dict[str, Any]:
+        effective_run_id = run_id or (context.run_id if context.run_id != "dry-run" else None)
+        if effective_run_id is not None:
+            snapshot = await self.repository.get_snapshot(
+                effective_run_id,
+                PackageType.skill,
+                skill_id,
+            )
+            if snapshot["test_principal_ref"] != context.test_principal_ref:
+                raise PolicyDeniedError("test principal differs from Run snapshot")
+            package = await self.repository.get_package(
+                PackageType.skill,
+                skill_id,
+                snapshot["version"],
+            )
+            package = self.equipment_service.materialize_package(
+                package,
+                snapshot["checksum"],
+            )
+        else:
+            package = await self.repository.get_package(PackageType.skill, skill_id)
+            package = self.equipment_service.materialize_package(package)
+            if not package["enabled"]:
+                raise PolicyDeniedError("Skill package is disabled")
+
+        manifest = SkillManifest.model_validate(package["manifest"])
+        validate_instance(payload, self._schema(package, manifest.input_schema))
+        requirements = {
+            requirement.binding: requirement.contract
+            for requirement in manifest.requires.capabilities
+        }
+        self._gate_skill(
+            context=context,
+            policy=policy,
+            requirements=requirements,
+        )
+        existing, created = await self.repository.begin_execution(
+            {
+                "run_id": effective_run_id,
+                "step_id": step_id if effective_run_id is not None else None,
+                "operation_id": context.operation_id,
+                "package_id": package["package_id"],
+                "package_version": package["version"],
+                "package_checksum": package["checksum"],
+                "test_principal_ref": context.test_principal_ref,
+                "input_summary": summarize(payload),
+            }
+        )
+        if not created:
+            return existing
+        started = perf_counter()
+
+        capability_results: dict[str, CapabilityResult] = {}
+        request_fingerprints: dict[str, str] = {}
+        broker_leases: list[dict[str, Any]] = []
+        skill_attempts = 0
+        provider_calls = 0
+        result = SkillResult(status="error", error_code="skill_protocol_error")
+        try:
+            preparation = await self.runner.execute(
+                package,
+                method="prepare",
+                kwargs={"context": context},
+                workspace=self._workspace(context.operation_id),
+                timeout_seconds=min(
+                    manifest.execution.timeout_seconds,
+                    policy.max_duration_seconds,
+                ),
+            )
+            if not preparation.get("ready", False):
+                raise ValueError(preparation.get("message") or "Skill is not ready")
+
+            max_steps = min(manifest.execution.max_steps, policy.max_steps)
+            for _ in range(max_steps):
+                remaining_duration = policy.max_duration_seconds - (perf_counter() - started)
+                if remaining_duration <= 0:
+                    raise TimeoutError
+                skill_attempts += 1
+                invocation_payload = dict(payload)
+                if capability_results:
+                    invocation_payload["capability_results"] = [
+                        item.model_dump(mode="json") for item in capability_results.values()
+                    ]
+                raw_result = await self.runner.execute(
+                    package,
+                    method="execute",
+                    kwargs={"payload": invocation_payload, "context": context},
+                    workspace=self._workspace(context.operation_id),
+                    timeout_seconds=min(
+                        manifest.execution.timeout_seconds,
+                        remaining_duration,
+                    ),
+                )
+                result = SkillResult.model_validate(raw_result)
+                output_bytes = len(
+                    json.dumps(
+                        result.output,
+                        separators=(",", ":"),
+                        default=str,
+                    ).encode()
+                )
+                if output_bytes > manifest.execution.max_output_bytes:
+                    raise ValueError("Skill output exceeds its declared byte limit")
+                if not result.capability_requests:
+                    if result.status == "success":
+                        validate_instance(
+                            result.output,
+                            self._schema(package, manifest.output_schema),
+                        )
+                    break
+
+                for capability_request in result.capability_requests:
+                    capability = requirements.get(capability_request.binding)
+                    if capability is None:
+                        raise PolicyDeniedError(
+                            f"Skill requested undeclared binding {capability_request.binding}"
+                        )
+                    fingerprint = json.dumps(
+                        capability_request.payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    previous_fingerprint = request_fingerprints.get(capability_request.request_id)
+                    if previous_fingerprint is not None:
+                        if previous_fingerprint != fingerprint:
+                            raise ValueError(
+                                "Skill reused a capability request ID with different payload"
+                            )
+                        continue
+                    if provider_calls >= min(
+                        manifest.execution.max_provider_calls,
+                        policy.max_provider_calls,
+                    ):
+                        raise PolicyDeniedError("Skill provider call budget exhausted")
+                    provider_remaining_duration = policy.max_duration_seconds - (
+                        perf_counter() - started
+                    )
+                    if provider_remaining_duration <= 0:
+                        raise TimeoutError
+                    binding = context.capability_bindings.get(capability_request.binding)
+                    if binding is None or binding.capability != capability:
+                        raise PolicyDeniedError(f"missing binding for {capability_request.binding}")
+                    instance = await self.repository.get_provider_instance_revision(
+                        binding.provider_instance_id,
+                        binding.provider_checksum,
+                        binding.config_revision,
+                        binding.secret_binding_revision,
+                    )
+                    provider_operation_id = (
+                        f"{context.operation_id}:capability:{capability_request.request_id}"
+                    )
+                    provider_context = ProviderContext(
+                        run_id=context.run_id,
+                        step_id=context.step_id,
+                        operation_id=provider_operation_id,
+                        target_id=context.target_id,
+                        case_id=context.case_id,
+                        provider_package_id=binding.provider_package_id,
+                        provider_version=binding.provider_version,
+                        provider_checksum=binding.provider_checksum,
+                        provider_instance_id=binding.provider_instance_id,
+                        config_revision=binding.config_revision,
+                        secret_binding_revision=binding.secret_binding_revision,
+                        capability_contract_checksum=binding.contract_checksum,
+                        test_principal_ref=context.test_principal_ref,
+                        approved_host_set=instance["allowed_hosts"],
+                        budget=context.budget.model_copy(
+                            update={
+                                "max_provider_calls": min(
+                                    context.budget.max_provider_calls,
+                                    manifest.execution.max_provider_calls,
+                                    policy.max_provider_calls,
+                                ),
+                                "provider_calls_used": provider_calls,
+                                "timeout_seconds": min(
+                                    context.budget.timeout_seconds,
+                                    provider_remaining_duration,
+                                ),
+                            }
+                        ),
+                        config=instance["config"],
+                    )
+                    provider_execution = await self.invoke_provider(
+                        capability=capability,
+                        payload=capability_request.payload,
+                        context=provider_context,
+                        policy=policy,
+                        run_id=effective_run_id,
+                        step_id=step_id,
+                    )
+                    broker_leases.extend(provider_execution.get("resource_leases", []))
+                    provider_calls += int(provider_execution.get("physical_attempts", 1))
+                    request_fingerprints[capability_request.request_id] = fingerprint
+                    capability_results[capability_request.request_id] = CapabilityResult(
+                        request_id=capability_request.request_id,
+                        binding=capability_request.binding,
+                        capability=capability,
+                        status=provider_execution["status"],
+                        output=provider_execution.get("output", {}),
+                        operation_id=provider_operation_id,
+                        error_code=provider_execution.get("error_code"),
+                    )
+            else:
+                raise ValueError("Skill exceeded its step budget")
+        except TimeoutError:
+            result = SkillResult(
+                status="timeout",
+                error_code="skill_timeout",
+                error_message="Skill execution timed out",
+                provider_calls=provider_calls,
+            )
+        except (PolicyDeniedError, ValueError, EquipmentProtocolError) as exc:
+            result = SkillResult(
+                status="denied" if isinstance(exc, PolicyDeniedError) else "error",
+                error_code=(
+                    "skill_policy_denied"
+                    if isinstance(exc, PolicyDeniedError)
+                    else "skill_protocol_error"
+                ),
+                error_message=str(exc),
+                provider_calls=provider_calls,
+            )
+
+        completed = await self.repository.complete_execution(
+            context.operation_id,
+            status=result.status,
+            output_summary=summarize(result.output),
+            evidence=[
+                {
+                    "event_type": (
+                        "skill_completed" if result.status == "success" else "skill_failed"
+                    ),
+                    "operation_id": context.operation_id,
+                    "package_id": package["package_id"],
+                    "package_version": package["version"],
+                    "package_checksum": package["checksum"],
+                    "test_principal_ref": context.test_principal_ref,
+                    "provider_calls": provider_calls,
+                    "redacted": True,
+                    "evidence": [item.model_dump(mode="json") for item in result.evidence],
+                }
+            ],
+            physical_attempts=max(skill_attempts, 1),
+            error_code=result.error_code,
+        )
+        if self.metrics is not None:
+            self.metrics.increment("skill_execution")
+            if result.status == "timeout":
+                self.metrics.increment("skill_timeout")
+            if result.status == "denied":
+                self.metrics.increment("capability_denied")
+            self.metrics.observe(
+                "skill_execution",
+                (perf_counter() - started) * 1000,
+            )
+        if broker_leases:
+            completed["resource_leases"] = broker_leases
         return completed
 
     async def cleanup_leases(
@@ -252,37 +620,122 @@ class HarnessService:
         *,
         run_id: str | None,
         test_principal_ref: str,
+        lease_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for lease in await self.repository.list_active_leases(run_id):
-            instance = await self.repository.get_provider_instance(lease["provider_instance_id"])
-            package = await self.repository.get_package(
-                PackageType.provider,
-                instance["provider_package_id"],
-                instance["provider_version"],
-            )
-            package = self.equipment_service.materialize_package(
-                package, instance["package_checksum"]
-            )
+            if lease_ids is not None and lease["id"] not in lease_ids:
+                continue
             operation_id = f"cleanup:{lease['id']}"
-            context = ProviderContext(
-                run_id=run_id or "dry-run",
-                step_id="cleanup",
-                operation_id=operation_id,
-                target_id="cleanup",
-                case_id="cleanup",
-                provider_package_id=package["package_id"],
-                provider_version=package["version"],
-                provider_checksum=package["checksum"],
-                provider_instance_id=instance["instance_id"],
-                config_revision=instance["config_revision"],
-                secret_binding_revision=instance["secret_binding_revision"],
-                test_principal_ref=test_principal_ref,
-                approved_host_set=instance["allowed_hosts"],
-                budget=ExecutionBudget(max_provider_calls=1, timeout_seconds=30),
-                config=instance["config"],
+            await self.repository.mark_lease_cleanup_started(
+                lease["id"],
+                operation_id,
             )
             try:
+                if lease["run_id"] is not None:
+                    provider_snapshots = [
+                        snapshot
+                        for snapshot in await self.repository.list_snapshots(lease["run_id"])
+                        if snapshot["package_type"] == PackageType.provider.value
+                        and snapshot["provider_instance_id"] == lease["provider_instance_id"]
+                    ]
+                    if len(provider_snapshots) != 1:
+                        raise ValueError(
+                            "Resource Lease does not have exactly one Provider snapshot"
+                        )
+                    provider_snapshot = provider_snapshots[0]
+                    instance = await self.repository.get_provider_instance_revision(
+                        lease["provider_instance_id"],
+                        provider_snapshot["checksum"],
+                        provider_snapshot["config_revision"],
+                        provider_snapshot["secret_binding_revision"],
+                    )
+                    package = await self.repository.get_package(
+                        PackageType.provider,
+                        provider_snapshot["package_id"],
+                        provider_snapshot["version"],
+                    )
+                    package = self.equipment_service.materialize_package(
+                        package,
+                        provider_snapshot["checksum"],
+                    )
+                else:
+                    instance = await self.repository.get_provider_instance(
+                        lease["provider_instance_id"]
+                    )
+                    package = await self.repository.get_package(
+                        PackageType.provider,
+                        instance["provider_package_id"],
+                        instance["provider_version"],
+                    )
+                    package = self.equipment_service.materialize_package(
+                        package,
+                        instance["package_checksum"],
+                    )
+                cleanup_contract_id = lease["cleanup_contract"]
+                if lease["run_id"] is not None:
+                    cleanup_snapshot = await self.repository.get_snapshot(
+                        lease["run_id"],
+                        PackageType.contract,
+                        cleanup_contract_id,
+                        provider_instance_id=lease["provider_instance_id"],
+                    )
+                    contract_package = await self.repository.get_package(
+                        PackageType.contract,
+                        cleanup_contract_id,
+                        cleanup_snapshot["version"],
+                    )
+                    contract_package = self.equipment_service.materialize_package(
+                        contract_package,
+                        cleanup_snapshot["checksum"],
+                    )
+                else:
+                    contract_package = await self.repository.get_package(
+                        PackageType.contract,
+                        cleanup_contract_id,
+                    )
+                    if not contract_package["enabled"]:
+                        raise PolicyDeniedError("Cleanup Capability Contract is disabled")
+                    contract_package = self.equipment_service.materialize_package(contract_package)
+                cleanup_contract = CapabilityContractManifest.model_validate(
+                    contract_package["manifest"]
+                )
+                if cleanup_contract.side_effect != "resource_cleanup":
+                    raise ValueError("Resource Lease cleanup Contract is not a cleanup capability")
+                implements = {
+                    item["contract"] for item in package["manifest"].get("implements", [])
+                }
+                if cleanup_contract_id not in implements:
+                    raise ValueError(
+                        "Provider does not implement the Resource Lease cleanup Contract"
+                    )
+                validate_instance(
+                    lease["cleanup_payload"],
+                    self._schema(
+                        contract_package,
+                        cleanup_contract.request_schema,
+                    ),
+                )
+                context = ProviderContext(
+                    run_id=run_id or "dry-run",
+                    step_id="cleanup",
+                    operation_id=operation_id,
+                    target_id="cleanup",
+                    case_id="cleanup",
+                    provider_package_id=package["package_id"],
+                    provider_version=package["version"],
+                    provider_checksum=package["checksum"],
+                    provider_instance_id=instance["instance_id"],
+                    config_revision=instance["config_revision"],
+                    secret_binding_revision=instance["secret_binding_revision"],
+                    test_principal_ref=test_principal_ref,
+                    approved_host_set=instance["allowed_hosts"],
+                    budget=ExecutionBudget(
+                        max_provider_calls=1,
+                        timeout_seconds=30,
+                    ),
+                    config=instance["config"],
+                )
                 result = await self.runner.execute(
                     package,
                     method="cleanup",
@@ -290,12 +743,28 @@ class HarnessService:
                     workspace=self._workspace(operation_id),
                     timeout_seconds=30,
                 )
+                validate_instance(
+                    result,
+                    self._schema(
+                        contract_package,
+                        cleanup_contract.response_schema,
+                    ),
+                )
                 if not result.get("cleaned", False):
                     raise RuntimeError(str(result.get("reason", "cleanup failed")))
                 await self.repository.mark_lease_cleaned(lease["id"], operation_id)
                 results.append({**lease, "status": "cleaned", "operation_id": operation_id})
-            except (RuntimeError, ValueError, TimeoutError, EquipmentProtocolError) as exc:
+            except (
+                LookupError,
+                OSError,
+                RuntimeError,
+                ValueError,
+                TimeoutError,
+                EquipmentProtocolError,
+            ) as exc:
                 await self.repository.mark_lease_cleanup_failed(lease["id"], operation_id, str(exc))
+                if self.metrics is not None:
+                    self.metrics.increment("cleanup_failure")
                 results.append(
                     {
                         **lease,
@@ -304,6 +773,26 @@ class HarnessService:
                         "error": str(exc),
                     }
                 )
+        return results
+
+    async def recover_pending_cleanups(self) -> list[dict[str, Any]]:
+        pending = await self.repository.list_pending_leases()
+        groups: dict[str | None, str] = {}
+        for lease in pending:
+            try:
+                execution = await self.repository.get_execution(lease["created_by_operation_id"])
+                principal_ref = execution["test_principal_ref"]
+            except LookupError:
+                principal_ref = "control-plane:cleanup-recovery"
+            groups.setdefault(lease["run_id"], principal_ref)
+        results: list[dict[str, Any]] = []
+        for run_id, principal_ref in groups.items():
+            results.extend(
+                await self.cleanup_leases(
+                    run_id=run_id,
+                    test_principal_ref=principal_ref,
+                )
+            )
         return results
 
     async def dry_run_skill(self, skill_id: str, request: SkillDryRunRequest) -> dict[str, Any]:
@@ -337,70 +826,57 @@ class HarnessService:
             ),
             workspace_path=str(self._workspace(operation_id)),
         )
-        existing, created = await self.repository.begin_execution(
-            {
-                "operation_id": operation_id,
-                "package_id": package["package_id"],
-                "package_version": package["version"],
-                "package_checksum": package["checksum"],
-                "test_principal_ref": context.test_principal_ref,
-                "input_summary": summarize(request.payload),
-            }
+        policy = HarnessPolicy(
+            allowed_capabilities=context.allowed_capabilities,
+            allowed_targets=[context.target_id],
+            allowed_cases=[context.case_id],
+            allowed_principal_refs=[context.test_principal_ref],
+            approved_high_risk_capabilities=context.allowed_capabilities,
+            max_provider_calls=manifest.execution.max_provider_calls,
+            max_steps=manifest.execution.max_steps,
+            max_duration_seconds=manifest.execution.timeout_seconds,
         )
-        if not created:
-            return existing
-        try:
-            preparation = await self.runner.execute(
-                package,
-                method="prepare",
-                kwargs={"context": context},
-                workspace=self._workspace(operation_id),
-                timeout_seconds=manifest.execution.timeout_seconds,
-            )
-            if not preparation.get("ready", False):
-                raise ValueError(preparation.get("message") or "Skill is not ready")
-            raw_result = await self.runner.execute(
-                package,
-                method="execute",
-                kwargs={"payload": request.payload, "context": context},
-                workspace=self._workspace(operation_id),
-                timeout_seconds=manifest.execution.timeout_seconds,
-            )
-            result = SkillResult.model_validate(raw_result)
-            validate_instance(result.output, self._schema(package, manifest.output_schema))
-        except TimeoutError:
-            result = SkillResult(
-                status="timeout",
-                error_code="skill_timeout",
-                error_message="Skill execution timed out",
-            )
-        except (ValueError, EquipmentProtocolError) as exc:
-            result = SkillResult(
-                status="error",
-                error_code="skill_protocol_error",
-                error_message=str(exc),
-            )
-        return await self.repository.complete_execution(
-            operation_id,
-            status=result.status,
-            output_summary=summarize(result.output),
-            evidence=[
-                {
-                    "event_type": (
-                        "skill_completed" if result.status == "success" else "skill_failed"
-                    ),
-                    "operation_id": operation_id,
-                    "package_id": package["package_id"],
-                    "package_version": package["version"],
-                    "package_checksum": package["checksum"],
-                    "test_principal_ref": context.test_principal_ref,
-                    "redacted": True,
-                    "evidence": [item.model_dump(mode="json") for item in result.evidence],
-                }
-            ],
-            physical_attempts=1,
-            error_code=result.error_code,
+        result = await self.execute_skill(
+            skill_id=skill_id,
+            payload=request.payload,
+            context=context,
+            policy=policy,
         )
+        lease_ids = {lease["id"] for lease in result.get("resource_leases", [])}
+        if lease_ids:
+            result["cleanup"] = await self.cleanup_leases(
+                run_id=None,
+                test_principal_ref=context.test_principal_ref,
+                lease_ids=lease_ids,
+            )
+        return result
+
+    def _gate_skill(
+        self,
+        *,
+        context: SkillContext,
+        policy: HarnessPolicy,
+        requirements: dict[str, str],
+    ) -> None:
+        declared_capabilities = set(requirements.values())
+        checks = {
+            "Skill capability allowance exceeds its Manifest": (
+                set(context.allowed_capabilities).issubset(declared_capabilities)
+            ),
+            "Skill capability is not allowed by Run Policy": (
+                declared_capabilities.issubset(policy.allowed_capabilities)
+            ),
+            "Skill target is not allowed": context.target_id in policy.allowed_targets,
+            "Skill case is not allowed": context.case_id in policy.allowed_cases,
+            "Skill test principal is not allowed": (
+                context.test_principal_ref in policy.allowed_principal_refs
+            ),
+        }
+        for message, passed in checks.items():
+            if not passed:
+                if self.metrics is not None:
+                    self.metrics.increment("capability_denied")
+                raise PolicyDeniedError(message)
 
     def _gate_provider(
         self,
@@ -411,10 +887,11 @@ class HarnessService:
         package: dict[str, Any],
         instance: dict[str, Any],
         contract_package: dict[str, Any],
+        frozen: bool = False,
     ) -> None:
         checks = {
-            "provider package is disabled": package["enabled"],
-            "provider instance is disabled": instance["enabled"],
+            "provider package is disabled": frozen or package["enabled"],
+            "provider instance is disabled": frozen or instance["enabled"],
             "package checksum changed": package["checksum"] == context.provider_checksum,
             "instance package checksum changed": (
                 instance["package_checksum"] == context.provider_checksum
@@ -430,10 +907,14 @@ class HarnessService:
                 context.test_principal_ref in policy.allowed_principal_refs
             ),
             "provider call budget exhausted": (
-                context.budget.provider_calls_used < policy.max_provider_calls
+                context.budget.provider_calls_used
+                < min(
+                    policy.max_provider_calls,
+                    context.budget.max_provider_calls,
+                )
             ),
             "contract checksum changed": bool(contract_package["checksum"]),
-            "Capability Contract is disabled": contract_package["enabled"],
+            "Capability Contract is disabled": frozen or contract_package["enabled"],
         }
         manifest_hosts = set(
             package["manifest"].get("runtime", {}).get("network", {}).get("allowed_hosts", [])
@@ -455,6 +936,53 @@ class HarnessService:
         )
         for message, passed in checks.items():
             if not passed:
+                if self.metrics is not None:
+                    self.metrics.increment("capability_denied")
+                    if "checksum" in message.lower():
+                        self.metrics.increment("package_checksum_mismatch")
+                raise PolicyDeniedError(message)
+
+    def _verify_frozen_provider_context(
+        self,
+        *,
+        context: ProviderContext,
+        capability: str,
+        provider_snapshot: dict[str, Any],
+        contract_snapshot: dict[str, Any],
+    ) -> None:
+        checks = {
+            "provider version differs from Run snapshot": (
+                context.provider_version == provider_snapshot["version"]
+            ),
+            "provider checksum differs from Run snapshot": (
+                context.provider_checksum == provider_snapshot["checksum"]
+            ),
+            "Provider Instance differs from Run snapshot": (
+                context.provider_instance_id == provider_snapshot["provider_instance_id"]
+            ),
+            "config revision differs from Run snapshot": (
+                context.config_revision == provider_snapshot["config_revision"]
+            ),
+            "Secret binding revision differs from Run snapshot": (
+                context.secret_binding_revision == provider_snapshot["secret_binding_revision"]
+            ),
+            "Capability Contract differs from Run snapshot": (
+                contract_snapshot["capability_contract_id"] == capability
+            ),
+            "Capability Contract checksum differs from Run snapshot": (
+                context.capability_contract_checksum
+                == contract_snapshot["capability_contract_checksum"]
+            ),
+            "test principal differs from Run snapshot": (
+                context.test_principal_ref == provider_snapshot["test_principal_ref"]
+            ),
+        }
+        for message, passed in checks.items():
+            if not passed:
+                if self.metrics is not None:
+                    self.metrics.increment("capability_denied")
+                    if "checksum" in message.lower():
+                        self.metrics.increment("package_checksum_mismatch")
                 raise PolicyDeniedError(message)
 
     @staticmethod

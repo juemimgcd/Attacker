@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import hashlib
 import ipaddress
 import json
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from app.repositories.run_repository import RunRepository
@@ -32,6 +34,9 @@ from app.services.prompt_governance import redact_sensitive_text
 from app.services.sample_loader import BlackBoxDatasetLoader
 from app.services.target_connector.http_connector import HTTPTargetConnector
 
+if TYPE_CHECKING:
+    from app.services.equipment_service import EquipmentService
+
 _CORE_REDACTED_KEYS = {
     "authorization",
     "token",
@@ -51,12 +56,14 @@ class DeterministicRunService:
         connector: HTTPTargetConnector | None = None,
         evaluator: EvaluatorService | None = None,
         attack_executor: AttackExecutor | None = None,
+        equipment_service: EquipmentService | None = None,
     ) -> None:
         self.repository = repository
         self.dataset_loader = dataset_loader or BlackBoxDatasetLoader()
         self.connector = connector or HTTPTargetConnector()
         self.evaluator = evaluator or EvaluatorService()
         self.attack_executor = attack_executor or AttackExecutor(connector=self.connector)
+        self.equipment_service = equipment_service
 
     async def run(self, request: DeterministicRunRequest) -> dict[str, Any]:
         self._validate_target(request)
@@ -119,6 +126,7 @@ class DeterministicRunService:
             budget=budget,
             mode="deterministic",
         )
+        await self._freeze_equipment(run_id, target)
         raw_result = await self.attack_executor.run_once(target=target, sample=sample)
         result = self._redact_attack_result(
             raw_result,
@@ -195,6 +203,8 @@ class DeterministicRunService:
         dataset: LoadedDataset,
         budget: RunBudget,
         mode: str,
+        equipment_source_run_id: str | None = None,
+        equipment_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         request = DeterministicRunRequest(target=target, budget=budget)
         self._validate_target(request)
@@ -209,6 +219,12 @@ class DeterministicRunService:
             dataset=dataset,
             budget=request.budget,
             mode=mode,
+        )
+        await self._freeze_equipment(
+            run_id,
+            target,
+            source_run_id=equipment_source_run_id,
+            overrides=equipment_overrides,
         )
 
         started = perf_counter()
@@ -263,6 +279,31 @@ class DeterministicRunService:
             target_call_count=target_call_count,
         )
         return await self.repository.get_report_rows(run_id)
+
+    async def _freeze_equipment(
+        self,
+        run_id: str,
+        target: TargetConfig,
+        *,
+        source_run_id: str | None = None,
+        overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        if self.equipment_service is None:
+            return
+        if source_run_id is not None:
+            await self.equipment_service.clone_run_bindings(
+                source_run_id=source_run_id,
+                target_run_id=run_id,
+                target_binding_ref=str(target.endpoint),
+            )
+            return
+        await self.equipment_service.freeze_run_bindings(
+            run_id=run_id,
+            stage="blackbox",
+            target_binding_ref=str(target.endpoint),
+            test_principal_ref="core:blackbox",
+            overrides=overrides,
+        )
 
     @staticmethod
     def _validate_target(request: DeterministicRunRequest) -> None:

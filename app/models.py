@@ -243,15 +243,21 @@ class EquipmentPackageRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     package_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     package_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(300), nullable=False, default="")
     version: Mapped[str] = mapped_column(String(100), nullable=False)
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="local_directory")
+    source_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     trust_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    signature_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_present")
+    publisher_id: Mapped[str | None] = mapped_column(String(200))
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     validation_status: Mapped[str] = mapped_column(String(32), nullable=False)
     validation_errors_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     loaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -260,6 +266,9 @@ class ProviderInstanceRecord(Base):
     __table_args__ = (
         UniqueConstraint(
             "instance_id",
+            "provider_package_id",
+            "provider_version",
+            "package_checksum",
             "config_revision",
             "secret_binding_revision",
             name="uq_provider_instance_revision",
@@ -307,6 +316,7 @@ class RunEquipmentSnapshotRecord(Base):
     manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     provider_instance_id: Mapped[str | None] = mapped_column(String(200))
     config_revision: Mapped[str | None] = mapped_column(String(64))
+    config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     secret_binding_revision: Mapped[str | None] = mapped_column(String(64))
     capability_contract_id: Mapped[str | None] = mapped_column(String(200))
     capability_contract_checksum: Mapped[str | None] = mapped_column(String(64))
@@ -356,6 +366,8 @@ class ResourceLeaseRecord(Base):
     cleanup_payload_ref: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     last_cleanup_operation_id: Mapped[str | None] = mapped_column(String(340))
+    cleanup_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cleanup_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

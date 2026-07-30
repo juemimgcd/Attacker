@@ -69,6 +69,19 @@ class ReplayService:
             }
         if request.mode == EquipmentReplayMode.same_binding_rerun:
             await self._require_historical_equipment(snapshots)
+        equipment_source_run_id = (
+            source_run_id if request.mode == EquipmentReplayMode.same_binding_rerun else None
+        )
+        if (
+            request.mode == EquipmentReplayMode.upgrade_comparison
+            and not request.equipment_bindings
+        ):
+            raise ValueError("upgrade comparison requires explicit equipment_bindings")
+        equipment_overrides = (
+            request.equipment_bindings
+            if request.mode == EquipmentReplayMode.upgrade_comparison
+            else None
+        )
         stage = self._stage(source.mode)
         if stage == "stateful":
             if request.profile is None:
@@ -79,6 +92,8 @@ class ReplayService:
                 profile=request.profile,
                 target_name=f"stateful-replay:{request.profile.value}",
                 mode="replay_stateful",
+                equipment_source_run_id=equipment_source_run_id,
+                equipment_overrides=equipment_overrides,
             )
         elif stage == "blackbox":
             if request.target is None:
@@ -89,6 +104,8 @@ class ReplayService:
                 dataset=dataset,
                 budget=budget,
                 mode="replay_blackbox",
+                equipment_source_run_id=equipment_source_run_id,
+                equipment_overrides=equipment_overrides,
             )
         elif stage == "graybox":
             if request.target is None:
@@ -99,6 +116,8 @@ class ReplayService:
                 dataset=dataset,
                 policy=policy,
                 mode="replay_graybox",
+                equipment_source_run_id=equipment_source_run_id,
+                equipment_overrides=equipment_overrides,
             )
         else:
             raise ValueError(f"unsupported replay source mode: {source.mode}")

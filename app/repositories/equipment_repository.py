@@ -38,13 +38,10 @@ class EquipmentRepository:
                 )
                 event_type = "equipment_discovered"
                 if existing is not None and existing.checksum != package.checksum:
-                    existing.validation_status = "invalid"
-                    existing.enabled = False
-                    existing.validation_errors_json = ["immutable_version_conflict"]
                     event_type = "equipment_validation_failed"
                     results.append(
                         {
-                            **self.package_dict(existing),
+                            **package.model_dump(mode="json"),
                             "error_code": "immutable_version_conflict",
                         }
                     )
@@ -53,11 +50,16 @@ class EquipmentRepository:
                         id=str(uuid4()),
                         package_type=package.package_type.value,
                         package_id=package.package_id,
+                        name=str(package.manifest.get("name", package.package_id)),
                         version=package.version,
                         source_path=package.source_path,
+                        source_type=package.source_type,
+                        source_ref=package.source_ref,
                         checksum=package.checksum,
                         manifest_json=package.manifest,
                         trust_level=str(package.manifest.get("trust_level", "trusted_enterprise")),
+                        signature_status=package.signature_status,
+                        publisher_id=package.publisher_id,
                         enabled=(
                             package.validation_status == "valid"
                             and package.manifest.get("trust_level") == "trusted_builtin"
@@ -66,12 +68,17 @@ class EquipmentRepository:
                         validation_errors_json=package.validation_errors,
                     )
                     record.source_path = package.source_path
+                    record.name = str(package.manifest.get("name", package.package_id))
+                    record.source_type = package.source_type
+                    record.source_ref = package.source_ref
                     record.manifest_json = package.manifest
                     record.trust_level = str(
                         package.manifest.get("trust_level", "trusted_enterprise")
                     )
                     record.validation_status = package.validation_status
                     record.validation_errors_json = package.validation_errors
+                    record.signature_status = package.signature_status
+                    record.publisher_id = package.publisher_id
                     if package.validation_status != "valid":
                         record.enabled = False
                         event_type = "equipment_validation_failed"
@@ -194,6 +201,9 @@ class EquipmentRepository:
             existing = await session.scalar(
                 select(ProviderInstanceRecord).where(
                     ProviderInstanceRecord.instance_id == payload.instance_id,
+                    ProviderInstanceRecord.provider_package_id == payload.provider_package_id,
+                    ProviderInstanceRecord.provider_version == payload.provider_version,
+                    ProviderInstanceRecord.package_checksum == package["checksum"],
                     ProviderInstanceRecord.config_revision == config_revision,
                     ProviderInstanceRecord.secret_binding_revision == secret_revision,
                 )
@@ -278,6 +288,30 @@ class EquipmentRepository:
         if not instances:
             raise LookupError(f"provider instance {instance_id} not found")
         return instances[0]
+
+    async def get_provider_instance_revision(
+        self,
+        instance_id: str,
+        package_checksum: str,
+        config_revision: str,
+        secret_binding_revision: str,
+    ) -> dict[str, Any]:
+        async with self.session_factory() as session:
+            record = await session.scalar(
+                select(ProviderInstanceRecord).where(
+                    ProviderInstanceRecord.instance_id == instance_id,
+                    ProviderInstanceRecord.package_checksum == package_checksum,
+                    ProviderInstanceRecord.config_revision == config_revision,
+                    ProviderInstanceRecord.secret_binding_revision == secret_binding_revision,
+                )
+            )
+        if record is None:
+            raise LookupError(
+                f"provider instance revision {instance_id}/{package_checksum}/"
+                f"{config_revision}/"
+                f"{secret_binding_revision} not found"
+            )
+        return self.instance_dict(record)
 
     async def set_instance_enabled(self, instance_id: str, enabled: bool) -> dict[str, Any]:
         async with self.session_factory.begin() as session:
@@ -435,6 +469,17 @@ class EquipmentRepository:
                 )
             return self.execution_dict(record)
 
+    async def get_execution(self, operation_id: str) -> dict[str, Any]:
+        async with self.session_factory() as session:
+            record = await session.scalar(
+                select(EquipmentExecutionRecord).where(
+                    EquipmentExecutionRecord.operation_id == operation_id
+                )
+            )
+        if record is None:
+            raise LookupError(f"execution {operation_id} not found")
+        return self.execution_dict(record)
+
     async def create_leases(
         self,
         *,
@@ -473,6 +518,20 @@ class EquipmentRepository:
             ).all()
         return [self.lease_dict(record) for record in records]
 
+    async def list_pending_leases(self) -> list[dict[str, Any]]:
+        async with self.session_factory() as session:
+            records = (
+                await session.scalars(
+                    select(ResourceLeaseRecord)
+                    .where(ResourceLeaseRecord.status.in_(["active", "cleanup_failed"]))
+                    .order_by(
+                        ResourceLeaseRecord.run_id,
+                        ResourceLeaseRecord.created_at,
+                    )
+                )
+            ).all()
+        return [self.lease_dict(record) for record in records]
+
     async def mark_lease_cleaned(self, lease_id: str, operation_id: str) -> None:
         async with self.session_factory.begin() as session:
             lease = await session.get(ResourceLeaseRecord, lease_id)
@@ -480,12 +539,31 @@ class EquipmentRepository:
                 raise LookupError(f"resource lease {lease_id} not found")
             lease.status = "cleaned"
             lease.last_cleanup_operation_id = operation_id
+            lease.cleanup_attempts += 1
+            lease.cleanup_error = None
             lease.cleaned_at = datetime.now(UTC)
             await self._record_cleanup_event(
                 session,
                 lease,
                 operation_id=operation_id,
                 event_type="cleanup_completed",
+            )
+
+    async def mark_lease_cleanup_started(
+        self,
+        lease_id: str,
+        operation_id: str,
+    ) -> None:
+        async with self.session_factory.begin() as session:
+            lease = await session.get(ResourceLeaseRecord, lease_id)
+            if lease is None:
+                raise LookupError(f"resource lease {lease_id} not found")
+            lease.last_cleanup_operation_id = operation_id
+            await self._record_cleanup_event(
+                session,
+                lease,
+                operation_id=operation_id,
+                event_type="cleanup_started",
             )
 
     async def mark_lease_cleanup_failed(self, lease_id: str, operation_id: str, error: str) -> None:
@@ -495,6 +573,8 @@ class EquipmentRepository:
                 raise LookupError(f"resource lease {lease_id} not found")
             lease.status = "cleanup_failed"
             lease.last_cleanup_operation_id = operation_id
+            lease.cleanup_attempts += 1
+            lease.cleanup_error = error
             await self._record_cleanup_event(
                 session,
                 lease,
@@ -505,6 +585,29 @@ class EquipmentRepository:
 
     async def save_snapshot(self, values: dict[str, Any]) -> dict[str, Any]:
         async with self.session_factory.begin() as session:
+            statement = select(RunEquipmentSnapshotRecord).where(
+                RunEquipmentSnapshotRecord.run_id == values["run_id"],
+                RunEquipmentSnapshotRecord.package_type == values["package_type"],
+                RunEquipmentSnapshotRecord.package_id == values["package_id"],
+            )
+            provider_instance_id = values.get("provider_instance_id")
+            if provider_instance_id is None:
+                statement = statement.where(
+                    RunEquipmentSnapshotRecord.provider_instance_id.is_(None)
+                )
+            else:
+                statement = statement.where(
+                    RunEquipmentSnapshotRecord.provider_instance_id == provider_instance_id
+                )
+            existing = await session.scalar(statement)
+            if existing is not None:
+                if (
+                    existing.checksum != values["checksum"]
+                    or existing.config_revision != values.get("config_revision")
+                    or existing.secret_binding_revision != values.get("secret_binding_revision")
+                ):
+                    raise ValueError("immutable Run equipment snapshot conflict")
+                return self.snapshot_dict(existing)
             record = RunEquipmentSnapshotRecord(id=str(uuid4()), **values)
             session.add(record)
             await session.flush()
@@ -524,20 +627,53 @@ class EquipmentRepository:
             ).all()
         return [self.snapshot_dict(record) for record in records]
 
+    async def get_snapshot(
+        self,
+        run_id: str,
+        package_type: PackageType,
+        package_id: str,
+        *,
+        provider_instance_id: str | None = None,
+    ) -> dict[str, Any]:
+        statement = select(RunEquipmentSnapshotRecord).where(
+            RunEquipmentSnapshotRecord.run_id == run_id,
+            RunEquipmentSnapshotRecord.package_type == package_type.value,
+            RunEquipmentSnapshotRecord.package_id == package_id,
+        )
+        if provider_instance_id is None:
+            statement = statement.where(RunEquipmentSnapshotRecord.provider_instance_id.is_(None))
+        else:
+            statement = statement.where(
+                RunEquipmentSnapshotRecord.provider_instance_id == provider_instance_id
+            )
+        async with self.session_factory() as session:
+            record = await session.scalar(statement)
+        if record is None:
+            raise LookupError(
+                f"{package_type.value} snapshot {package_id} for Run {run_id} not found"
+            )
+        return self.snapshot_dict(record)
+
     @staticmethod
     def package_dict(record: EquipmentPackageRecord) -> dict[str, Any]:
         return {
             "package_type": record.package_type,
             "package_id": record.package_id,
+            "name": record.name,
             "version": record.version,
             "source_path": record.source_path,
+            "source_type": record.source_type,
+            "source_ref": record.source_ref,
             "checksum": record.checksum,
             "manifest": record.manifest_json,
             "trust_level": record.trust_level,
+            "signature_status": record.signature_status,
+            "publisher_id": record.publisher_id,
             "enabled": record.enabled,
             "validation_status": record.validation_status,
             "validation_errors": record.validation_errors_json,
             "discovered_at": record.discovered_at.isoformat(),
+            "installed_at": (record.installed_at.isoformat() if record.installed_at else None),
             "loaded_at": record.loaded_at.isoformat() if record.loaded_at else None,
         }
 
@@ -597,6 +733,8 @@ class EquipmentRepository:
             "cleanup_payload": record.cleanup_payload_ref,
             "status": record.status,
             "last_cleanup_operation_id": record.last_cleanup_operation_id,
+            "cleanup_attempts": record.cleanup_attempts,
+            "cleanup_error": record.cleanup_error,
         }
 
     @staticmethod
@@ -611,6 +749,7 @@ class EquipmentRepository:
             "manifest": record.manifest_json,
             "provider_instance_id": record.provider_instance_id,
             "config_revision": record.config_revision,
+            "config": record.config_json,
             "secret_binding_revision": record.secret_binding_revision,
             "capability_contract_id": record.capability_contract_id,
             "capability_contract_checksum": record.capability_contract_checksum,
@@ -676,6 +815,17 @@ class EquipmentRepository:
                 evidence={"operation_id": operation_id, **evidence},
             )
             return
+        creator = await session.scalar(
+            select(EquipmentExecutionRecord).where(
+                EquipmentExecutionRecord.operation_id == lease.created_by_operation_id
+            )
+        )
+        event_operation_id = f"{operation_id}:{event_type}:{lease.cleanup_attempts}"
+        existing_event = await session.scalar(
+            select(EventRecord).where(EventRecord.operation_id == event_operation_id)
+        )
+        if existing_event is not None:
+            return
         sequence = (
             await session.scalar(
                 select(func.max(EventRecord.sequence)).where(EventRecord.run_id == lease.run_id)
@@ -686,9 +836,9 @@ class EquipmentRepository:
             EventRecord(
                 id=str(uuid4()),
                 run_id=lease.run_id,
-                step_id=None,
+                step_id=creator.step_id if creator is not None else None,
                 sequence=sequence,
-                operation_id=f"{operation_id}:{event_type}:{uuid4()}",
+                operation_id=event_operation_id,
                 event_type=event_type,
                 evidence_json=evidence,
             )
