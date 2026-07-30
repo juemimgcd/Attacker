@@ -1,0 +1,20 @@
+schema_version: provider.v1
+id: http-agent-provider
+name: HTTP Agent Provider
+version: 1.0.0
+description: Invokes allowlisted HTTP agent targets without following redirects.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+entrypoint: adapter.py:HttpAgentProvider
+implements:
+  - {contract: agent.invoke.v1}
+  - {contract: agent.trace.read.v1}
+configuration: {schema_file: config.schema.json}
+runtime:
+  network:
+    required: true
+    allowed_hosts: [agent-dev.internal.example, agent-staging.internal.example]
+  timeout_seconds: 30
+  max_response_bytes: 1048576
+healthcheck: {timeout_seconds: 5}
+trust_level: trusted_builtin
+tags: [builtin, agent, http]

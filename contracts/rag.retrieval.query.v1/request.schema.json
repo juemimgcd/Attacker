@@ -1,0 +1,1 @@
+{"type":"object","required":["namespace","query"],"properties":{"namespace":{"type":"string"},"query":{"type":"string"}},"additionalProperties":false}

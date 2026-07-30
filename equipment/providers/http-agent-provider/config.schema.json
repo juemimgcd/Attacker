@@ -1,0 +1,1 @@
+{"type":"object","required":["base_url"],"properties":{"base_url":{"type":"string"},"invoke_path":{"type":"string"},"trace_path":{"type":"string"},"auth_secret_name":{"type":"string"}},"additionalProperties":false}

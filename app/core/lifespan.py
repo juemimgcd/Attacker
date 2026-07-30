@@ -5,14 +5,19 @@ from fastapi import FastAPI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from loguru import logger
 
+from app.equipment.catalog import EquipmentCatalog
+from app.equipment.runner import EquipmentRunner
 from app.infrastructure.database import Database
 from app.repositories.adaptive_repository import AdaptiveRepository
+from app.repositories.equipment_repository import EquipmentRepository
 from app.repositories.run_repository import RunRepository
 from app.repositories.stateful_repository import StatefulRepository
 from app.services.adaptive_run_service import (
     AdaptiveRunService,
     DeterministicGrayBoxRunService,
 )
+from app.services.equipment_service import EquipmentService
+from app.services.harness_service import HarnessService
 from app.services.replay_service import ReplayService
 from app.services.report_service import ReportService
 from app.services.run_service import DeterministicRunService
@@ -38,6 +43,18 @@ def create_lifespan():
         repository = RunRepository(database.session_factory)
         adaptive_repository = AdaptiveRepository(database.session_factory)
         stateful_repository = StatefulRepository(database.session_factory)
+        equipment_repository = EquipmentRepository(database.session_factory)
+        equipment_service = EquipmentService(
+            equipment_repository,
+            EquipmentCatalog(settings.equipment),
+        )
+        harness_service = HarnessService(
+            equipment_repository,
+            equipment_service,
+            EquipmentRunner(settings.equipment),
+            settings.equipment,
+        )
+        await equipment_service.reload()
         checkpoint_path = Path(settings.checkpoint.database_path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
@@ -46,6 +63,9 @@ def create_lifespan():
             app.state.run_repository = repository
             app.state.adaptive_repository = adaptive_repository
             app.state.stateful_repository = stateful_repository
+            app.state.equipment_repository = equipment_repository
+            app.state.equipment_service = equipment_service
+            app.state.harness_service = harness_service
             app.state.run_service = DeterministicRunService(repository)
             app.state.adaptive_run_service = AdaptiveRunService(
                 repository=adaptive_repository,
@@ -60,8 +80,10 @@ def create_lifespan():
                 app.state.stateful_run_service,
                 app.state.run_service,
                 app.state.deterministic_graybox_service,
+                equipment_repository,
+                repository,
             )
-            app.state.report_service = ReportService(repository)
+            app.state.report_service = ReportService(repository, equipment_repository)
             logger.info(
                 "attacker service start",
                 service=settings.app.app_name,

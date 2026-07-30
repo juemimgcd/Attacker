@@ -1,0 +1,18 @@
+schema_version: skill.v1
+id: state-poisoning-evaluator
+name: State Poisoning Evaluator
+version: 1.0.0
+description: Structured adapter for phase-three Memory and RAG state evaluation.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+entrypoint: handler.py:StatePoisoningEvaluator
+types: [evaluator]
+requires:
+  capabilities:
+    - {binding: retrieval, contract: rag.retrieval.query.v1}
+permissions: {network: false, filesystem: {read: [], write: [workspace://runs/]}}
+execution: {timeout_seconds: 30, max_steps: 1, max_provider_calls: 1, max_output_bytes: 262144}
+input_schema: input.schema.json
+output_schema: output.schema.json
+cleanup: {required: false}
+trust_level: trusted_builtin
+tags: [builtin, phase3, evaluator]

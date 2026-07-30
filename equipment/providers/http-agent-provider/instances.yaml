@@ -1,0 +1,14 @@
+- instance_id: http-agent-dev
+  display_name: HTTP Agent Development
+  environment: dev
+  config: {base_url: "https://agent-dev.internal.example", invoke_path: "/invoke", trace_path: "/traces"}
+  secret_refs: {}
+  allowed_hosts: [agent-dev.internal.example]
+  enabled: true
+- instance_id: http-agent-staging
+  display_name: HTTP Agent Staging
+  environment: staging
+  config: {base_url: "https://agent-staging.internal.example", invoke_path: "/invoke", trace_path: "/traces"}
+  secret_refs: {}
+  allowed_hosts: [agent-staging.internal.example]
+  enabled: false

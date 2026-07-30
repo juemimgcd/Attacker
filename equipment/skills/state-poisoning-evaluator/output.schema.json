@@ -1,0 +1,1 @@
+{"type":"object","required":["violated","outcome","poisoned_count"],"properties":{"violated":{"type":"boolean"},"outcome":{"type":"string"},"poisoned_count":{"type":"integer"}},"additionalProperties":false}

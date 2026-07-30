@@ -1,9 +1,13 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.schemas.equipment_schema import EquipmentReplayMode
 from app.schemas.stateful_schema import StatefulProfile
 from app.schemas.target_schema import TargetConfig
 
 
 class ReplayRunRequest(BaseModel):
+    mode: EquipmentReplayMode = EquipmentReplayMode.same_binding_rerun
+    evaluator_version: str = "core-evidence-v1"
     profile: StatefulProfile | None = None
     target: TargetConfig | None = None
+    equipment_bindings: dict[str, dict] = Field(default_factory=dict)

@@ -1,0 +1,1 @@
+{"type":"object","required":["documents"],"properties":{"documents":{"type":"array","items":{"type":"object"}}},"additionalProperties":false}

@@ -2,13 +2,19 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from app.repositories.equipment_repository import EquipmentRepository
 from app.repositories.run_repository import RunRepository
 from app.services.adaptive_observability import AdaptiveObservabilityService
 
 
 class ReportService:
-    def __init__(self, repository: RunRepository) -> None:
+    def __init__(
+        self,
+        repository: RunRepository,
+        equipment_repository: EquipmentRepository | None = None,
+    ) -> None:
         self.repository = repository
+        self.equipment_repository = equipment_repository
         self.adaptive_observability = AdaptiveObservabilityService()
 
     async def build_json(self, run_id: str) -> dict[str, Any]:
@@ -43,6 +49,8 @@ class ReportService:
             "finding_evidence_link_rate": (linked_findings / len(findings) if findings else 1.0),
         }
         rows["react_summary"] = self._react_metrics(rows)
+        if self.equipment_repository is not None:
+            rows["equipment_snapshots"] = await self.equipment_repository.list_snapshots(run_id)
         step_outcomes = Counter(step["outcome"] for step in rows["steps"])
         rows["summary"]["step_outcomes"] = dict(step_outcomes)
         if "stateful" in run["mode"]:
@@ -436,6 +444,24 @@ class ReportService:
                     "",
                 ]
             )
+        equipment_snapshots = report.get("equipment_snapshots", [])
+        if equipment_snapshots:
+            lines.extend(
+                [
+                    "## Equipment Bindings",
+                    "",
+                    "| Type | Package | Version | Checksum | Instance | Config revision |",
+                    "|---|---|---|---|---|---|",
+                ]
+            )
+            for snapshot in equipment_snapshots:
+                lines.append(
+                    f"| {snapshot['package_type']} | `{snapshot['package_id']}` | "
+                    f"`{snapshot['version']}` | `{snapshot['checksum']}` | "
+                    f"`{snapshot.get('provider_instance_id') or ''}` | "
+                    f"`{snapshot.get('config_revision') or ''}` |"
+                )
+            lines.append("")
         replay = report.get("replay")
         if replay:
             diff = replay["diff"]

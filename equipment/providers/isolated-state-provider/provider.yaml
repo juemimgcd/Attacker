@@ -1,0 +1,21 @@
+schema_version: provider.v1
+id: isolated-state-provider
+name: Isolated State Provider
+version: 1.0.0
+description: Provides deterministic test-only Memory and RAG fixture contracts.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+entrypoint: adapter.py:IsolatedStateProvider
+implements:
+  - {contract: memory.fixture.write.v1}
+  - {contract: memory.fixture.read.v1}
+  - {contract: memory.fixture.cleanup.v1}
+  - {contract: rag.document.index.v1}
+  - {contract: rag.retrieval.query.v1}
+configuration: {schema_file: config.schema.json}
+runtime:
+  network: {required: false, allowed_hosts: []}
+  timeout_seconds: 10
+  max_response_bytes: 1048576
+healthcheck: {timeout_seconds: 2}
+trust_level: trusted_builtin
+tags: [builtin, memory, rag, isolated]
