@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/attacker-logo.png" alt="Attacker logo" width="220">
+
 # Attacker
 
 ### Evidence-driven security evaluation for AI Agents
