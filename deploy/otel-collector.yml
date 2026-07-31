@@ -41,6 +41,7 @@ exporters:
 extensions:
   file_storage/attacker:
     directory: /var/lib/otel
+    create_directory: true
 
 service:
   extensions: [file_storage/attacker]

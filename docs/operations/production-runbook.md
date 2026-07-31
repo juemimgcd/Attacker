@@ -151,7 +151,7 @@ docker run --rm --entrypoint /bin/amtool \
   check-config /config/alertmanager.yml
 docker run --rm -v "$PWD/deploy:/config:ro" grafana/loki:3.5.5 \
   -config.file=/config/loki.yml -verify-config=true
-docker run --rm -v "$PWD/deploy:/config:ro" \
+docker run --rm --user 0:0 -v "$PWD/deploy:/config:ro" \
   otel/opentelemetry-collector-contrib:0.130.0 \
   validate --config=/config/otel-collector.yml
 ```

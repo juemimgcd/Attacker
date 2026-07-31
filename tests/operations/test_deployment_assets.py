@@ -54,6 +54,7 @@ def test_otel_collector_sends_structured_file_logs_to_loki() -> None:
     assert "filelog/attacker" in collector["receivers"]
     assert collector["receivers"]["filelog/attacker"]["start_at"] == "beginning"
     assert collector["exporters"]["otlphttp/loki"]["endpoint"] == "http://loki:3100/otlp"
+    assert collector["extensions"]["file_storage/attacker"]["create_directory"] is True
     logs = collector["service"]["pipelines"]["logs"]
     assert "filelog/attacker" in logs["receivers"]
     assert "otlphttp/loki" in logs["exporters"]

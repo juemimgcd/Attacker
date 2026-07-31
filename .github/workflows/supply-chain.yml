@@ -74,6 +74,7 @@ jobs:
       - name: Validate OpenTelemetry Collector configuration
         run: >-
           docker run --rm
+          --user 0:0
           -v "$PWD/deploy:/config:ro"
           otel/opentelemetry-collector-contrib:0.130.0
           validate --config=/config/otel-collector.yml
