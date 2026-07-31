@@ -1,3 +1,5 @@
+"""自适应 Planner 的候选、决策、假设、信息增益与预算数据契约。"""
+
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal, Self

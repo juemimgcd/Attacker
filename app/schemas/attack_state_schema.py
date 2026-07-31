@@ -1,3 +1,5 @@
+"""自适应运行中覆盖度、停止原因、失败计数和预算状态的数据模型。"""
+
 from decimal import Decimal
 from enum import Enum
 from typing import Self

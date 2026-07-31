@@ -1,3 +1,5 @@
+"""判断自适应 Planner 是否具备提前结束 Run 的证据条件。"""
+
 from app.schemas.adaptive_agent_schema import (
     FinishGateReason,
     FinishGateResult,
@@ -6,6 +8,8 @@ from app.schemas.attack_state_schema import CoverageStatus
 
 
 class FinishGateService:
+    """覆盖、control 与 Evidence gap 未满足时拒绝 finish 决策。"""
+
     @staticmethod
     def evaluate(
         *,

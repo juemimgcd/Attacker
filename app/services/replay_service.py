@@ -1,3 +1,5 @@
+"""基于源 Run 冻结事实重新评测，并比较稳定 Finding 集合。"""
+
 import json
 from typing import Any
 
@@ -15,6 +17,8 @@ from app.services.target_binding import canonical_target_binding
 
 
 class ReplayService:
+    """协调 same-binding 重跑、升级对比和 Evidence-only 重评。"""
+
     def __init__(
         self,
         repository: StatefulRepository,
@@ -36,6 +40,8 @@ class ReplayService:
         source_run_id: str,
         request: ReplayRunRequest,
     ) -> dict[str, Any]:
+        """创建 Replay Run；它不是原始网络流量或 Planner 轨迹回放。"""
+
         source = await self.repository.get_run(source_run_id)
         snapshots = (
             await self.equipment_repository.list_snapshots(source_run_id)
@@ -289,6 +295,8 @@ class ReplayService:
         *,
         stage: str,
     ) -> ReplayDiff:
+        """按稳定指纹计算 fixed/new/persistent/regressed 四类集合差异。"""
+
         source_rows = await self.repository.finding_rows(source_run_id)
         replay_rows = await self.repository.finding_rows(replay_run_id)
         source = {self._fingerprint(row, stage): row for row in source_rows}

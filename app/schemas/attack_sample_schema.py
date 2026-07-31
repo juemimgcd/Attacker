@@ -1,3 +1,5 @@
+"""黑盒攻击样本及数据集的受信任输入模型。"""
+
 from enum import Enum
 from typing import Literal
 

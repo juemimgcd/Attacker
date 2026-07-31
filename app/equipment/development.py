@@ -1,3 +1,5 @@
+"""装备脚手架、离线 ZIP 导入与 Contract 场景校验工具。"""
+
 from __future__ import annotations
 
 import ast

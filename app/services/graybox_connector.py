@@ -1,3 +1,5 @@
+"""灰盒 Target 连接器；在普通 HTTP 响应上保留调用耗时与幂等操作标识。"""
+
 from time import perf_counter
 from typing import Any
 
@@ -10,6 +12,8 @@ from app.services.target_connector.http_connector import HTTPTargetConnector
 
 
 class GrayBoxConnector:
+    """调用符合灰盒契约的 Agent，Trace 解析由独立适配器负责。"""
+
     def __init__(self) -> None:
         self.http_connector = HTTPTargetConnector()
 

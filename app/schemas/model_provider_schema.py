@@ -1,3 +1,5 @@
+"""Planner/Model Judge 的模型 Provider 请求、尝试记录和用量契约。"""
+
 from decimal import Decimal
 from typing import Any, Literal, Self
 

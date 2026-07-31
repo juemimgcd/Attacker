@@ -1,3 +1,5 @@
+"""构建可校验、可重建且区分可信事实与不可信观察的模型 Prompt。"""
+
 import hashlib
 import json
 import re
@@ -31,6 +33,8 @@ _PHONE_PATTERN = re.compile(r"(?<!\w)\+?\d[\d ()-]{7,}\d(?!\w)")
 
 
 def redact_sensitive_text(value: str, secret_values: set[str] | None = None) -> str:
+    """清理常见凭据/PII 形态和当前运行已知 Secret。"""
+
     redacted = value
     for secret in sorted(secret_values or (), key=len, reverse=True):
         if secret:
@@ -51,6 +55,8 @@ def redact_sensitive_text(value: str, secret_values: set[str] | None = None) -> 
 
 @dataclass(frozen=True)
 class CorePromptTemplate:
+    """Core 随代码发布的 Prompt 模板及其校验和。"""
+
     task: PromptTask
     name: str
     version: str
@@ -78,6 +84,8 @@ _CORE_TEMPLATES = {
 
 # 只从 Core 模板和已批准 Profile 构建模型输入，调用方无法覆盖 system prompt。
 class PromptGovernanceService:
+    """执行模板固定、引用校验、观察限长、脱敏和总输入预算。"""
+
     def __init__(self, profiles: list[PromptProfile] | None = None) -> None:
         selected_profiles = profiles if profiles is not None else self._default_profiles()
         self._profiles = {profile.profile_id: profile for profile in selected_profiles}
@@ -86,6 +94,8 @@ class PromptGovernanceService:
 
     # 对输入脱敏并执行条数、长度和保守 token 上限后生成可重建快照。
     def build(self, request: PromptBuildRequest) -> PromptBuildResult:
+        """生成消息与不可变快照，供模型调用和事后审计复建。"""
+
         profile = self._validate_profile(
             profile_id=request.profile_id,
             task=request.task,

@@ -1,3 +1,5 @@
+"""生成跨 Run 稳定的 Finding 指纹。"""
+
 import hashlib
 import json
 
@@ -9,6 +11,8 @@ def finding_fingerprint(
     category: str,
     is_control: bool,
 ) -> str:
+    """只编码风险语义，不包含 Run、时间或随机 Evidence ID。"""
+
     payload = {
         "case_id": case_id,
         "category": category,

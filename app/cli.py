@@ -1,3 +1,5 @@
+"""Attacker Worker、装备管理、契约测试和开发辅助命令入口。"""
+
 from __future__ import annotations
 
 import argparse

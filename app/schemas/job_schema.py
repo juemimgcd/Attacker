@@ -1,3 +1,5 @@
+"""持久 Run Job 的请求、状态和租约视图；持久 payload 禁止携带明文 Secret。"""
+
 from __future__ import annotations
 
 import re
@@ -41,6 +43,8 @@ class RunJobCreate(BaseModel):
 
     @model_validator(mode="after")
     def reject_persisted_secrets(self) -> RunJobCreate:
+        """递归拒绝常见 Secret 字段，避免凭据随重试任务长期落库。"""
+
         def walk(value: Any, path: str) -> None:
             if isinstance(value, dict):
                 for key, nested in value.items():

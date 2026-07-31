@@ -1,3 +1,5 @@
+"""受限文件与 Vault KV v2 Secret Resolver，并组装短生命周期 SecretBroker。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +17,8 @@ MAX_SECRET_BYTES = 64 * 1024
 
 
 class FileSecretResolver:
+    """只允许挂载根目录内的相对普通文件，拒绝链接、逃逸和超大 Secret。"""
+
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
@@ -44,6 +48,8 @@ class FileSecretResolver:
 
 
 class VaultKvV2SecretResolver:
+    """通过 HTTPS 读取 Vault KV v2；Token 自身不会进入业务快照。"""
+
     def __init__(
         self,
         *,
@@ -130,6 +136,8 @@ class VaultKvV2SecretResolver:
 
 
 class CompositeSecretResolver:
+    """按显式 scheme 路由引用，不猜测或回退到其他 Secret 来源。"""
+
     def __init__(self, resolvers: dict[str, SecretResolver]) -> None:
         self.resolvers = resolvers
 

@@ -1,3 +1,5 @@
+"""分层应用配置与生产安全门禁；生产配置不安全时在启动阶段直接失败。"""
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -149,11 +151,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_selected_profile(self) -> "Settings":
+        """仅对生产环境启用不可降级的配置组合校验。"""
+
         if self.app.app_env.lower() in {"production", "prod"}:
             self.validate_production()
         return self
 
     def validate_production(self) -> None:
+        """聚合全部生产配置问题后一次性拒绝启动，便于部署阶段修正。"""
+
         failures: list[str] = []
         database_url = self.database.url.lower()
         checkpoint_url = self.checkpoint.connection_string.lower()

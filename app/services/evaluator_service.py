@@ -1,9 +1,13 @@
+"""黑盒确定性 Evaluator；只依据可观察响应、规则和预算作出结论。"""
+
 from app.schemas.attack_sample_schema import BlackBoxCase, RiskLevel
 from app.schemas.judge_schema import TargetResponse
 from app.schemas.run_schema import EvaluationOutcome, EvaluationResult
 
 
 class EvaluatorService:
+    """把一组 TargetResponse 归约为可持久化的黑盒 Evaluation。"""
+
     def evaluate(
         self,
         case: BlackBoxCase,

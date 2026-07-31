@@ -1,3 +1,5 @@
+"""离线装备发现与供应链校验；在导入任何包代码前验证路径、Manifest 和信任事实。"""
+
 from __future__ import annotations
 
 import ast
@@ -125,10 +127,14 @@ class SignatureRevokedError(ValueError):
 
 
 class EquipmentCatalog:
+    """扫描 Contract/Provider/Skill/Case Pack，并计算不可变内容身份。"""
+
     def __init__(self, settings: EquipmentSettings) -> None:
         self.settings = settings
 
     def discover(self) -> list[DiscoveredPackage]:
+        """先建立有效 Contract 集，再拒绝引用未知能力的可执行包。"""
+
         contracts = self._scan_root(Path(self.settings.contracts_root), PackageType.contract)
         known_contracts = {
             package.package_id for package in contracts if package.validation_status == "valid"
@@ -183,6 +189,8 @@ class EquipmentCatalog:
         return packages
 
     def _load_package(self, path: Path, package_type: PackageType) -> DiscoveredPackage:
+        """将所有校验失败收敛为 invalid package，避免部分加载后再执行。"""
+
         errors: list[str] = []
         checksum = ""
         signature_status: SignatureStatus = "not_present"
@@ -278,6 +286,8 @@ class EquipmentCatalog:
         )
 
     def _safe_files(self, root: Path) -> list[Path]:
+        """拒绝链接、逃逸、字节码和超限目录，返回可参与哈希的稳定文件集。"""
+
         resolved_root = root.resolve()
         files: list[Path] = []
         total_bytes = 0
@@ -344,6 +354,8 @@ class EquipmentCatalog:
     def _signature_status(
         self, root: Path, checksum: str
     ) -> tuple[SignatureStatus, str | None, str | None]:
+        """验证 Ed25519 来源并应用 publisher/checksum/signature 三类撤销。"""
+
         revocations = self._revocations()
         if checksum in revocations["checksums"]:
             raise SignatureRevokedError("package checksum is revoked")

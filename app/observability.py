@@ -1,3 +1,5 @@
+"""请求关联、结构化日志、OpenTelemetry Trace 与 Prometheus 指标。"""
+
 from __future__ import annotations
 
 import os
@@ -72,6 +74,8 @@ _tracer_provider: TracerProvider | None = None
 
 
 class RequestObservabilityMiddleware(BaseHTTPMiddleware):
+    """为每个请求建立 request_id/span，并记录不含请求正文的有限指标。"""
+
     def __init__(self, app: Any, config: ObservabilitySettings) -> None:
         super().__init__(app)
         self.config = config

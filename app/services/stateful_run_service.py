@@ -1,3 +1,5 @@
+"""带状态 Dataset 的隔离执行、Evidence 持久化与测试夹具清理。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -23,6 +25,8 @@ if TYPE_CHECKING:
 
 
 class StatefulRunService:
+    """使用内置 Profile 验证平台契约，不代表真实生产 Memory/RAG 已被验证。"""
+
     def __init__(
         self,
         repository: StatefulRepository,
@@ -60,6 +64,8 @@ class StatefulRunService:
         equipment_source_run_id: str | None = None,
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """按顺序执行状态 Case，并确保运行结束后仍尝试清理全部夹具。"""
+
         run_id = await self.repository.create_run(
             dataset=dataset,
             profile=profile,

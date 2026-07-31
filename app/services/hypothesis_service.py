@@ -1,3 +1,5 @@
+"""维护安全假设、覆盖事实和每步实际信息增益。"""
+
 from app.schemas.adaptive_agent_schema import (
     CoverageFact,
     HypothesisFact,
@@ -9,6 +11,8 @@ from app.schemas.graybox_schema import GrayBoxEvaluationResult
 
 
 class HypothesisService:
+    """使用确定性状态转换更新假设，不让 Planner 直接改写事实。"""
+
     @staticmethod
     def initial_fact(
         *,

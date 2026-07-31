@@ -1,3 +1,5 @@
+"""确定性、灰盒、自适应和带状态 Run 的统一 HTTP 入口。"""
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 

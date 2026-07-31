@@ -1,3 +1,5 @@
+"""存活与就绪探针；就绪状态反映数据库、checkpoint 和运行时依赖是否可用。"""
+
 from __future__ import annotations
 
 from typing import Any

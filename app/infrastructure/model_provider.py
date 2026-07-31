@@ -1,3 +1,5 @@
+"""OpenAI-compatible 模型传输层；负责有限重试、用量和结构化错误。"""
+
 import json
 from decimal import Decimal
 from time import perf_counter
@@ -35,12 +37,16 @@ class ModelProviderError(RuntimeError):
 
 
 class ModelProvider(Protocol):
+    """Planner 与 Model Judge 共享的最小推理传输契约。"""
+
     async def infer(self, request: ModelInferenceRequest) -> ModelInferenceResult: ...
 
     async def healthcheck(self, timeout_seconds: float = 5) -> bool: ...
 
 
 class OpenAICompatibleModelProvider:
+    """执行物理模型请求；重试次数和累计耗时写入返回结果。"""
+
     def __init__(
         self,
         *,

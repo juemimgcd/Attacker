@@ -1,3 +1,5 @@
+"""Prometheus 指标导出接口，并使用独立密钥保护运维数据。"""
+
 from __future__ import annotations
 
 from hmac import compare_digest

@@ -1,3 +1,5 @@
+"""有界调用外部 HTTP Target，并把传输失败转换为结构化 TargetResponse。"""
+
 from copy import deepcopy
 from time import perf_counter
 from typing import Any
@@ -8,9 +10,9 @@ from app.schemas.judge_schema import TargetErrorType, TargetResponse
 from app.schemas.target_schema import TargetConfig
 
 
-# 负责构造请求并异步调用目标 Agent 的 HTTP 接口。
 class HTTPTargetConnector:
-    # 根据目标请求模板和攻击 prompt 构造实际请求体。
+    """构造请求模板、注入测试 Prompt，并限制响应大小和重定向行为。"""
+
     def build_request_body(
         self,
         target: TargetConfig,
@@ -42,13 +44,14 @@ class HTTPTargetConnector:
             headers[target.auth.header_name] = f"{target.auth.token_prefix} {target.auth.token}"
         return headers
 
-    # 异步调用目标 Agent 并封装请求体、响应内容、耗时和错误。
     async def call(
         self,
         target: TargetConfig,
         prompt: str,
         messages: list[dict[str, str]] | None = None,
     ) -> tuple[dict[str, Any], TargetResponse]:
+        """调用显式配置的 Target；不会从响应发现或跟随新的目标地址。"""
+
         request_body = self.build_request_body(target, prompt, messages)
         headers = self.build_headers(target)
         start = perf_counter()

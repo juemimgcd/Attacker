@@ -1,9 +1,13 @@
+"""从已持久化自适应事件计算 ReAct、覆盖、成本、失败与对照指标。"""
+
 from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any, ClassVar
 
 
 class AdaptiveObservabilityService:
+    """报告观察指标但不反向修改 Run 或安全结论。"""
+
     _gain_rank: ClassVar[dict[str, int]] = {
         "low": 1,
         "medium": 2,

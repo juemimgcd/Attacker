@@ -1,3 +1,5 @@
+"""确定性 Run 的 SQL 事实仓库，原子保存 Step、Event、Evaluation 与 Finding。"""
+
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -27,6 +29,8 @@ from app.services.finding_fingerprint import finding_fingerprint
 
 
 class RunRepository:
+    """以 operation_id 提供 Case 级幂等，并为报告返回完整事实投影。"""
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
@@ -107,6 +111,8 @@ class RunRepository:
         step_sequence: int,
         result: CaseRunResult,
     ) -> dict[str, Any]:
+        """在一个事务内提交 Step、Evidence Event 和 Finding；重复 operation 直接复用。"""
+
         existing = await self.get_case_result(operation_id)
         if existing is not None:
             return existing

@@ -1,3 +1,5 @@
+"""按装备信任级别选择 Core 进程、JSON 子进程或强容器沙箱执行。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,10 +22,12 @@ from conf.settings import EquipmentSettings
 
 
 class EquipmentProtocolError(RuntimeError):
-    pass
+    """装备进程未遵守有界 JSON stdin/stdout 协议。"""
 
 
 class EquipmentRunner:
+    """只负责隔离与协议，不授予 Capability，也不决定安全 Finding。"""
+
     def __init__(
         self,
         settings: EquipmentSettings,
@@ -42,6 +46,8 @@ class EquipmentRunner:
         timeout_seconds: float,
         secret_environment: dict[str, str] | None = None,
     ) -> Any:
+        """信任级别只决定隔离方式；Capability 授权必须在调用前完成。"""
+
         trust = TrustLevel(package["trust_level"])
         request = {
             "package_path": package["source_path"],
@@ -80,6 +86,8 @@ class EquipmentRunner:
         timeout_seconds: float,
         secret_environment: dict[str, str],
     ) -> Any:
+        """企业可信包使用有界 JSON 子进程；该边界不是恶意代码沙箱。"""
+
         project_root = Path(__file__).resolve().parents[2]
         environment = {
             "PATH": os.environ.get("PATH", ""),
@@ -145,6 +153,8 @@ class EquipmentRunner:
         timeout_seconds: float,
         secret_environment: dict[str, str],
     ) -> Any:
+        """不可信包只在 Linux 强约束容器后端可用时执行，否则安全失败。"""
+
         if (
             os.name == "nt"
             or not self.settings.allow_untrusted

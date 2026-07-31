@@ -1,3 +1,5 @@
+"""Provider 与 Skill 可见的最小 SDK；刻意不暴露数据库、全局配置和通用 Secret 读取。"""
+
 from __future__ import annotations
 
 import os
@@ -46,6 +48,8 @@ def provider_secret_scope(environment: Mapping[str, str]) -> Iterator[None]:
 
 
 class ProviderAdapter(Protocol):
+    """Provider 实现 Capability 调用与资源清理的窄协议。"""
+
     async def describe(self) -> dict: ...
 
     async def validate_config(self, config: dict) -> dict: ...
@@ -67,6 +71,8 @@ class ProviderAdapter(Protocol):
 
 
 class Skill(Protocol):
+    """Evaluator Skill 只处理结构化上下文并声明 Capability 请求。"""
+
     async def prepare(self, context: SkillContext) -> SkillPreparation: ...
 
     async def execute(self, payload: dict, context: SkillContext) -> SkillResult: ...

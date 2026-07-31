@@ -1,3 +1,5 @@
+"""创建、暂停、恢复和控制自适应/灰盒 Run，并管理瞬时运行时凭据。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
 
 @dataclass
 class AdaptiveRuntime:
+    """仅驻留内存的 Target 与 Planner 运行时对象；Secret 不进入 checkpoint。"""
+
     target: TargetConfig
     cases: dict[str, Any]
     policy: Any
@@ -50,6 +54,8 @@ class AdaptiveRuntime:
 
 
 class AdaptiveRuntimeRegistry:
+    """按 run_id 保存当前进程可用的瞬时运行时，重启后必须重新构建。"""
+
     def __init__(self) -> None:
         self._runtimes: dict[str, AdaptiveRuntime] = {}
 
@@ -67,6 +73,8 @@ class AdaptiveRuntimeRegistry:
 
 
 class AdaptiveRunService:
+    """冻结输入并驱动 LangGraph；SQL 记录事实，checkpoint 记录继续位置。"""
+
     def __init__(
         self,
         *,
@@ -85,6 +93,8 @@ class AdaptiveRunService:
         )
 
     async def start(self, request: GrayBoxRunRequest) -> dict[str, Any]:
+        """创建 Run、冻结绑定和候选宇宙，然后启动同一 thread 的图执行。"""
+
         self._validate_target(request.target)
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
         snapshot = self._redacted_target_snapshot(request.target)
@@ -216,6 +226,8 @@ class AdaptiveRunService:
         target: TargetConfig | None = None,
         planner: PlannerConfig | None = None,
     ) -> dict[str, Any]:
+        """处理审批并恢复；运行时凭据必须重新提供且与冻结绑定一致。"""
+
         run = await self.repository.get_run(run_id)
         if run.status not in {"waiting_approval", "running"}:
             raise ValueError("run is not waiting for approval")
@@ -338,6 +350,8 @@ class AdaptiveRunService:
         target_override: TargetConfig | None,
         planner_override: PlannerConfig | None,
     ) -> None:
+        """从 SQL 快照重建非 Secret 配置，并验证调用方重新提供的凭据。"""
+
         snapshot = await self.repository.load_runtime_snapshot(run_id)
         stored_target = dict(snapshot["target"])
         if target_override is None:
@@ -517,6 +531,8 @@ class AdaptiveRunService:
 
 
 class DeterministicGrayBoxRunService:
+    """固定顺序执行灰盒 Case，用作自适应模式的可比较基线。"""
+
     def __init__(
         self,
         repository: AdaptiveRepository,
