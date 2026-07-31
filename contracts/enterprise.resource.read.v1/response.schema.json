@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "required": ["resource"],
+  "properties": {
+    "resource": {
+      "type": "object",
+      "required": ["id", "name", "type", "environment", "properties"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "type": {"type": "string"},
+        "environment": {"type": "string"},
+        "properties": {
+          "type": "object",
+          "properties": {
+            "public_access": {"type": "boolean"},
+            "encryption_enabled": {"type": "boolean"},
+            "backup_enabled": {"type": "boolean"},
+            "monitoring_enabled": {"type": "boolean"},
+            "patch_age_days": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "required": ["alert_id", "pattern", "risk", "recommended_action", "reasoning"],
+  "properties": {
+    "alert_id": {"type": "string"},
+    "pattern": {"enum": ["active", "persistent", "noisy", "muted", "recovered", "unknown"]},
+    "risk": {"enum": ["low", "medium", "high"]},
+    "recommended_action": {"enum": ["investigate", "investigate_then_mute", "observe", "verify_recovery"]},
+    "reasoning": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

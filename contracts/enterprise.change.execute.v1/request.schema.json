@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "required": ["change_id", "action", "approval_reference"],
+  "properties": {
+    "change_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "action": {"type": "string", "minLength": 1, "maxLength": 100},
+    "approval_reference": {"type": "string", "minLength": 1, "maxLength": 200},
+    "parameters": {"type": "object"}
+  },
+  "additionalProperties": false
+}

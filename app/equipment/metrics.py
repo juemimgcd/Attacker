@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections import defaultdict
 from threading import Lock
 
-from app.observability import record_equipment_counter, record_equipment_duration
+from app.observability import (
+    record_equipment_counter,
+    record_equipment_duration,
+    record_equipment_invalid_packages,
+)
 
 
 class EquipmentMetrics:
@@ -30,6 +34,10 @@ class EquipmentMetrics:
             metric["total"] = float(metric["total"]) + duration_ms
             metric["max"] = max(float(metric["max"]), duration_ms)
         record_equipment_duration(name, duration_ms)
+
+    @staticmethod
+    def set_invalid_packages(value: int) -> None:
+        record_equipment_invalid_packages(value)
 
     def snapshot(self) -> dict[str, dict]:
         with self._lock:

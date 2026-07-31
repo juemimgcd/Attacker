@@ -3,20 +3,54 @@ receivers:
     protocols:
       http:
         endpoint: 0.0.0.0:4318
+  filelog/attacker:
+    include:
+      - /var/log/attacker/*.log
+    exclude:
+      - /var/log/attacker/*.gz
+    start_at: beginning
+    include_file_path: true
+    storage: file_storage/attacker
+    operators:
+      - type: json_parser
+        parse_from: body
+        on_error: send
 
 processors:
   batch:
   memory_limiter:
     check_interval: 1s
     limit_mib: 256
+  resource/attacker:
+    attributes:
+      - key: service.name
+        value: attacker
+        action: upsert
+      - key: deployment.environment.name
+        value: production
+        action: upsert
 
 exporters:
   debug:
     verbosity: basic
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+extensions:
+  file_storage/attacker:
+    directory: /var/lib/otel
+    create_directory: true
 
 service:
+  extensions: [file_storage/attacker]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [debug]
+    logs:
+      receivers: [filelog/attacker]
+      processors: [memory_limiter, resource/attacker, batch]
+      exporters: [otlphttp/loki]

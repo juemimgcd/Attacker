@@ -1,0 +1,141 @@
+groups:
+  - name: attacker-availability
+    rules:
+      - alert: AttackerMetricsTargetDown
+        expr: up{job="attacker"} == 0
+        for: 2m
+        labels: {severity: critical, service: attacker}
+        annotations:
+          summary: "Prometheus cannot scrape the Attacker API"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerReadinessUnavailable
+        expr: min by (dependency) (attacker_readiness) < 1
+        for: 5m
+        labels: {severity: critical, service: attacker}
+        annotations:
+          summary: "Attacker dependency readiness is unavailable"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerHighHttp5xxRate
+        expr: |
+          (
+            sum(rate(attacker_http_requests_total{status=~"5.."}[10m]))
+            /
+            clamp_min(sum(rate(attacker_http_requests_total[10m])), 0.001)
+          ) > 0.02
+        for: 10m
+        labels: {severity: critical, service: attacker}
+        annotations:
+          summary: "Attacker HTTP 5xx ratio exceeds 2%"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerMetricsRefreshFailed
+        expr: attacker_metrics_refresh_ready < 1
+        for: 5m
+        labels: {severity: warning, service: attacker}
+        annotations:
+          summary: "Repository-backed operational metrics are stale"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+  - name: attacker-jobs
+    rules:
+      - alert: AttackerJobQueueStalled
+        expr: attacker_job_oldest_ready_age_seconds > 120
+        for: 5m
+        labels: {severity: critical, service: attacker}
+        annotations:
+          summary: "Attacker job queue has waited more than two minutes"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerExpiredJobLease
+        expr: attacker_job_expired_leases > 0
+        for: 2m
+        labels: {severity: critical, service: attacker}
+        annotations:
+          summary: "Attacker has expired active job leases"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerStaleWorker
+        expr: attacker_worker_stale > 0
+        for: 2m
+        labels: {severity: warning, service: attacker}
+        annotations:
+          summary: "Attacker worker heartbeat is stale"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerJobFailureRate
+        expr: |
+          sum(rate(attacker_job_events_total{event="failed"}[15m]))
+          /
+          clamp_min(sum(rate(attacker_job_events_total{event=~"failed|succeeded"}[15m])), 0.001)
+          > 0.05
+        for: 15m
+        labels: {severity: warning, service: attacker}
+        annotations:
+          summary: "Attacker terminal job failure ratio exceeds 5%"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+  - name: attacker-equipment
+    rules:
+      - alert: AttackerProviderFailures
+        expr: |
+          increase(attacker_equipment_events_total{name="provider_error"}[10m]) > 0
+          or
+          (
+            attacker_equipment_events_total{name="provider_error"} > 0
+            unless
+            attacker_equipment_events_total{name="provider_error"} offset 10m
+          )
+        for: 5m
+        labels: {severity: warning, service: attacker}
+        annotations:
+          summary: "Attacker Provider calls are failing"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerCleanupFailures
+        expr: |
+          increase(attacker_equipment_events_total{name="cleanup_failure"}[10m]) > 0
+          or
+          (
+            attacker_equipment_events_total{name="cleanup_failure"} > 0
+            unless
+            attacker_equipment_events_total{name="cleanup_failure"} offset 10m
+          )
+        for: 2m
+        labels: {severity: critical, service: attacker}
+        annotations:
+          summary: "Attacker Resource Lease cleanup failed"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerPackageIntegrityFailure
+        expr: |
+          increase(attacker_equipment_events_total{name="package_checksum_mismatch"}[10m]) > 0
+          or
+          (
+            attacker_equipment_events_total{name="package_checksum_mismatch"} > 0
+            unless
+            attacker_equipment_events_total{name="package_checksum_mismatch"} offset 10m
+          )
+          or
+          attacker_equipment_invalid_packages > 0
+        for: 1m
+        labels: {severity: critical, service: attacker}
+        annotations:
+          summary: "Attacker equipment integrity validation failed"
+          runbook: "docs/operations/production-runbook.md#alert-response"
+
+      - alert: AttackerSandboxTermination
+        expr: |
+          increase(attacker_equipment_events_total{name="sandbox_termination"}[10m]) > 0
+          or
+          (
+            attacker_equipment_events_total{name="sandbox_termination"} > 0
+            unless
+            attacker_equipment_events_total{name="sandbox_termination"} offset 10m
+          )
+        for: 1m
+        labels: {severity: warning, service: attacker}
+        annotations:
+          summary: "Attacker terminated an equipment sandbox"
+          runbook: "docs/operations/production-runbook.md#alert-response"

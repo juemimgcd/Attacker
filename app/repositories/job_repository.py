@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -355,6 +355,60 @@ class JobRepository:
                 record.active_jobs = active_jobs
                 record.draining = draining
                 record.metadata_json = metadata or record.metadata_json
+
+    async def metrics_snapshot(self, *, stale_after_seconds: int) -> dict[str, Any]:
+        now = _now()
+        stale_before = now - timedelta(seconds=stale_after_seconds)
+        ready_statuses = [JobStatus.queued.value, JobStatus.retry_wait.value]
+        active_statuses = [JobStatus.leased.value, JobStatus.running.value]
+        async with self.session_factory() as session:
+            status_rows = (
+                await session.execute(
+                    select(RunJobRecord.status, func.count(RunJobRecord.id)).group_by(
+                        RunJobRecord.status
+                    )
+                )
+            ).all()
+            oldest_ready_at = await session.scalar(
+                select(func.min(RunJobRecord.available_at)).where(
+                    RunJobRecord.status.in_(ready_statuses),
+                    RunJobRecord.available_at <= now,
+                )
+            )
+            expired_leases = (
+                await session.scalar(
+                    select(func.count(RunJobRecord.id)).where(
+                        RunJobRecord.status.in_(active_statuses),
+                        RunJobRecord.lease_expires_at < now,
+                    )
+                )
+                or 0
+            )
+            stale_workers = (
+                await session.scalar(
+                    select(func.count(WorkerHeartbeatRecord.worker_id)).where(
+                        WorkerHeartbeatRecord.draining.is_(False),
+                        WorkerHeartbeatRecord.heartbeat_at < stale_before,
+                    )
+                )
+                or 0
+            )
+        if oldest_ready_at is not None and oldest_ready_at.tzinfo is None:
+            oldest_ready_at = oldest_ready_at.replace(tzinfo=UTC)
+        oldest_age = (
+            max((now - oldest_ready_at).total_seconds(), 0.0)
+            if oldest_ready_at is not None
+            else 0.0
+        )
+        return {
+            "status_counts": {
+                str(status): int(count)
+                for status, count in sorted(status_rows, key=lambda item: str(item[0]))
+            },
+            "oldest_ready_age_seconds": oldest_age,
+            "expired_leases": int(expired_leases),
+            "stale_workers": int(stale_workers),
+        }
 
     async def _lease_update(
         self,

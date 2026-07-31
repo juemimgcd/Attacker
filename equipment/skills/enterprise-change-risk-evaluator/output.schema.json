@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "required": ["change_id", "decision", "risk", "missing_controls", "reasoning"],
+  "properties": {
+    "change_id": {"type": "string"},
+    "decision": {"enum": ["allowed_for_approval", "blocked"]},
+    "risk": {"enum": ["low", "medium", "high", "critical"]},
+    "missing_controls": {"type": "array", "items": {"type": "string"}},
+    "reasoning": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

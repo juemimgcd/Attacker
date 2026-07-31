@@ -26,8 +26,13 @@ jobs:
       - run: uv sync --locked
       - run: uv run attacker equipment validate equipment/providers/http-agent-provider --type provider
       - run: uv run attacker equipment validate equipment/providers/isolated-state-provider --type provider
+      - run: uv run attacker equipment validate equipment/providers/enterprise-ops-provider --type provider
       - run: uv run attacker equipment contract-test equipment/providers/http-agent-provider --type provider
       - run: uv run attacker equipment contract-test equipment/providers/isolated-state-provider --type provider
+      - run: uv run attacker equipment contract-test equipment/providers/enterprise-ops-provider --type provider
       - run: uv run attacker equipment contract-test equipment/skills/prompt-injection-evaluator --type skill
       - run: uv run attacker equipment contract-test equipment/skills/tool-policy-trace-evaluator --type skill
       - run: uv run attacker equipment contract-test equipment/skills/state-poisoning-evaluator --type skill
+      - run: uv run attacker equipment contract-test equipment/skills/enterprise-resource-compliance-evaluator --type skill
+      - run: uv run attacker equipment contract-test equipment/skills/enterprise-alert-triage-evaluator --type skill
+      - run: uv run attacker equipment contract-test equipment/skills/enterprise-change-risk-evaluator --type skill

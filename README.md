@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/attacker-logo.png" alt="Attacker logo" width="220">
+
 # Attacker
 
 ### Evidence-driven security evaluation for AI Agents
@@ -55,7 +57,7 @@ Attacker V1 已交付三个评测阶段，共包含 **30 条攻击与安全对�
 | 带状态 Agent | 8 | Memory、RAG、身份隔离、Checkpoint |
 | **合计** | **30** | 覆盖无状态到持久状态的 Agent 风险链路 |
 
-内置装备目录同时提供 **2 个 Provider、3 个 Evaluator Skill 和 2 个 Case Pack**。本地开发默认使用 SQLite；生产模式支持 PostgreSQL、持久化 Job、受控 Secret 引用、可观测性与备份恢复。部署边界见[安全模型](#安全模型)与[生产部署](#生产部署)。
+内置装备目录同时提供 **3 个 Provider、6 个 Evaluator Skill 和 3 个 Case Pack**。企业装备参考 `atlasclaw-providers` 的分层边界，将只读数据源、确定性评估和高风险变更分开；资源合规、告警分诊和变更风险 Skill 不依赖 AtlasClaw Core。生产模式支持 PostgreSQL、持久化 Job、受控 Secret 引用、集中日志、告警路由与备份恢复。部署边界见[安全模型](#安全模型)与[生产部署](#生产部署)。
 
 ## 评测模型
 
@@ -294,8 +296,10 @@ uv run attacker skill dry-run state-poisoning-evaluator --payload '{"documents":
 - PostgreSQL SQLAlchemy 业务数据库和 PostgreSQL LangGraph checkpoint；
 - 基于数据库租约、`FOR UPDATE SKIP LOCKED`、心跳和过期恢复的持久化 Run Job；
 - `env:`（仅本地）、受限 `file:` 和 Vault KV v2 `vault:` Secret 引用；
-- request ID、结构化日志、Prometheus 指标与可选 OpenTelemetry OTLP；
-- liveness、依赖 readiness、非 root 容器及 PostgreSQL/API/worker Compose；
+- request ID、结构化日志、Prometheus 指标、Alertmanager 路由、Loki 集中日志与可选 OpenTelemetry OTLP；
+- 数据库队列/租约/Worker 聚合指标以及可执行的 SLO 告警规则；
+- Vault Agent 模板轮换；文件型 Provider Secret 在下一次调用租约自动读取新值；
+- liveness、依赖 readiness、非 root 容器及 PostgreSQL/API/worker/可观测性 Compose；
 - 校验 checksum 的 PostgreSQL 与装备归档备份、空目标恢复脚本。
 
 队列提交示例：
@@ -314,7 +318,6 @@ Durable Job 不接受 password、token、API key 等原始 Secret 字段；敏�
 - OIDC/JWT、用户体系、RBAC 和审批人组织权限；
 - PostgreSQL、Vault、入口、遥测和存储后端自身的跨可用区高可用；
 - Kubernetes/Helm、自动水平扩缩容和平台级网络策略；
-- 由本仓库直接运营的集中日志、告警后端和 Secret 自动轮换；
 - 已在目标生产环境完成的负载、混沌、渗透和灾备恢复证明。
 
 生产部署、升级、回滚、Worker 排空、SLO、告警和灾备步骤见 [Production Runbook](docs/operations/production-runbook.md)。
