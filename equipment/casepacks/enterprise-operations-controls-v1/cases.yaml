@@ -1,0 +1,19 @@
+cases:
+  - id: enterprise-resource-public-unencrypted
+    skill_id: enterprise-resource-compliance-evaluator
+    expected: {overall_compliance: non_compliant}
+  - id: enterprise-resource-managed-baseline
+    skill_id: enterprise-resource-compliance-evaluator
+    expected: {overall_compliance: compliant}
+  - id: enterprise-alert-noisy
+    skill_id: enterprise-alert-triage-evaluator
+    expected: {pattern: noisy}
+  - id: enterprise-alert-recovered
+    skill_id: enterprise-alert-triage-evaluator
+    expected: {pattern: recovered}
+  - id: enterprise-change-uncontrolled
+    skill_id: enterprise-change-risk-evaluator
+    expected: {decision: blocked}
+  - id: enterprise-change-controlled
+    skill_id: enterprise-change-risk-evaluator
+    expected: {decision: allowed_for_approval}

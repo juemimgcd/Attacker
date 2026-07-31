@@ -36,10 +36,14 @@ SourceType = Literal["builtin", "local_directory", "offline_archive"]
 IGNORED_NAMES = {"__pycache__", ".pytest_cache", ".ruff_cache", ".git", "tests"}
 CORE_BUILTIN_PACKAGES = {
     PackageType.provider: {
+        "enterprise-ops-provider",
         "http-agent-provider",
         "isolated-state-provider",
     },
     PackageType.skill: {
+        "enterprise-alert-triage-evaluator",
+        "enterprise-change-risk-evaluator",
+        "enterprise-resource-compliance-evaluator",
         "prompt-injection-evaluator",
         "state-poisoning-evaluator",
         "tool-policy-trace-evaluator",
@@ -47,10 +51,14 @@ CORE_BUILTIN_PACKAGES = {
     PackageType.casepack: {
         "attacker-baseline-v1",
         "attacker-controls-v1",
+        "enterprise-operations-controls-v1",
     },
     PackageType.contract: {
         "agent.invoke.v1",
         "agent.trace.read.v1",
+        "enterprise.alert.read.v1",
+        "enterprise.change.execute.v1",
+        "enterprise.resource.read.v1",
         "memory.fixture.cleanup.v1",
         "memory.fixture.read.v1",
         "memory.fixture.write.v1",
@@ -59,6 +67,9 @@ CORE_BUILTIN_PACKAGES = {
     },
 }
 CORE_BUILTIN_CHECKSUMS = {
+    (PackageType.provider, "enterprise-ops-provider"): (
+        "1232b7ea48cc2a0f77e3215adb9924748f212c46a44e35e874ad28fb67727414"
+    ),
     (PackageType.provider, "http-agent-provider"): (
         "aa3ddd17717ae436edf69eef33f8138bbd448258dc929b22d96aff5902333f43"
     ),
@@ -67,6 +78,15 @@ CORE_BUILTIN_CHECKSUMS = {
     ),
     (PackageType.skill, "prompt-injection-evaluator"): (
         "8f255549a752403bc4143b0f4fe532451fa625be4ce8cea448a19cb84adf727a"
+    ),
+    (PackageType.skill, "enterprise-alert-triage-evaluator"): (
+        "d3c3912c26d1e4a0ac1898c3a5400b43c3a42a874933f35d9067967398747cc5"
+    ),
+    (PackageType.skill, "enterprise-change-risk-evaluator"): (
+        "401537c266a9305ccc372a81e99055bcf94f2972c757a88bd715ce166b31ce6c"
+    ),
+    (PackageType.skill, "enterprise-resource-compliance-evaluator"): (
+        "4d80c92641a3a12c09a0d1bca7731b330ab8cc5a436f631f7f5506a3e1a02894"
     ),
     (PackageType.skill, "state-poisoning-evaluator"): (
         "db0a6d6aa677c297823209beecb64584c21d4833852028c34a0192d0153bb422"
@@ -80,11 +100,23 @@ CORE_BUILTIN_CHECKSUMS = {
     (PackageType.casepack, "attacker-controls-v1"): (
         "211817cc96368395323aad629eef61445561e5a40d0996f21c4ae6883e962e20"
     ),
+    (PackageType.casepack, "enterprise-operations-controls-v1"): (
+        "ed0d024ec9de219504bccd15322fc888f1609829343fb3277e8a3c10f191ad4e"
+    ),
     (PackageType.contract, "agent.invoke.v1"): (
         "62429b5733fd4ce1a5d1cb5b44e9a738ac1f848fa3370bbd1cf0992ad1aa6aa9"
     ),
     (PackageType.contract, "agent.trace.read.v1"): (
         "e8dbe5986a6ed2193dc129dce21ed4fb9f9f586017206cdce7658ae808eb888e"
+    ),
+    (PackageType.contract, "enterprise.alert.read.v1"): (
+        "6e8baca7e93c972efac69049c3b0e48812ab34433525b6c4e7fd7234ec105011"
+    ),
+    (PackageType.contract, "enterprise.change.execute.v1"): (
+        "154bf85d7fa81462813ba958e058f8efba15ddfb519d43cb598ce0a2ed2ccb48"
+    ),
+    (PackageType.contract, "enterprise.resource.read.v1"): (
+        "7308c452140ae79188b5f73ecd10b34a2c6e5d6c58f5cb910924782440e68401"
     ),
     (PackageType.contract, "memory.fixture.cleanup.v1"): (
         "81ddde45f25e365aa0401c3d97b2a0a75baf54dc6e0b233f824c083379ea86cb"

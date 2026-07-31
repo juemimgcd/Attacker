@@ -1,0 +1,8 @@
+scenarios:
+  - name: requests-resource-datasource
+    method: execute
+    kwargs:
+      payload: {resource_id: vm-001}
+      context: {}
+    expected:
+      status: success

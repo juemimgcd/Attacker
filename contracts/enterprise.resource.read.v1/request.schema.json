@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "required": ["resource_id"],
+  "properties": {
+    "resource_id": {"type": "string", "minLength": 1, "maxLength": 200}
+  },
+  "additionalProperties": false
+}

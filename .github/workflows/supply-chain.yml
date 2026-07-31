@@ -50,6 +50,34 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Validate production Compose model
         run: docker compose -f docker-compose.production.yml config --quiet
+      - name: Validate Prometheus alert rules
+        run: >-
+          docker run --rm
+          --entrypoint /bin/promtool
+          -v "$PWD/deploy:/config:ro"
+          prom/prometheus:v3.5.0
+          check rules /config/prometheus-alerts.yml
+      - name: Validate Alertmanager routing
+        run: >-
+          docker run --rm
+          --entrypoint /bin/amtool
+          -v "$PWD/deploy:/config:ro"
+          prom/alertmanager:v0.28.1
+          check-config /config/alertmanager.yml
+      - name: Validate Loki configuration
+        run: >-
+          docker run --rm
+          -v "$PWD/deploy:/config:ro"
+          grafana/loki:3.5.5
+          -config.file=/config/loki.yml
+          -verify-config=true
+      - name: Validate OpenTelemetry Collector configuration
+        run: >-
+          docker run --rm
+          --user 0:0
+          -v "$PWD/deploy:/config:ro"
+          otel/opentelemetry-collector-contrib:0.130.0
+          validate --config=/config/otel-collector.yml
       - name: Scan image for high and critical vulnerabilities
         uses: aquasecurity/trivy-action@v0.36.0
         with:

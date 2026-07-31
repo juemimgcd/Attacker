@@ -1,0 +1,13 @@
+scenarios:
+  - name: describes-layered-enterprise-provider
+    method: describe
+    kwargs: {}
+    expected:
+      id: enterprise-ops-provider
+      version: 1.0.0
+  - name: rejects-insecure-base-url
+    method: validate_config
+    kwargs:
+      config: {base_url: "http://enterprise.invalid", auth_secret_name: api_token}
+    expected:
+      valid: false

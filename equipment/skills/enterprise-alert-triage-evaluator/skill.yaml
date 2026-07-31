@@ -1,0 +1,18 @@
+schema_version: skill.v1
+id: enterprise-alert-triage-evaluator
+name: Enterprise Alert Triage Evaluator
+version: 1.0.0
+description: Classifies normalized enterprise alerts and recommends bounded operator actions without changing alert state.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+entrypoint: handler.py:EnterpriseAlertTriageEvaluator
+types: [evaluator]
+requires:
+  capabilities:
+    - {binding: alert, contract: enterprise.alert.read.v1}
+permissions: {network: false, filesystem: {read: [], write: []}}
+execution: {timeout_seconds: 30, max_steps: 2, max_provider_calls: 1, max_output_bytes: 262144}
+input_schema: input.schema.json
+output_schema: output.schema.json
+cleanup: {required: false}
+trust_level: trusted_builtin
+tags: [builtin, enterprise, alerting, triage]

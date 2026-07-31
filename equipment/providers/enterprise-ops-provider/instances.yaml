@@ -1,0 +1,22 @@
+- instance_id: enterprise-ops-production
+  display_name: Enterprise Operations Production
+  environment: production
+  config:
+    base_url: "https://enterprise-ops.internal.example"
+    resource_path: "/api/resources/{resource_id}"
+    alert_path: "/api/alerts/{alert_id}"
+    change_path: "/api/changes/{change_id}/execute"
+    health_path: "/health"
+    auth_secret_name: api_token
+  secret_refs: {api_token: "file:enterprise-ops/api_token"}
+  allowed_hosts: [enterprise-ops.internal.example]
+  enabled: false
+- instance_id: enterprise-ops-staging
+  display_name: Enterprise Operations Staging
+  environment: staging
+  config:
+    base_url: "https://enterprise-ops-staging.internal.example"
+    auth_secret_name: api_token
+  secret_refs: {api_token: "file:enterprise-ops/api_token"}
+  allowed_hosts: [enterprise-ops-staging.internal.example]
+  enabled: false

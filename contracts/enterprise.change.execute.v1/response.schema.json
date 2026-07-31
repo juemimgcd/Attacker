@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "required": ["change"],
+  "properties": {
+    "change": {
+      "type": "object",
+      "required": ["id", "status", "operation_id"],
+      "properties": {
+        "id": {"type": "string"},
+        "status": {"type": "string"},
+        "operation_id": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

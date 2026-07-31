@@ -9,6 +9,8 @@ import socket
 from pathlib import Path
 from typing import Any
 
+from prometheus_client import start_http_server
+
 from app.equipment.catalog import EquipmentCatalog
 from app.equipment.development import (
     contract_check,
@@ -70,6 +72,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     worker.add_argument("--concurrency", type=int, default=None)
     worker.add_argument("--poll-seconds", type=float, default=None)
+    worker.add_argument("--metrics-port", type=int, default=None)
     worker.add_argument("--once", action="store_true")
 
     config = commands.add_parser("config")
@@ -149,6 +152,12 @@ async def _run_worker(args: argparse.Namespace) -> dict[str, Any]:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     previous_handlers: dict[signal.Signals, Any] = {}
+    metrics_server = None
+    metrics_thread = None
+    if args.metrics_port is not None:
+        if not 1 <= args.metrics_port <= 65_535:
+            raise ValueError("worker metrics port must be between 1 and 65535")
+        metrics_server, metrics_thread = start_http_server(args.metrics_port)
 
     def request_stop(signum, _frame) -> None:
         loop.call_soon_threadsafe(stop_event.set)
@@ -168,6 +177,11 @@ async def _run_worker(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        if metrics_server is not None:
+            metrics_server.shutdown()
+            metrics_server.server_close()
+        if metrics_thread is not None:
+            metrics_thread.join(timeout=5)
     return {"status": "stopped", "worker_id": args.worker_id}
 
 
