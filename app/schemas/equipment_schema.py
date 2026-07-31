@@ -1,3 +1,5 @@
+"""装备 Manifest、Capability Contract、执行结果、资源租约和 Replay 绑定契约。"""
+
 from __future__ import annotations
 
 from enum import StrEnum

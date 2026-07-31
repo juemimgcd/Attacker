@@ -1,3 +1,5 @@
+"""装备目录、Provider Instance、校验、启停、健康检查与 Skill dry-run 接口。"""
+
 from __future__ import annotations
 
 from typing import Any, NoReturn

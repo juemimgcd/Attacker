@@ -1,3 +1,5 @@
+"""外部 Target 的 HTTP、鉴权和运行时凭据配置。"""
+
 from enum import Enum
 
 from pydantic import BaseModel, Field, HttpUrl

@@ -1,3 +1,5 @@
+"""仅从 SQL 业务事实构建 JSON/Markdown 报告，不读取 checkpoint 推断结果。"""
+
 from collections import Counter
 from datetime import datetime
 from typing import Any
@@ -8,6 +10,8 @@ from app.services.adaptive_observability import AdaptiveObservabilityService
 
 
 class ReportService:
+    """聚合 Run、Evidence、Finding、装备和自适应可观测指标。"""
+
     def __init__(
         self,
         repository: RunRepository,
@@ -18,6 +22,8 @@ class ReportService:
         self.adaptive_observability = AdaptiveObservabilityService()
 
     async def build_json(self, run_id: str) -> dict[str, Any]:
+        """生成机器可读报告，并保留 Evidence 缺口和清理失败等负面事实。"""
+
         rows = await self.repository.get_report_rows(run_id)
         run = rows["run"]
         findings = rows["findings"]
@@ -266,6 +272,8 @@ class ReportService:
         )
 
     async def build_markdown(self, run_id: str) -> str:
+        """把同一 JSON 事实投影为面向人工审阅的 Markdown。"""
+
         report = await self.build_json(run_id)
         summary = report["summary"]
         target = report["target"]

@@ -1,3 +1,5 @@
+"""装备包、Instance、Run 快照、Execution、Resource Lease 与审计事件仓库。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -25,6 +27,8 @@ from app.schemas.equipment_schema import DiscoveredPackage, PackageType, Provide
 
 
 class EquipmentRepository:
+    """用数据库唯一约束保证版本不可变、operation 幂等和租约清理可恢复。"""
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
@@ -361,6 +365,8 @@ class EquipmentRepository:
             record.updated_at = datetime.now(UTC)
 
     async def begin_execution(self, values: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """按 operation_id 和请求指纹开始执行；身份不明的重复项返回 in_doubt。"""
+
         operation_id = str(values["operation_id"])
         async with self.session_factory.begin() as session:
             existing = await session.scalar(
@@ -451,6 +457,8 @@ class EquipmentRepository:
         error_code: str | None,
         leases: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """在同一事务提交执行结果和 Resource Lease，避免资源存在而清理事实丢失。"""
+
         async with self.session_factory.begin() as session:
             record = await session.scalar(
                 select(EquipmentExecutionRecord).where(
@@ -884,6 +892,8 @@ class EquipmentRepository:
         provider_instance_id: str | None,
         leases: list[dict[str, Any]],
     ) -> list[ResourceLeaseRecord]:
+        """把 Provider 返回的资源声明转换为可恢复清理的数据库租约。"""
+
         if leases and provider_instance_id is None:
             raise ValueError("Resource Leases require a Provider Instance")
         if leases:

@@ -1,3 +1,5 @@
+"""组装数据库、checkpoint、仓库、服务、装备和后台恢复任务。"""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -35,6 +37,8 @@ from conf.settings import Settings, settings
 
 @dataclass(slots=True)
 class AppRuntime:
+    """持有一次应用进程的已初始化组件，并安装到 FastAPI app.state。"""
+
     database: Database
     checkpointer: Any
     run_repository: RunRepository
@@ -66,6 +70,8 @@ async def create_runtime(
     secret_broker: SecretBroker | None = None,
     recover_cleanups: bool = True,
 ) -> AsyncIterator[AppRuntime]:
+    """按依赖顺序构建运行时，并在 finally 中关闭 checkpoint、任务与数据库。"""
+
     database = Database.from_settings(config.database)
     resolved_secret_broker = secret_broker or build_secret_broker(config.secrets)
     await database.initialize()

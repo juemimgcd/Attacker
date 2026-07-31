@@ -1,3 +1,5 @@
+"""加载三阶段 YAML Dataset，校验 Case，并保存可重放的规范化快照与哈希。"""
+
 import asyncio
 import hashlib
 from pathlib import Path
@@ -12,10 +14,12 @@ from app.schemas.run_schema import LoadedDataset
 from app.schemas.stateful_schema import LoadedStatefulDataset, StatefulCase
 
 
-# 负责从样本文件中加载并校验攻击样本。
 class AttackSampleLoader:
-    # 异步从 YAML 文件读取攻击样本。
+    """兼容早期单条 AttackSample 的轻量加载器。"""
+
     async def load_from_yaml(self, path: Path | str):
+        """在线程中读取 YAML，避免阻塞异步 API 事件循环。"""
+
         return await asyncio.to_thread(self._load_from_yaml_sync, Path(path))
 
     # 在线程中同步解析 YAML 文件并转换为攻击样本模型。

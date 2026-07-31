@@ -1,3 +1,5 @@
+"""人工审批查询与决议接口；审批事实由自适应仓库持久化，路由层不做授权推断。"""
+
 from fastapi import APIRouter, HTTPException, Request
 
 from app.schemas.graybox_schema import ApprovalResolveRequest

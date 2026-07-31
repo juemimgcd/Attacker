@@ -1,3 +1,5 @@
+"""自适应 Run 的预算、停止、降级和状态迁移规则。"""
+
 from app.schemas.attack_state_schema import (
     AttackState,
     CoverageStatus,
@@ -21,6 +23,8 @@ from app.schemas.run_control_schema import (
 
 # 集中执行 Planner 无权覆盖的硬停止、软停止和降级决策。
 class RunControlService:
+    """集中决定何时继续、终止或进入 Planner 降级，避免图节点各自解释预算。"""
+
     # 只根据实际持久化收益更新无增益、重复状态和连续失败计数。
     def record_step_progress(
         self,

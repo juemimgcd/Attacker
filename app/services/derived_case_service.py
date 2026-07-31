@@ -1,3 +1,5 @@
+"""冻结并校验自适应流程生成的派生 Case，防止生成器输出绕过 Case Schema。"""
+
 import hashlib
 import json
 
@@ -6,6 +8,8 @@ from app.schemas.graybox_schema import GrayBoxCase
 
 
 class DerivedCaseService:
+    """将派生 Case 与生成器版本、输入事实和内容哈希绑定。"""
+
     @staticmethod
     def freeze(
         *,

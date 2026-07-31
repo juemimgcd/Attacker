@@ -1,3 +1,5 @@
+"""从冻结 Case 宇宙构建 Planner 可选动作，并记录所有过滤原因。"""
+
 import hashlib
 import json
 from collections.abc import Iterable
@@ -20,6 +22,8 @@ from app.schemas.graybox_schema import AttackPolicy, GrayBoxCase
 
 
 class CandidateBuilder:
+    """在模型调用前应用前置条件、重复限制、能力绑定和最坏预算过滤。"""
+
     _gain_priority: ClassVar[dict[InformationGain, int]] = {
         InformationGain.high: 3,
         InformationGain.medium: 2,
@@ -78,6 +82,8 @@ class CandidateBuilder:
         valid_test_principal_refs: set[str],
         recent_similarity_keys: tuple[str, ...] = (),
     ) -> CandidateSnapshot:
+        """生成带内容哈希的候选快照，防止 Planner 使用过期 action ID。"""
+
         candidates: list[Candidate] = []
         rejected: list[CandidateRejection] = []
         for action in sorted(actions, key=lambda item: item.action_id):

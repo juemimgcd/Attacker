@@ -1,3 +1,5 @@
+"""内置状态污染 Evaluator Skill，评估 Memory、RAG 与恢复证据。"""
+
 from app.schemas.equipment_schema import EvidenceDraft, SkillPreparation, SkillResult
 from app.schemas.stateful_schema import (
     MemoryEvidence,
@@ -9,6 +11,8 @@ from app.services.stateful_evaluator_service import StatefulEvaluatorService
 
 
 class StatePoisoningEvaluator:
+    """只消费 Core 提供的结构化状态证据，不访问外部存储。"""
+
     async def prepare(self, context: dict) -> SkillPreparation:
         return SkillPreparation()
 

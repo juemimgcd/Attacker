@@ -1,3 +1,5 @@
+"""Capability Broker：门禁、调用 Provider/Skill、持久化 Evidence，并清理资源租约。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -30,10 +32,12 @@ from conf.settings import EquipmentSettings
 
 
 class PolicyDeniedError(PermissionError):
-    pass
+    """确定性装备 Policy 拒绝，不能由 Provider 或 Skill 捕获后自行放行。"""
 
 
 class HarnessService:
+    """唯一持有 Provider 解析和 Secret 租约的 Core 执行边界。"""
+
     def __init__(
         self,
         repository: EquipmentRepository,
@@ -125,6 +129,8 @@ class HarnessService:
         run_id: str | None = None,
         step_id: str | None = None,
     ) -> dict[str, Any]:
+        """校验冻结上下文、Contract 与 Policy 后，在 Secret 租约内调用 Provider。"""
+
         effective_run_id = run_id or (context.run_id if context.run_id != "dry-run" else None)
         frozen = effective_run_id is not None
         if frozen:
@@ -441,6 +447,8 @@ class HarnessService:
         run_id: str | None = None,
         step_id: str | None = None,
     ) -> dict[str, Any]:
+        """执行 Skill 的声明式循环；Capability 请求仍由 Core 逐个门禁和落证。"""
+
         effective_run_id = run_id or (context.run_id if context.run_id != "dry-run" else None)
         if effective_run_id is not None:
             snapshot = await self.repository.get_snapshot(
@@ -745,6 +753,8 @@ class HarnessService:
         test_principal_ref: str,
         lease_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
+        """只清理已持久化 Resource Lease，并保留每次尝试和错误。"""
+
         results: list[dict[str, Any]] = []
         for lease in await self.repository.list_active_leases(run_id):
             if lease_ids is not None and lease["id"] not in lease_ids:
@@ -910,6 +920,8 @@ class HarnessService:
         return results
 
     async def recover_pending_cleanups(self) -> list[dict[str, Any]]:
+        """启动时重试 active/cleanup_failed 租约，不删除原始执行和 Finding。"""
+
         pending = await self.repository.list_pending_leases()
         groups: dict[tuple[str | None, str], set[str]] = {}
         for lease in pending:

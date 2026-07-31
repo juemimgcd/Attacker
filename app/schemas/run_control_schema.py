@@ -1,3 +1,5 @@
+"""运行暂停、取消、撤销授权和恢复校验所需的控制面模型。"""
+
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Self

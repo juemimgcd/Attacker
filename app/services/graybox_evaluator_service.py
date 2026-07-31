@@ -1,3 +1,5 @@
+"""灰盒确定性 Evaluator；根据 Tool/Policy/Approval Trace 判断内部越权。"""
+
 import json
 from collections import Counter
 
@@ -14,6 +16,8 @@ from app.schemas.judge_schema import TargetResponse
 
 
 class GrayBoxEvaluatorService:
+    """从已校验 Trace 中提取安全事实，不根据自然语言回复猜测工具行为。"""
+
     def evaluate(
         self,
         *,

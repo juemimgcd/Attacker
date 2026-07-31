@@ -1,3 +1,5 @@
+"""自适应执行前的确定性 Policy Gate。"""
+
 from app.schemas.graybox_schema import (
     AttackPolicy,
     GrayBoxCase,
@@ -7,6 +9,8 @@ from app.schemas.graybox_schema import (
 
 
 class PolicyService:
+    """根据冻结策略、预算和审批事实返回 allow/deny/approval_required。"""
+
     def evaluate(
         self,
         *,
@@ -19,6 +23,8 @@ class PolicyService:
         approval_status: str | None,
         approval_id: str | None = None,
     ) -> PolicyGateResult:
+        """模型建议不构成授权；所有可执行 Case 都必须通过此规则入口。"""
+
         if target_id not in policy.allowed_target_ids:
             return PolicyGateResult(
                 decision=ToolPolicyDecision.deny,

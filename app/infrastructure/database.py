@@ -1,3 +1,5 @@
+"""SQLAlchemy Async 引擎、会话工厂、健康检查和进程级 PostgreSQL 锁。"""
+
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,6 +21,8 @@ from conf.settings import DatabaseSettings
 
 
 class Database:
+    """管理业务事实库生命周期；生产模式由 Alembic 而非自动建表维护 Schema。"""
+
     def __init__(
         self,
         url: str,
@@ -100,6 +104,8 @@ class Database:
         *,
         timeout_seconds: float = 60,
     ) -> AsyncIterator[None]:
+        """用 PostgreSQL session advisory lock 串行化启动期全局任务。"""
+
         if self.engine.dialect.name != "postgresql":
             yield
             return

@@ -1,3 +1,5 @@
+"""内置灰盒 Evaluator Skill，把已校验 Trace 转换为结构化评测 Evidence。"""
+
 from app.schemas.equipment_schema import EvidenceDraft, SkillPreparation, SkillResult
 from app.schemas.graybox_schema import GrayBoxCase, TraceAdapterResult
 from app.schemas.judge_schema import TargetResponse
@@ -5,6 +7,8 @@ from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
 
 
 class ToolPolicyTraceEvaluator:
+    """复用 Core 灰盒规则；不直接持久化 Finding 或请求额外能力。"""
+
     async def prepare(self, context: dict) -> SkillPreparation:
         return SkillPreparation()
 

@@ -1,3 +1,5 @@
+"""单条黑盒样本的传输与 Judge 编排；正式批量 Run 由 RunService 持久化。"""
+
 from uuid import uuid4
 
 from app.schemas.attack_sample_schema import AttackSample
@@ -10,8 +12,9 @@ from app.services.target_connector.http_connector import (
 )
 
 
-# 编排一次攻击样本对目标 Agent 的执行和规则判断。
 class AttackExecutor:
+    """调用 Target 后交给 Judge，返回不含持久化副作用的单次结果。"""
+
     def __init__(
         self,
         *,

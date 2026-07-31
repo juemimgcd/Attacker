@@ -1,3 +1,5 @@
+"""内置 HTTP Agent Provider；仅访问 Provider Instance 显式批准的主机。"""
+
 from __future__ import annotations
 
 import httpx
@@ -8,6 +10,8 @@ from app.schemas.equipment_schema import EvidenceDraft, ProviderContext, Provide
 
 
 class HttpAgentProvider:
+    """在短期 Secret 作用域内调用目标，并返回有界、可脱敏的结构化 Evidence。"""
+
     async def describe(self) -> dict:
         return {"id": "http-agent-provider", "version": "1.0.0"}
 

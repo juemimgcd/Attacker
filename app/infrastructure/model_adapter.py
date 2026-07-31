@@ -1,3 +1,5 @@
+"""把受治理 Prompt 与模型 Provider 适配为 Planner 和 Model Judge 窄接口。"""
+
 import hashlib
 from typing import Protocol
 
@@ -84,6 +86,8 @@ class PlannerModelAdapter(Protocol):
 
 
 class DeterministicPlannerAdapter:
+    """不调用模型，按稳定顺序选择候选，用于流程验证和回归基线。"""
+
     provider_id = "deterministic"
     model_id = "deterministic"
     requires_provider = False
@@ -153,6 +157,8 @@ class DeterministicPlannerAdapter:
 
 
 class OpenAICompatiblePlannerAdapter:
+    """调用 OpenAI-compatible Provider，并严格校验结构化 PlannerDecision。"""
+
     requires_provider = True
 
     def __init__(
@@ -324,6 +330,8 @@ class OpenAICompatiblePlannerAdapter:
 
 
 class ProviderBackedModelJudgeAdapter:
+    """可选模型 Judge；只消费受治理输入，不能创建授权或直接写 Finding。"""
+
     def __init__(
         self,
         *,

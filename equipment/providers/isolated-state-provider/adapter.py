@@ -1,3 +1,5 @@
+"""内置隔离状态 Provider，用合成资源验证 Capability 与清理契约。"""
+
 from __future__ import annotations
 
 from app.schemas.equipment_schema import (
@@ -9,6 +11,8 @@ from app.schemas.equipment_schema import (
 
 
 class IsolatedStateProvider:
+    """返回可追踪 Resource Lease；结果不代表真实生产 Memory/RAG 安全。"""
+
     async def describe(self) -> dict:
         return {"id": "isolated-state-provider", "version": "1.0.0"}
 

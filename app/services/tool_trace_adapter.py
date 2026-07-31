@@ -1,3 +1,5 @@
+"""脱敏并校验目标返回的 Tool/Policy/Approval Trace envelope。"""
+
 from typing import Any
 
 from pydantic import ValidationError
@@ -7,6 +9,8 @@ from app.schemas.judge_schema import TargetResponse
 
 
 class ToolTraceAdapter:
+    """在 Pydantic 解析前递归脱敏，并检查 Tool call 的 Policy Evidence 完整性。"""
+
     def sanitize(
         self,
         value: Any,
@@ -23,6 +27,8 @@ class ToolTraceAdapter:
         redacted_fields: set[str],
         secret_values: set[str],
     ) -> TraceAdapterResult:
+        """Trace 缺失或引用不完整时返回显式错误，供 Evaluator 判 inconclusive。"""
+
         if not isinstance(response.body, dict):
             return TraceAdapterResult(
                 errors=["target response body is not a JSON object"],

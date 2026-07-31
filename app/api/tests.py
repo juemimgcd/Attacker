@@ -1,3 +1,5 @@
+"""本地 dry-run 调试接口；只执行单条合成攻击样本，不创建正式 Run。"""
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 

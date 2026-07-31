@@ -1,3 +1,5 @@
+"""PostgreSQL/SQLite 持久 Job 仓库，负责入队幂等、租约领取、心跳与恢复。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -37,10 +39,14 @@ def _fingerprint(kind: str, payload: dict[str, Any]) -> str:
 
 
 class JobRepository:
+    """只有当前 lease owner/token 且租约未过期的 Worker 才能提交结果。"""
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
     async def enqueue(self, request: RunJobCreate, *, default_max_attempts: int) -> dict[str, Any]:
+        """request_id 与 payload 指纹共同保证入队幂等，冲突请求不会覆盖旧任务。"""
+
         payload = request.model_dump(mode="json")
         payload_json = dict(payload["payload"])
         fingerprint = _fingerprint(request.kind.value, payload_json)
@@ -97,6 +103,8 @@ class JobRepository:
             return [self.as_dict(record) for record in records]
 
     async def recover_expired(self) -> dict[str, int]:
+        """回收过期租约；未超尝试上限的任务回队列，其余标记失败。"""
+
         now = _now()
         retried = 0
         failed = 0
@@ -132,6 +140,8 @@ class JobRepository:
         return {"retried": retried, "failed": failed}
 
     async def claim(self, *, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
+        """使用行锁和 SKIP LOCKED 领取任务，返回只能由当前 Worker 使用的 token。"""
+
         await self.recover_expired()
         now = _now()
         eligible_statuses = [JobStatus.queued.value, JobStatus.retry_wait.value]
