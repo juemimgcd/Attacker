@@ -1,3 +1,5 @@
+"""规范化并脱敏 Target 绑定，用于快照、恢复校验和 Replay 可比性判断。"""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -20,6 +22,8 @@ _REDACTED_KEYS = {
 def canonical_target_binding(
     target: TargetConfig | dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    """保留影响 Target 行为的非 Secret 字段，移除凭据值但保留鉴权形状。"""
+
     if target is None:
         return None
     snapshot = (

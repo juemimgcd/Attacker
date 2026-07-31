@@ -1,9 +1,13 @@
+"""把 Target 与 Trace 压缩为有界、不可信的 Planner observation。"""
+
 from app.schemas.adaptive_agent_schema import ObservationSource, UntrustedObservation
 from app.schemas.graybox_schema import TraceAdapterResult
 from app.schemas.judge_schema import TargetResponse
 
 
 class ObservationNormalizer:
+    """限制 observation 长度并标注来源，避免原始输出被当成控制指令。"""
+
     def __init__(self, max_summary_length: int = 2_000) -> None:
         self.max_summary_length = max_summary_length
 

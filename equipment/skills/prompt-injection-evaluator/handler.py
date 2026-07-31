@@ -1,3 +1,5 @@
+"""内置黑盒 Prompt Injection Evaluator Skill。"""
+
 from app.schemas.attack_sample_schema import BlackBoxCase
 from app.schemas.equipment_schema import EvidenceDraft, SkillPreparation, SkillResult
 from app.schemas.judge_schema import TargetResponse
@@ -5,6 +7,8 @@ from app.services.evaluator_service import EvaluatorService
 
 
 class PromptInjectionEvaluator:
+    """复用 Core 黑盒规则并返回 Evaluation 草稿，不直接创建 Finding。"""
+
     async def prepare(self, context: dict) -> SkillPreparation:
         return SkillPreparation()
 

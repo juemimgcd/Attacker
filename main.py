@@ -1,3 +1,5 @@
+"""Attacker FastAPI 应用入口；路由和资源生命周期在这里统一装配。"""
+
 from fastapi import Depends, FastAPI
 
 from app.api.approvals import router as approvals_router
@@ -14,8 +16,9 @@ from app.observability import RequestObservabilityMiddleware
 from conf.settings import settings
 
 
-# 创建并配置 FastAPI 应用，注册生命周期和业务路由。
 def create_app() -> FastAPI:
+    """创建应用并把健康探针与受 API Key 保护的业务路由分开注册。"""
+
     app = FastAPI(
         title=settings.app.app_name,
         debug=settings.app.debug,

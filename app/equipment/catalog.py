@@ -1,3 +1,5 @@
+"""离线装备发现与供应链校验；在导入任何包代码前验证路径、Manifest 和信任事实。"""
+
 from __future__ import annotations
 
 import ast
@@ -71,13 +73,13 @@ CORE_BUILTIN_CHECKSUMS = {
         "1232b7ea48cc2a0f77e3215adb9924748f212c46a44e35e874ad28fb67727414"
     ),
     (PackageType.provider, "http-agent-provider"): (
-        "aa3ddd17717ae436edf69eef33f8138bbd448258dc929b22d96aff5902333f43"
+        "73f29665f213b371d975c1054c96767dca7e61162e02147ec01749ab94958b32"
     ),
     (PackageType.provider, "isolated-state-provider"): (
-        "1f224956b5cfbdca1c17b0c4056ab2848d138948332bac45143b618a2054d2d0"
+        "3dd9c91aa105a219bebb4d718903432ee93278e5c0e8e2244f8cfe5af4bd1a69"
     ),
     (PackageType.skill, "prompt-injection-evaluator"): (
-        "8f255549a752403bc4143b0f4fe532451fa625be4ce8cea448a19cb84adf727a"
+        "9b05d0fec252a62379cd1d91a90178b8349139f0a6df1ad33212d91f3aec4a3a"
     ),
     (PackageType.skill, "enterprise-alert-triage-evaluator"): (
         "d3c3912c26d1e4a0ac1898c3a5400b43c3a42a874933f35d9067967398747cc5"
@@ -89,10 +91,10 @@ CORE_BUILTIN_CHECKSUMS = {
         "4d80c92641a3a12c09a0d1bca7731b330ab8cc5a436f631f7f5506a3e1a02894"
     ),
     (PackageType.skill, "state-poisoning-evaluator"): (
-        "db0a6d6aa677c297823209beecb64584c21d4833852028c34a0192d0153bb422"
+        "ce17ad9b1bca7dfd3a783d280f808b07b93e569badb7780c486d6c991e9fb831"
     ),
     (PackageType.skill, "tool-policy-trace-evaluator"): (
-        "272d387e0c123a73b78a188df1bc799ab74f536d34636862f6b8eda8fda09349"
+        "865e9912df78000a8df4670a1c6fb35e86182eab5c3b280646fae30a0085bffe"
     ),
     (PackageType.casepack, "attacker-baseline-v1"): (
         "41ee30050c80129e66dc0fbb586b3ddf01f00038af6e6f46f114dbbfdf90e87a"
@@ -157,10 +159,14 @@ class SignatureRevokedError(ValueError):
 
 
 class EquipmentCatalog:
+    """扫描 Contract/Provider/Skill/Case Pack，并计算不可变内容身份。"""
+
     def __init__(self, settings: EquipmentSettings) -> None:
         self.settings = settings
 
     def discover(self) -> list[DiscoveredPackage]:
+        """先建立有效 Contract 集，再拒绝引用未知能力的可执行包。"""
+
         contracts = self._scan_root(Path(self.settings.contracts_root), PackageType.contract)
         known_contracts = {
             package.package_id for package in contracts if package.validation_status == "valid"
@@ -215,6 +221,8 @@ class EquipmentCatalog:
         return packages
 
     def _load_package(self, path: Path, package_type: PackageType) -> DiscoveredPackage:
+        """将所有校验失败收敛为 invalid package，避免部分加载后再执行。"""
+
         errors: list[str] = []
         checksum = ""
         signature_status: SignatureStatus = "not_present"
@@ -310,6 +318,8 @@ class EquipmentCatalog:
         )
 
     def _safe_files(self, root: Path) -> list[Path]:
+        """拒绝链接、逃逸、字节码和超限目录，返回可参与哈希的稳定文件集。"""
+
         resolved_root = root.resolve()
         files: list[Path] = []
         total_bytes = 0
@@ -376,6 +386,8 @@ class EquipmentCatalog:
     def _signature_status(
         self, root: Path, checksum: str
     ) -> tuple[SignatureStatus, str | None, str | None]:
+        """验证 Ed25519 来源并应用 publisher/checksum/signature 三类撤销。"""
+
         revocations = self._revocations()
         if checksum in revocations["checksums"]:
             raise SignatureRevokedError("package checksum is revoked")

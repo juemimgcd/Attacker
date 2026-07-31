@@ -1,3 +1,5 @@
+"""自适应 Run 的 SQL 事实仓库，持久化候选、审批、执行、Evaluation 与 Finding。"""
+
 from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
@@ -47,6 +49,8 @@ from app.services.finding_fingerprint import finding_fingerprint
 
 
 class AdaptiveRepository:
+    """为每个 operation 提供幂等写入，并保持 run 内事件顺序和引用完整性。"""
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
@@ -256,6 +260,8 @@ class AdaptiveRepository:
         *,
         previous_snapshot_id: str | None = None,
     ) -> str:
+        """冻结本轮候选集合；Planner 决策必须引用同一 snapshot_id。"""
+
         if previous_snapshot_id and previous_snapshot_id != snapshot.snapshot_id:
             await self.append_event(
                 run_id=snapshot.run_id,
@@ -544,6 +550,8 @@ class AdaptiveRepository:
         evidence_refs: list[str],
         hypothesis_refs: list[str],
     ) -> str | None:
+        """拒绝不属于当前 Run、候选快照或事实集合的模型引用。"""
+
         async with self.session_factory() as session:
             event_rows = (
                 await session.scalars(
@@ -779,6 +787,8 @@ class AdaptiveRepository:
         case: GrayBoxCase,
         operation_id: str,
     ) -> ApprovalRecord:
+        """按 run/case 复用唯一审批事实，不允许跨 Run 借用批准。"""
+
         async with self.session_factory.begin() as session:
             existing = await session.scalar(
                 select(ApprovalRecord).where(
@@ -953,6 +963,8 @@ class AdaptiveRepository:
         response: TargetResponse,
         trace_result: TraceAdapterResult,
     ) -> list[str]:
+        """按 operation_id 幂等保存物理调用结果，供崩溃恢复时复用。"""
+
         target_operation = f"{operation_id}:target"
         async with self.session_factory.begin() as session:
             existing = await session.scalar(

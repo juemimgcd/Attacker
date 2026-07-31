@@ -1,3 +1,5 @@
+"""受治理模型调用的 Prompt 模板、消息、快照和输出边界。"""
+
 from enum import Enum
 from typing import Any
 

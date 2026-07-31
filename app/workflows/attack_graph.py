@@ -1,3 +1,5 @@
+"""受约束自适应攻击状态图；模型只选择候选，Core 掌握授权、执行和持久化。"""
+
 import hashlib
 import json
 from collections import Counter
@@ -56,6 +58,8 @@ from app.workflows.attack_state import AttackGraphState
 
 
 class AttackGraph:
+    """编排 Plan→Gate→Act→Observe→Evaluate，并把业务事实写入 SQL。"""
+
     def __init__(
         self,
         *,
@@ -77,6 +81,8 @@ class AttackGraph:
         self.graph = self._build().compile(checkpointer=checkpointer)
 
     def _build(self) -> StateGraph:
+        """声明节点和条件边；checkpoint 只负责恢复控制流位置。"""
+
         builder = StateGraph(AttackGraphState)
         builder.add_node("initialize_run", self.initialize_run)
         builder.add_node("build_candidates", self.build_candidates)
@@ -267,6 +273,8 @@ class AttackGraph:
         }
 
     async def plan_next_case(self, state: AttackGraphState) -> dict[str, Any]:
+        """让 Planner 从当前候选快照中选择 action，不接受自由生成的执行参数。"""
+
         external_stop = await self._external_stop(state)
         if external_stop is not None:
             return external_stop
@@ -620,6 +628,8 @@ class AttackGraph:
         }
 
     async def policy_gate(self, state: AttackGraphState) -> dict[str, Any]:
+        """在任何 Target 副作用前应用确定性策略、预算与审批事实。"""
+
         external_stop = await self._external_stop(state)
         if external_stop is not None:
             return external_stop
@@ -755,6 +765,8 @@ class AttackGraph:
         }
 
     async def execute(self, state: AttackGraphState) -> dict[str, Any]:
+        """使用稳定 operation_id 执行；已持久化结果在恢复时直接复用。"""
+
         external_stop = await self._external_stop(state)
         if external_stop is not None:
             return external_stop
@@ -861,6 +873,8 @@ class AttackGraph:
         return {"evaluation_event_id": event_id, "next_action": "persist"}
 
     async def persist(self, state: AttackGraphState) -> dict[str, Any]:
+        """把 Evaluation、Trace 与 Finding 写入 SQL，checkpoint 不作为事实来源。"""
+
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         operation_id = str(state["current_operation_id"])

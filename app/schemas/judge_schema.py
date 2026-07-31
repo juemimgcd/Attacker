@@ -1,3 +1,5 @@
+"""Target 响应、Evaluator 输出、冲突和校准指标的统一 Judge 契约。"""
+
 from enum import Enum
 from typing import Any, Self
 

@@ -1,3 +1,5 @@
+"""内置状态评测适配器；用隔离 SQL 夹具模拟 Memory 与 RAG 行为。"""
+
 from app.repositories.stateful_repository import StatefulRepository
 from app.schemas.stateful_schema import (
     CleanupResult,
@@ -9,6 +11,8 @@ from app.schemas.stateful_schema import (
 
 
 class MemoryAdapter:
+    """按 run/tenant/user/session/namespace 作用域写入、读取和清理 Memory 夹具。"""
+
     def __init__(self, repository: StatefulRepository) -> None:
         self.repository = repository
 
@@ -94,6 +98,8 @@ class MemoryAdapter:
 
 
 class RAGAdapter:
+    """索引合成文档并返回带 allowed/poisoned 标记的检索证据。"""
+
     def __init__(self, repository: StatefulRepository) -> None:
         self.repository = repository
 

@@ -1,3 +1,5 @@
+"""LangGraph checkpoint 后端选择；本地用 SQLite，生产用 PostgreSQL。"""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -25,6 +27,8 @@ async def open_checkpointer(
     *,
     setup_schema: bool = True,
 ) -> AsyncIterator[Any]:
+    """打开并初始化控制流存储；checkpoint 不承载业务 Evidence。"""
+
     connection_string = config.connection_string
     if connection_string.lower().startswith(
         ("postgres://", "postgresql://", "postgresql+asyncpg://", "postgres+asyncpg://")

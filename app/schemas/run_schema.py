@@ -1,3 +1,5 @@
+"""确定性黑盒 Run、预算、Evaluation、Finding 与报告的数据模型。"""
+
 from enum import Enum
 from pathlib import Path
 from typing import Any

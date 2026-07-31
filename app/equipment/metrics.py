@@ -1,3 +1,5 @@
+"""线程安全的装备执行计数与耗时聚合，并同步到全局可观测指标。"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -11,6 +13,8 @@ from app.observability import (
 
 
 class EquipmentMetrics:
+    """保存进程内调试快照；Prometheus 指标由 observability 模块导出。"""
+
     def __init__(self) -> None:
         self._counters: dict[str, int] = defaultdict(int)
         self._durations_ms: dict[str, dict[str, float | int]] = defaultdict(

@@ -1,3 +1,5 @@
+"""带状态 Case、身份作用域、状态证据和内置行为 Profile 契约。"""
+
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal

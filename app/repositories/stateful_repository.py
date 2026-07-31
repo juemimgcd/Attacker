@@ -1,3 +1,5 @@
+"""带状态评测和 Replay 的 SQL 仓库，保存夹具、快照、检索与清理证据。"""
+
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +38,8 @@ from app.schemas.stateful_schema import (
 
 
 class StatefulRepository:
+    """所有状态对象带 Run 和身份作用域，避免测试夹具跨运行泄露。"""
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
@@ -326,6 +330,8 @@ class StatefulRepository:
         )
 
     async def cleanup(self, *, run_id: str, scope_id: str, operation_id: str) -> CleanupResult:
+        """只停用指定 Run/scope 夹具，并记录范围外对象未受影响的证据。"""
+
         async with self.session_factory.begin() as session:
             existing = await session.scalar(
                 select(EventRecord).where(EventRecord.operation_id == operation_id)

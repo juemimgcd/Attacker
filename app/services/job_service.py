@@ -1,3 +1,5 @@
+"""持久 Job 分发与 Worker 循环；物理执行和租约状态由数据库协调。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +20,8 @@ from conf.settings import WorkerSettings
 
 
 class JobDispatcher:
+    """把已校验 Job payload 路由到四类 Run Service，并只返回有限结果引用。"""
+
     def __init__(
         self,
         *,
@@ -66,6 +70,8 @@ class JobDispatcher:
 
 
 class JobWorker:
+    """领取短租约、执行任务、持续心跳，并在失去租约后停止提交结果。"""
+
     def __init__(
         self,
         *,
@@ -81,6 +87,8 @@ class JobWorker:
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def run(self, stop_event: asyncio.Event, *, once: bool = False) -> None:
+        """在并发上限内领取任务；关闭时停止领取并等待已有任务收敛。"""
+
         await self.repository.recover_expired()
         await self._worker_heartbeat(draining=False)
         try:
@@ -119,6 +127,8 @@ class JobWorker:
             await self._worker_heartbeat(draining=True)
 
     async def _execute(self, job: dict[str, Any]) -> None:
+        """持有租约期间分发任务；心跳失败或取消后不再提交成功结果。"""
+
         job_id = str(job["id"])
         lease_token = str(job["lease_token"])
         heartbeat: asyncio.Task[None] | None = None

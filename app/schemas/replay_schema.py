@@ -1,3 +1,5 @@
+"""Replay 请求模型；凭据按运行时重新提供，不从历史快照恢复明文。"""
+
 from pydantic import BaseModel, Field
 
 from app.schemas.equipment_schema import EquipmentReplayMode

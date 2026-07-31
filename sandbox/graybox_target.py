@@ -1,8 +1,11 @@
+"""合成灰盒 Target，用于本地演示 Tool/Policy/Approval Trace 和幂等行为。"""
+
 from typing import Any
 
 from fastapi import FastAPI, Header
 
 app = FastAPI(title="Attacker Gray-Box Sandbox")
+# 仅用于本地验证 Idempotency-Key；进程重启后状态会丢失。
 _idempotent_responses: dict[str, dict[str, Any]] = {}
 _request_count = 0
 

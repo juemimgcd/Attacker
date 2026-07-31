@@ -1,3 +1,5 @@
+"""装备工作区、出站地址、Secret 租约、脱敏和摘要安全原语。"""
+
 from __future__ import annotations
 
 import ipaddress
@@ -34,6 +36,8 @@ def safe_workspace_path(workspace: Path, requested: str) -> Path:
 
 
 def validate_outbound_url(url: str, allowed_hosts: list[str]) -> str:
+    """同时校验主机 allowlist 与解析后的地址，阻断 metadata/本地地址 SSRF。"""
+
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Provider URL must be http(s) with a host")
@@ -108,6 +112,8 @@ def summarize(value: Any, *, max_chars: int = 4096) -> dict[str, Any]:
 
 
 class SecretLease:
+    """短生命周期明文视图；关闭后清空内存映射并禁止继续读取。"""
+
     def __init__(self, values: Mapping[str, str]) -> None:
         self._values = dict(values)
 
@@ -132,6 +138,8 @@ class SecretResolver(Protocol):
 
 
 class SecretBroker:
+    """按引用解析 Secret，并只在一次 Provider 调用作用域内出租。"""
+
     def __init__(
         self,
         backend: Mapping[str, str] | None = None,
@@ -145,6 +153,8 @@ class SecretBroker:
 
     @asynccontextmanager
     async def lease(self, secret_refs: Mapping[str, str]) -> AsyncIterator[SecretLease]:
+        """解析引用并在 finally 中销毁租约，不把明文返回给 Skill 或持久层。"""
+
         resolved: dict[str, str] = {}
         lease: SecretLease | None = None
         try:

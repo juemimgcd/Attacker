@@ -1,3 +1,5 @@
+"""装备 Catalog 的应用服务，负责注册、归档、绑定解析和 Run 快照冻结。"""
+
 from __future__ import annotations
 
 import json
@@ -21,6 +23,8 @@ from app.schemas.equipment_schema import (
 
 
 class EquipmentService:
+    """把可变部署目录转换为 Run 可引用的不可变装备事实。"""
+
     _RUN_BINDINGS: ClassVar[dict[str, dict[str, Any]]] = {
         "blackbox": {
             "skill_id": "prompt-injection-evaluator",
@@ -177,6 +181,8 @@ class EquipmentService:
         test_principal_ref: str,
         overrides: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        """冻结 Skill、Case Pack、Provider、Contract、Instance 与身份绑定。"""
+
         try:
             binding_spec = self._RUN_BINDINGS[stage]
         except KeyError as exc:
@@ -292,6 +298,8 @@ class EquipmentService:
         source_run_id: str,
         target_run_id: str,
     ) -> list[dict[str, Any]]:
+        """Replay 只克隆可按原 checksum 重新物化的历史绑定。"""
+
         source_snapshots = await self.repository.list_snapshots(source_run_id)
         if not source_snapshots:
             raise ValueError(f"source Run {source_run_id} has no equipment snapshots")

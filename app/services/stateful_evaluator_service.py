@@ -1,3 +1,5 @@
+"""根据持久状态、检索轨迹和恢复证据评估跨请求安全风险。"""
+
 from app.schemas.attack_sample_schema import RiskLevel
 from app.schemas.stateful_schema import (
     MemoryEvidence,
@@ -10,6 +12,8 @@ from app.schemas.stateful_schema import (
 
 
 class StatefulEvaluatorService:
+    """缺少所需状态证据时返回 inconclusive，不从最终文本补猜事实。"""
+
     def evaluate(
         self,
         *,

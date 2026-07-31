@@ -1,3 +1,5 @@
+"""Attacker SQL 业务事实模型；唯一约束承载幂等、顺序和绑定不变量。"""
+
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,9 +23,10 @@ def utc_now() -> datetime:
 
 
 class Base(DeclarativeBase):
-    pass
+    """所有 SQLAlchemy 业务模型的声明式基类。"""
 
 
+# Run 输入快照与顶层状态：回答“这次评测在什么条件下执行”。
 class TargetRecord(Base):
     __tablename__ = "targets"
 
@@ -84,6 +87,7 @@ class EvaluationRunRecord(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+# 执行证据与结论：operation_id 和 run 内 sequence 防止重复或乱序落证。
 class RunStepRecord(Base):
     __tablename__ = "steps"
     __table_args__ = (
@@ -160,6 +164,7 @@ class ApprovalRecord(Base):
     reason: Mapped[str | None] = mapped_column(Text)
 
 
+# 带状态评测事实：夹具、快照和检索事件共同证明跨请求行为。
 class StateFixtureRecord(Base):
     __tablename__ = "state_fixtures"
     __table_args__ = (UniqueConstraint("operation_id", name="uq_state_fixtures_operation_id"),)
@@ -230,6 +235,7 @@ class ReplayRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+# 装备供应链与执行事实：包、实例、冻结绑定、执行、租约和审计相互独立。
 class EquipmentPackageRecord(Base):
     __tablename__ = "equipment_packages"
     __table_args__ = (
@@ -388,6 +394,7 @@ class EquipmentAuditEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+# 持久任务事实：租约 owner/token/expiry 共同决定 Worker 是否仍有写入权。
 class RunJobRecord(Base):
     __tablename__ = "run_jobs"
     __table_args__ = (

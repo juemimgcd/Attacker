@@ -1,3 +1,5 @@
+"""组合传输校验、确定性规则、领域 Evaluator 与可选 Model Judge。"""
+
 from collections.abc import Callable, Iterable
 
 from app.schemas.attack_sample_schema import AttackSample, RiskLevel
@@ -19,6 +21,8 @@ ModelJudge = Callable[[AttackSample, TargetResponse, list[str]], EvaluatorResult
 
 # 按固定流水线执行确定性判断，并由 Core 聚合可选企业或模型判断。
 class JudgeEngine:
+    """以确定性 Evidence 优先原则聚合多个 Evaluator 结论。"""
+
     # 对包含正常行为、安全拒绝和真实违规的校准结果计算独立指标。
     def calibrate(
         self,

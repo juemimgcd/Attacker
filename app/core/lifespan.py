@@ -1,3 +1,5 @@
+"""FastAPI 生命周期入口；按顺序初始化日志、可观测性和完整应用运行时。"""
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,6 +12,8 @@ from conf.settings import settings
 
 
 def create_lifespan():
+    """返回应用级 lifespan，保证启动失败时也执行已初始化资源的关闭逻辑。"""
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         setup_logger()

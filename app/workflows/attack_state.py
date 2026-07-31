@@ -1,7 +1,11 @@
+"""LangGraph 控制流 State；只保存恢复所需引用、摘要、计数和停止状态。"""
+
 from typing import TypedDict
 
 
 class AttackGraphState(TypedDict):
+    """完整 Evidence 与凭据不进入 State；它们分别留在 SQL 和运行时内存。"""
+
     run_id: str
     goal_id: str
     target_id: str

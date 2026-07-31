@@ -1,3 +1,5 @@
+"""装备 JSON 协议子进程入口；从固定包路径加载一个声明的 entrypoint。"""
+
 from __future__ import annotations
 
 import asyncio

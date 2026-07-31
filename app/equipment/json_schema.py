@@ -1,10 +1,12 @@
+"""Attacker v1 支持的受限 JSON Schema 校验器，避免运行时引入宽泛动态行为。"""
+
 from __future__ import annotations
 
 from typing import Any
 
 
 class SchemaValidationError(ValueError):
-    pass
+    """表示 Schema 文档或实例不满足 Core 支持的确定性子集。"""
 
 
 def validate_json_schema_document(schema: object, *, name: str) -> dict[str, Any]:

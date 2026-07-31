@@ -1,3 +1,5 @@
+"""灰盒 Trace、自适应运行请求、Planner 恢复与人工审批的数据契约。"""
+
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path

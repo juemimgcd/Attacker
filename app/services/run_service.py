@@ -1,3 +1,5 @@
+"""确定性黑盒 Run 的数据集冻结、执行、Evidence 持久化和脱敏编排。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -48,6 +50,8 @@ _CORE_REDACTED_KEYS = {
 
 
 class DeterministicRunService:
+    """固定 Case 顺序和平台规则；不承诺外部模型输出逐字确定。"""
+
     def __init__(
         self,
         repository: RunRepository,
@@ -206,6 +210,8 @@ class DeterministicRunService:
         equipment_source_run_id: str | None = None,
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        """执行冻结数据集，并在每个 Case 后持久化可恢复审计事实。"""
+
         request = DeterministicRunRequest(target=target, budget=budget)
         self._validate_target(request)
         secret_values = self._secret_values(request.target)
@@ -332,6 +338,8 @@ class DeterministicRunService:
         started: float,
         calls_before_case: int,
     ) -> CaseRunResult:
+        """执行单个 Case，先应用预算，再保存最小充分 Evidence。"""
+
         calls: list[TargetCallEvidence] = []
         raw_responses: list[TargetResponse] = []
         redact_fields = set(case.redact_fields) | _CORE_REDACTED_KEYS
