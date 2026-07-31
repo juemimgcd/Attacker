@@ -1,0 +1,18 @@
+scenarios:
+  - name: blocks-uncontrolled-production-delete
+    method: execute
+    kwargs:
+      payload:
+        change:
+          id: change-001
+          action: delete
+          environment: production
+          resource_criticality: critical
+          blast_radius: 20
+          owner: ""
+          approval_reference: ""
+          rollback_plan: ""
+          maintenance_window: ""
+      context: {}
+    expected:
+      status: success

@@ -1,0 +1,9 @@
+schema_version: casepack.v1
+id: enterprise-operations-controls-v1
+name: Enterprise Operations Controls
+version: 1.0.0
+description: Enterprise resource posture, alert triage, and controlled-change evaluation cases.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+cases_file: cases.yaml
+required_capabilities: [enterprise.resource.read.v1, enterprise.alert.read.v1]
+tags: [builtin, enterprise, operations, compliance]

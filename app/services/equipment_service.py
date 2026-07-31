@@ -97,6 +97,7 @@ class EquipmentService:
             "invalid_count": sum(package.validation_status == "invalid" for package in packages),
         }
         if self.metrics is not None:
+            self.metrics.set_invalid_packages(result["invalid_count"])
             self.metrics.observe(
                 "equipment_discovery",
                 (perf_counter() - started) * 1000,

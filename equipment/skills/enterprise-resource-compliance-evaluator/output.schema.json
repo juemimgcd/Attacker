@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "required": ["resource_id", "overall_risk", "overall_compliance", "findings"],
+  "properties": {
+    "resource_id": {"type": "string"},
+    "overall_risk": {"enum": ["low", "medium", "high"]},
+    "overall_compliance": {"enum": ["compliant", "at_risk", "non_compliant"]},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["control", "status", "severity", "evidence", "recommendation"],
+        "properties": {
+          "control": {"type": "string"},
+          "status": {"enum": ["compliant", "at_risk", "non_compliant"]},
+          "severity": {"enum": ["low", "medium", "high"]},
+          "evidence": {"type": "string"},
+          "recommendation": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

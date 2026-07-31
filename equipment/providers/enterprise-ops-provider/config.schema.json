@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "required": ["base_url", "auth_secret_name"],
+  "properties": {
+    "base_url": {"type": "string", "pattern": "^https://"},
+    "resource_path": {"type": "string", "default": "/api/resources/{resource_id}"},
+    "alert_path": {"type": "string", "default": "/api/alerts/{alert_id}"},
+    "change_path": {"type": "string", "default": "/api/changes/{change_id}/execute"},
+    "health_path": {"type": "string", "default": "/health"},
+    "auth_secret_name": {"type": "string", "pattern": "^[A-Za-z0-9_]+$"}
+  },
+  "additionalProperties": false
+}

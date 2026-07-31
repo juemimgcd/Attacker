@@ -1,0 +1,12 @@
+schema_version: capability-contract.v1
+id: enterprise.resource.read.v1
+version: 1.0.0
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+request_schema: request.schema.json
+response_schema: response.schema.json
+side_effect: read
+risk_level: low
+idempotency: {operation_id_required: true, provider_retry: allowed}
+evidence: {required: [enterprise_resource_snapshot]}
+limits: {timeout_seconds_max: 30, response_bytes_max: 524288}
+error_codes: [resource_not_found, enterprise_response_too_large, enterprise_upstream_error, enterprise_protocol_error]

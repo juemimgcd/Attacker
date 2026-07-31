@@ -1,0 +1,3 @@
+{{- with secret "secret/data/platform/alerting/attacker" -}}
+{{ .Data.data.alert_webhook_url }}
+{{- end -}}

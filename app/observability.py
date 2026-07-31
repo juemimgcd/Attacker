@@ -50,12 +50,17 @@ READINESS = Gauge(
     "attacker_readiness",
     "Dependency readiness where 1 is ready.",
     ["dependency"],
-    multiprocess_mode="livemax",
+    multiprocess_mode="livemostrecent",
 )
 EQUIPMENT_EVENTS = Counter(
     "attacker_equipment_events_total",
     "Equipment runtime counters.",
     ["name"],
+)
+EQUIPMENT_INVALID_PACKAGES = Gauge(
+    "attacker_equipment_invalid_packages",
+    "Current equipment packages that failed catalog validation.",
+    multiprocess_mode="livemostrecent",
 )
 EQUIPMENT_DURATION = Histogram(
     "attacker_equipment_duration_seconds",
@@ -67,6 +72,54 @@ JOB_EVENTS = Counter(
     "Durable job lifecycle events.",
     ["event"],
 )
+JOB_STATE = Gauge(
+    "attacker_jobs",
+    "Current durable jobs by lifecycle status.",
+    ["status"],
+    multiprocess_mode="livemostrecent",
+)
+JOB_OLDEST_READY_AGE = Gauge(
+    "attacker_job_oldest_ready_age_seconds",
+    "Age of the oldest queued or retry-ready durable job.",
+    multiprocess_mode="livemostrecent",
+)
+JOB_EXPIRED_LEASES = Gauge(
+    "attacker_job_expired_leases",
+    "Current jobs whose active worker lease has expired.",
+    multiprocess_mode="livemostrecent",
+)
+WORKER_STALE = Gauge(
+    "attacker_worker_stale",
+    "Current non-draining workers whose heartbeat is stale.",
+    multiprocess_mode="livemostrecent",
+)
+METRICS_REFRESH_READY = Gauge(
+    "attacker_metrics_refresh_ready",
+    "Whether repository-backed operational metrics refreshed successfully.",
+    multiprocess_mode="livemostrecent",
+)
+
+JOB_STATUSES = (
+    "queued",
+    "leased",
+    "running",
+    "retry_wait",
+    "succeeded",
+    "failed",
+    "cancelled",
+)
+RULE_BOUND_EQUIPMENT_EVENTS = (
+    "provider_error",
+    "cleanup_failure",
+    "package_checksum_mismatch",
+    "sandbox_termination",
+)
+RULE_BOUND_JOB_EVENTS = ("failed", "succeeded")
+
+for _equipment_event in RULE_BOUND_EQUIPMENT_EVENTS:
+    EQUIPMENT_EVENTS.labels(name=_equipment_event)
+for _job_event in RULE_BOUND_JOB_EVENTS:
+    JOB_EVENTS.labels(event=_job_event)
 
 _tracer_provider: TracerProvider | None = None
 
@@ -160,12 +213,30 @@ def record_equipment_counter(name: str, value: int) -> None:
     EQUIPMENT_EVENTS.labels(name=name).inc(value)
 
 
+def record_equipment_invalid_packages(value: int) -> None:
+    EQUIPMENT_INVALID_PACKAGES.set(value)
+
+
 def record_equipment_duration(name: str, duration_ms: float) -> None:
     EQUIPMENT_DURATION.labels(name=name).observe(duration_ms / 1_000)
 
 
 def record_job_event(event: str) -> None:
     JOB_EVENTS.labels(event=event).inc()
+
+
+def refresh_job_metrics(snapshot: dict[str, Any]) -> None:
+    status_counts = snapshot.get("status_counts", {})
+    for status in JOB_STATUSES:
+        JOB_STATE.labels(status=status).set(float(status_counts.get(status, 0)))
+    JOB_OLDEST_READY_AGE.set(float(snapshot.get("oldest_ready_age_seconds", 0)))
+    JOB_EXPIRED_LEASES.set(float(snapshot.get("expired_leases", 0)))
+    WORKER_STALE.set(float(snapshot.get("stale_workers", 0)))
+    METRICS_REFRESH_READY.set(1)
+
+
+def record_metrics_refresh_failure() -> None:
+    METRICS_REFRESH_READY.set(0)
 
 
 def _parse_headers(raw: str | None) -> dict[str, str]:

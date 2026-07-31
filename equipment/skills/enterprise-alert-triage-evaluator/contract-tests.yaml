@@ -1,0 +1,8 @@
+scenarios:
+  - name: requests-alert-datasource
+    method: execute
+    kwargs:
+      payload: {alert_id: alert-001}
+      context: {}
+    expected:
+      status: success

@@ -123,3 +123,23 @@ uv run pytest
 ```
 
 Do not log complete Skill inputs, Provider responses, credentials, or secrets. Findings must be created by Core/evaluator logic from persisted Evidence, never directly by a Provider.
+
+## Enterprise operations reference equipment
+
+The built-in `enterprise-ops-provider` applies the reusable boundaries demonstrated by
+`atlasclaw-providers` without importing AtlasClaw or SmartCMP implementation code:
+
+- `enterprise.resource.read.v1` and `enterprise.alert.read.v1` are read-only datasource
+  contracts that normalize upstream facts before a Skill sees them.
+- `enterprise-resource-compliance-evaluator` and
+  `enterprise-alert-triage-evaluator` use a two-step Capability Broker continuation and never
+  call an external system directly.
+- `enterprise-change-risk-evaluator` is a deterministic, zero-capability evaluator. It can
+  recommend whether a proposed change is controlled, but cannot execute it.
+- `enterprise.change.execute.v1` is a separate high-risk Provider contract. Core requires the
+  capability to be in `approved_high_risk_capabilities`; a Skill or Provider cannot waive that
+  approval.
+
+Instances are disabled by default. Configure an HTTPS endpoint, keep its hostname inside both
+the Provider manifest and instance allowlists, and bind `api_token` through `file:` or `vault:`.
+The default production file reference is `file:enterprise-ops/api_token`.

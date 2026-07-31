@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "required": ["resource_id"],
+  "properties": {
+    "resource_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "max_patch_age_days": {"type": "integer", "minimum": 1, "maximum": 365, "default": 30}
+  },
+  "additionalProperties": false
+}

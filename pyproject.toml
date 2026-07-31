@@ -66,7 +66,7 @@ extend-exclude = ["**/*.md"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
-exclude = ["data", ".venv", ".worktrees"]
+exclude = ["data", ".venv", ".worktrees", ".pytest-tmp"]
 
 [tool.pytest.ini_options]
 addopts = "--basetemp=.pytest-tmp"

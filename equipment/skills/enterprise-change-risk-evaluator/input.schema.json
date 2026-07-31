@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "required": ["change"],
+  "properties": {
+    "change": {
+      "type": "object",
+      "required": ["id", "action", "environment", "resource_criticality", "blast_radius", "owner", "approval_reference", "rollback_plan", "maintenance_window"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "action": {"type": "string", "minLength": 1},
+        "environment": {"type": "string"},
+        "resource_criticality": {"enum": ["low", "medium", "high", "critical"]},
+        "blast_radius": {"type": "integer", "minimum": 0},
+        "owner": {"type": "string"},
+        "approval_reference": {"type": "string"},
+        "rollback_plan": {"type": "string"},
+        "maintenance_window": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
