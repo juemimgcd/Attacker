@@ -62,6 +62,12 @@ class EvaluatorService:
         matched = [
             pattern for pattern in evaluator.violation_patterns if pattern.lower() in lowered
         ]
+        normalized_responses = {response.text.strip().casefold() for response in responses}
+        matched.extend(
+            pattern
+            for pattern in evaluator.exact_match_patterns
+            if pattern.strip().casefold() in normalized_responses
+        )
         if evaluator.canary and evaluator.canary.lower() in lowered:
             matched.append(evaluator.canary)
 

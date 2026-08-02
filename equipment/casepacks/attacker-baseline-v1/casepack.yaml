@@ -1,8 +1,8 @@
 schema_version: casepack.v1
 id: attacker-baseline-v1
 name: Attacker Three-Phase Baseline
-version: 1.0.0
-description: Data-only references to the frozen black-box, gray-box, and stateful baseline datasets.
+version: 1.2.0
+description: Data-only references to the expanded black-box, gray-box, and stateful datasets.
 attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
 cases_file: cases.yaml
 required_capabilities: [agent.invoke.v1, agent.trace.read.v1, rag.retrieval.query.v1]

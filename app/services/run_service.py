@@ -571,14 +571,26 @@ class DeterministicRunService:
         redacted_cases: list[BlackBoxCase] = []
         for case in dataset.cases:
             case_data = case.model_dump(mode="json")
-            for field in ("name", "prompts", "expected_violation", "cleanup_steps"):
+            for field in (
+                "name",
+                "prompts",
+                "expected_violation",
+                "attack_variant",
+                "setup_requirements",
+                "cleanup_steps",
+            ):
                 case_data[field] = cls._redact(
                     case_data[field],
                     redacted_keys,
                     secret_values,
                 )
             evaluator = case_data["evaluator"]
-            for field in ("violation_patterns", "refusal_patterns", "canary"):
+            for field in (
+                "violation_patterns",
+                "exact_match_patterns",
+                "refusal_patterns",
+                "canary",
+            ):
                 evaluator[field] = cls._redact(
                     evaluator[field],
                     redacted_keys,

@@ -33,8 +33,14 @@ class CaseKind(str, Enum):
 
 class EvaluatorType(str, Enum):
     direct_prompt_injection = "direct_prompt_injection"
+    indirect_prompt_injection = "indirect_prompt_injection"
+    obfuscated_prompt_injection = "obfuscated_prompt_injection"
+    jailbreak = "jailbreak"
+    instruction_hierarchy = "instruction_hierarchy"
     system_prompt_leakage = "system_prompt_leakage"
     sensitive_data_canary = "sensitive_data_canary"
+    data_exfiltration = "data_exfiltration"
+    output_integrity = "output_integrity"
     multi_turn_pollution = "multi_turn_pollution"
     resource_consumption = "resource_consumption"
 
@@ -42,6 +48,7 @@ class EvaluatorType(str, Enum):
 class EvaluatorRules(BaseModel):
     type: EvaluatorType
     violation_patterns: list[str] = Field(default_factory=list)
+    exact_match_patterns: list[str] = Field(default_factory=list)
     refusal_patterns: list[str] = Field(
         default_factory=lambda: [
             "cannot comply",
@@ -69,6 +76,15 @@ class BlackBoxCase(BaseModel):
     expected_violation: str
     expected_outcome: Literal["violation", "refused", "safe"]
     evaluator: EvaluatorRules
+    technique_ids: list[str] = Field(default_factory=list)
+    attack_variant: str | None = None
+    delivery_mode: Literal[
+        "direct",
+        "multi_turn",
+        "embedded_untrusted_content",
+        "target_fixture",
+    ] = "direct"
+    setup_requirements: list[str] = Field(default_factory=list)
     target_capabilities: list[str] = Field(default_factory=lambda: ["http_json"])
     requires_approval: bool = False
     required_evidence: list[str] = Field(
