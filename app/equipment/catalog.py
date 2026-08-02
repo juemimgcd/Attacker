@@ -97,7 +97,7 @@ CORE_BUILTIN_CHECKSUMS = {
         "865e9912df78000a8df4670a1c6fb35e86182eab5c3b280646fae30a0085bffe"
     ),
     (PackageType.casepack, "attacker-baseline-v1"): (
-        "41ee30050c80129e66dc0fbb586b3ddf01f00038af6e6f46f114dbbfdf90e87a"
+        "59967a1993a700be3951f87ba5a18bc6a99b473771e29f71c0fbac85dcfe67db"
     ),
     (PackageType.casepack, "attacker-controls-v1"): (
         "211817cc96368395323aad629eef61445561e5a40d0996f21c4ae6883e962e20"

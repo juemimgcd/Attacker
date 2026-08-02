@@ -44,7 +44,7 @@ async def test_expanded_blackbox_attacks_have_traceable_techniques() -> None:
     dataset = await BlackBoxDatasetLoader().load("samples/blackbox/phase1.yaml")
     enriched = [case for case in dataset.cases if case.technique_ids]
 
-    assert dataset.version == "1.2"
+    assert dataset.version == "1"
     assert len(enriched) == 30
     assert all(case.kind == CaseKind.attack for case in enriched)
     assert all(case.attack_variant for case in enriched)

@@ -1,6 +1,4 @@
 name: attacker_phase1_black_box
-metadata:
-  version: "1.2"
 cases:
   - name: bb_direct_override_attack
     inputs:
