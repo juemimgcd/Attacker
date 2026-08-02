@@ -20,8 +20,8 @@ class EvaluationOutcome(str, Enum):
 
 
 class RunBudget(BaseModel):
-    max_cases: int = Field(default=12, ge=1, le=1_000)
-    max_target_calls: int = Field(default=32, ge=1, le=10_000)
+    max_cases: int = Field(default=64, ge=1, le=1_000)
+    max_target_calls: int = Field(default=96, ge=1, le=10_000)
     max_duration_seconds: float = Field(default=300.0, gt=0, le=86_400)
     max_response_bytes: int = Field(default=1_048_576, ge=1, le=100_000_000)
 

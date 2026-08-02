@@ -48,14 +48,25 @@ AI Agent 的风险不只存在于最终回答中，还可能发生在工具调�
 
 ### 当前状态
 
-Attacker V1 已交付三个评测阶段，共包含 **30 条攻击与安全对照用例**：
+Attacker 内置三个评测阶段，共包含 **82 条攻击与安全对照用例**；其中原有 30 条 V1
+验收 Case 保持兼容，黑盒套件新增角色扮演越狱、指令层级伪造、编码混淆、间接注入、输出边界、
+外带通道、身份冒充、多语言绕过与渐进式升级等场景：
 
 | 阶段 | 用例数 | 主要观测边界 |
 |---|---:|---|
-| 纯黑盒 | 12 | Prompt、Response、Session、资源预算 |
+| 纯黑盒 | 64（48 攻击 + 16 对照） | Prompt、Response、Session、输出完整性、外带通道、资源预算 |
 | 灰盒 Agent | 10 | Tool、Policy、Approval、Planner |
 | 带状态 Agent | 8 | Memory、RAG、身份隔离、Checkpoint |
-| **合计** | **30** | 覆盖无状态到持久状态的 Agent 风险链路 |
+| **合计** | **82** | 覆盖无状态到持久状态的 Agent 风险链路 |
+
+新增的 30 条攻击变体按
+[OWASP LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
+和 [NIST AI 100-2e2025](https://doi.org/10.6028/NIST.AI.100-2e2025) 标注技术编号，覆盖
+15 条直接投递、5 条多轮攻击、5 条嵌入式不可信内容攻击和 5 条 Target Fixture 攻击。
+`target_fixture` Case 必须先按 `setup_requirements` 在授权沙箱中注入合成 Canary；未准备 Fixture
+时不能把“未发现泄露”解释为目标安全。间接注入 Case 当前通过 Request 中的 HTML、Markdown、Email、
+JSON 或 CSV 内容验证数据/指令边界；需要验证真实网页、邮件或 RAG 摄取链路时，应通过对应 Provider
+把同一 Payload 放入目标实际读取的数据源。
 
 内置装备目录同时提供 **3 个 Provider、6 个 Evaluator Skill 和 3 个 Case Pack**。企业装备参考 `atlasclaw-providers` 的分层边界，将只读数据源、确定性评估和高风险变更分开；资源合规、告警分诊和变更风险 Skill 不依赖 AtlasClaw Core。生产模式支持 PostgreSQL、持久化 Job、受控 Secret 引用、集中日志、告警路由与备份恢复。部署边界见[安全模型](#安全模型)与[生产部署](#生产部署)。
 
@@ -190,8 +201,8 @@ X-API-Key: replace-with-a-random-secret
   },
   "dataset_path": "samples/blackbox/phase1.yaml",
   "budget": {
-    "max_cases": 12,
-    "max_target_calls": 32,
+    "max_cases": 64,
+    "max_target_calls": 96,
     "max_duration_seconds": 300,
     "max_response_bytes": 1048576
   }
