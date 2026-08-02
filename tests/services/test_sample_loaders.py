@@ -58,9 +58,7 @@ async def test_expanded_blackbox_attacks_have_traceable_techniques() -> None:
         "NISTAML.038",
     }
     assert all(
-        technique in allowed_techniques
-        for case in enriched
-        for technique in case.technique_ids
+        technique in allowed_techniques for case in enriched for technique in case.technique_ids
     )
     delivery_counts = {
         mode: sum(case.delivery_mode == mode for case in enriched)
@@ -78,9 +76,7 @@ async def test_expanded_blackbox_attacks_have_traceable_techniques() -> None:
         "target_fixture": 5,
     }
     assert all(
-        case.setup_requirements
-        for case in enriched
-        if case.delivery_mode == "target_fixture"
+        case.setup_requirements for case in enriched if case.delivery_mode == "target_fixture"
     )
     for case in enriched:
         if case.delivery_mode == "target_fixture":
