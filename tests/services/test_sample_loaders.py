@@ -64,12 +64,12 @@ async def test_expanded_blackbox_attacks_have_traceable_techniques() -> None:
     )
     delivery_counts = {
         mode: sum(case.delivery_mode == mode for case in enriched)
-        for mode in {
+        for mode in (
             "direct",
             "multi_turn",
             "embedded_untrusted_content",
             "target_fixture",
-        }
+        )
     }
     assert delivery_counts == {
         "direct": 15,
