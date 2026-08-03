@@ -33,6 +33,7 @@ class ReportService:
             and set(finding["evidence_event_ids"]).issubset(evidence_ids)
             for finding in findings
         )
+        step_outcomes = Counter(step["outcome"] for step in rows["steps"])
         rows["summary"] = {
             "status": run["status"],
             "total_cases": run["total_cases"],
@@ -43,6 +44,7 @@ class ReportService:
                 "safe": run["safe_count"],
                 "error": run["error_count"],
                 "budget_aborted": run["budget_aborted_count"],
+                "not_evaluable": step_outcomes.get("not_evaluable", 0),
             },
             "false_positives": run["false_positive_count"],
             "defense_overblocks": run["defense_overblock_count"],
@@ -57,7 +59,6 @@ class ReportService:
         rows["react_summary"] = self._react_metrics(rows)
         if self.equipment_repository is not None:
             rows["equipment_snapshots"] = await self.equipment_repository.list_snapshots(run_id)
-        step_outcomes = Counter(step["outcome"] for step in rows["steps"])
         rows["summary"]["step_outcomes"] = dict(step_outcomes)
         if "stateful" in run["mode"]:
             retrieval_documents = [

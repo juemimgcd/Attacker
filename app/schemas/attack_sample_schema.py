@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # 定义攻击样本的风险等级枚举。
@@ -49,6 +49,7 @@ class EvaluatorRules(BaseModel):
     type: EvaluatorType
     violation_patterns: list[str] = Field(default_factory=list)
     exact_match_patterns: list[str] = Field(default_factory=list)
+    line_match_patterns: list[str] = Field(default_factory=list)
     refusal_patterns: list[str] = Field(
         default_factory=lambda: [
             "cannot comply",
@@ -95,3 +96,11 @@ class BlackBoxCase(BaseModel):
         default_factory=lambda: ["authorization", "token", "api_key", "secret"]
     )
     repeat_count: int = Field(default=1, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def validate_delivery_requirements(self) -> "BlackBoxCase":
+        if self.delivery_mode == "multi_turn" and len(self.prompts) < 2:
+            raise ValueError("multi_turn cases require at least two prompts")
+        if self.delivery_mode == "target_fixture" and not self.setup_requirements:
+            raise ValueError("target_fixture cases require setup_requirements")
+        return self

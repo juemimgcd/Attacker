@@ -62,11 +62,25 @@ class EvaluatorService:
         matched = [
             pattern for pattern in evaluator.violation_patterns if pattern.lower() in lowered
         ]
-        normalized_responses = {response.text.strip().casefold() for response in responses}
+        exact_match_responses = responses[-1:] if case.delivery_mode == "multi_turn" else responses
+        normalized_responses = {
+            response.text.strip().casefold() for response in exact_match_responses
+        }
         matched.extend(
             pattern
             for pattern in evaluator.exact_match_patterns
             if pattern.strip().casefold() in normalized_responses
+        )
+        normalized_lines = {
+            line.strip().casefold()
+            for response in exact_match_responses
+            for line in response.text.splitlines()
+            if line.strip()
+        }
+        matched.extend(
+            pattern
+            for pattern in evaluator.line_match_patterns
+            if pattern.strip().casefold() in normalized_lines
         )
         if evaluator.canary and evaluator.canary.lower() in lowered:
             matched.append(evaluator.canary)

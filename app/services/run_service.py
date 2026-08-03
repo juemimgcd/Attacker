@@ -81,6 +81,7 @@ class DeterministicRunService:
             dataset=dataset,
             budget=request.budget,
             mode="deterministic",
+            fixture_evidence_refs=request.fixture_evidence_refs,
         )
 
     async def run_single(
@@ -209,11 +210,25 @@ class DeterministicRunService:
         mode: str,
         equipment_source_run_id: str | None = None,
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
+        fixture_evidence_refs: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """执行冻结数据集，并在每个 Case 后持久化可恢复审计事实。"""
 
-        request = DeterministicRunRequest(target=target, budget=budget)
+        request = DeterministicRunRequest(
+            target=target,
+            budget=budget,
+            fixture_evidence_refs=fixture_evidence_refs or {},
+        )
         self._validate_target(request)
+        fixture_case_ids = {
+            case.id for case in dataset.cases if case.delivery_mode == "target_fixture"
+        }
+        unknown_fixture_refs = set(request.fixture_evidence_refs) - fixture_case_ids
+        if unknown_fixture_refs:
+            raise ValueError(
+                "fixture evidence references unknown or non-fixture cases: "
+                + ", ".join(sorted(unknown_fixture_refs))
+            )
         secret_values = self._secret_values(request.target)
         target_snapshot = self._redact_target_snapshot(
             request.target,
@@ -241,6 +256,7 @@ class DeterministicRunService:
             "safe": 0,
             "error": 0,
             "budget_aborted": 0,
+            "not_evaluable": 0,
             "false_positive": 0,
             "defense_overblock": 0,
         }
@@ -253,6 +269,7 @@ class DeterministicRunService:
                 target_call_count += len(existing.get("calls", []))
                 continue
 
+            precondition_reason = self._precondition_reason(request, case)
             budget_reason = self._budget_reason(
                 request.budget,
                 started=started,
@@ -262,6 +279,13 @@ class DeterministicRunService:
             )
             if budget_reason:
                 result = self._budget_aborted_result(case, request.budget, budget_reason)
+            elif precondition_reason:
+                result = self._not_evaluable_result(
+                    case,
+                    request.budget,
+                    precondition_reason,
+                    evidence_ref=request.fixture_evidence_refs.get(case.id),
+                )
             else:
                 result = await self._execute_case(
                     request,
@@ -399,6 +423,17 @@ class DeterministicRunService:
             calls=calls,
             evaluation=evaluation,
             budget=request.budget,
+            precondition_evidence=(
+                {
+                    "fixture_preparation": self._redact(
+                        request.fixture_evidence_refs[case.id],
+                        redact_fields,
+                        secret_values,
+                    )
+                }
+                if case.id in request.fixture_evidence_refs
+                else {}
+            ),
         )
 
     @staticmethod
@@ -432,6 +467,44 @@ class DeterministicRunService:
             calls=[],
             evaluation=cls._budget_evaluation(case, reason),
             budget=budget,
+        )
+
+    def _precondition_reason(
+        self,
+        request: DeterministicRunRequest,
+        case: BlackBoxCase,
+    ) -> str | None:
+        if case.delivery_mode == "multi_turn" and not self.connector.supports_message_history(
+            request.target
+        ):
+            return "target request template does not support multi-turn message history"
+        if case.delivery_mode == "target_fixture" and case.id not in request.fixture_evidence_refs:
+            return "target fixture preparation evidence was not provided"
+        return None
+
+    @staticmethod
+    def _not_evaluable_result(
+        case: BlackBoxCase,
+        budget: RunBudget,
+        reason: str,
+        *,
+        evidence_ref: str | None,
+    ) -> CaseRunResult:
+        evidence = {"fixture_preparation": evidence_ref} if evidence_ref else {}
+        return CaseRunResult(
+            case=case,
+            outcome=EvaluationOutcome.not_evaluable,
+            calls=[],
+            evaluation=EvaluationResult(
+                outcome=EvaluationOutcome.not_evaluable,
+                violated=False,
+                risk_level=RiskLevel.low,
+                reason=reason,
+                evaluator_type=case.evaluator.type.value,
+                evidence_complete=False,
+            ),
+            budget=budget,
+            precondition_evidence=evidence,
         )
 
     @staticmethod
@@ -588,6 +661,7 @@ class DeterministicRunService:
             for field in (
                 "violation_patterns",
                 "exact_match_patterns",
+                "line_match_patterns",
                 "refusal_patterns",
                 "canary",
             ):

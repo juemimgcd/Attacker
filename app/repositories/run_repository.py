@@ -162,12 +162,17 @@ class RunRepository:
                     step_id=step.id,
                     sequence=event_sequence,
                     operation_id=f"{operation_id}:evaluation",
-                    event_type="evaluation_completed",
+                    event_type=(
+                        "evaluation_skipped"
+                        if result.outcome == EvaluationOutcome.not_evaluable
+                        else "evaluation_completed"
+                    ),
                     evidence_json={
                         "case_id": result.case.id,
                         "required_evidence": result.case.required_evidence,
                         "evaluation": result.evaluation.model_dump(mode="json"),
                         "budget": result.budget.model_dump(mode="json"),
+                        "precondition_evidence": result.precondition_evidence,
                     },
                 )
             )
