@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from pydantic import HttpUrl
 
 from app.repositories.run_repository import RunRepository
 from app.schemas.attack_sample_schema import (
@@ -86,7 +87,7 @@ def _target(*, messages: bool = True) -> TargetConfig:
         body = {"input": "{prompt}"}
     return TargetConfig(
         name="local-test",
-        endpoint="http://127.0.0.1:9000/chat",
+        endpoint=HttpUrl("http://127.0.0.1:9000/chat"),
         request_template=TargetRequestTemplate(body_template=body),
     )
 
