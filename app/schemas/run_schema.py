@@ -2,7 +2,7 @@
 
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,7 @@ class EvaluationOutcome(str, Enum):
     safe = "safe"
     error = "error"
     budget_aborted = "budget_aborted"
+    not_evaluable = "not_evaluable"
 
 
 class RunBudget(BaseModel):
@@ -30,6 +31,10 @@ class DeterministicRunRequest(BaseModel):
     target: TargetConfig
     dataset_path: str = "samples/blackbox/phase1.yaml"
     case_ids: list[str] | None = None
+    fixture_evidence_refs: dict[
+        str,
+        Annotated[str, Field(min_length=1, max_length=500)],
+    ] = Field(default_factory=dict)
     budget: RunBudget = Field(default_factory=RunBudget)
 
 
@@ -54,6 +59,7 @@ class CaseRunResult(BaseModel):
     calls: list[TargetCallEvidence]
     evaluation: EvaluationResult
     budget: RunBudget
+    precondition_evidence: dict[str, str] = Field(default_factory=dict)
 
 
 class LoadedDataset(BaseModel):

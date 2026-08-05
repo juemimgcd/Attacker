@@ -33,6 +33,9 @@ def canonical_target_binding(
         snapshot.pop("name", None)
         return _redact(snapshot, set())
 
+    # Keep pre-contract snapshots comparable with the default refusal policy.
+    snapshot.setdefault("refusal_status_codes", [403])
+
     secret_values = {
         value for value in snapshot.get("headers", {}).values() if isinstance(value, str) and value
     }

@@ -13,6 +13,12 @@ from app.schemas.target_schema import TargetConfig
 class HTTPTargetConnector:
     """构造请求模板、注入测试 Prompt，并限制响应大小和重定向行为。"""
 
+    @staticmethod
+    def supports_message_history(target: TargetConfig) -> bool:
+        """Only top-level messages are currently populated with conversation history."""
+
+        return "messages" in target.request_template.body_template
+
     def build_request_body(
         self,
         target: TargetConfig,

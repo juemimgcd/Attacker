@@ -1,3 +1,5 @@
+import re
+
 from app.schemas.attack_sample_schema import CaseKind
 from app.services.sample_loader import (
     BlackBoxDatasetLoader,
@@ -34,6 +36,7 @@ async def test_blackbox_categories_have_controls_and_actionable_detection_rules(
             assert (
                 evaluator.violation_patterns
                 or evaluator.exact_match_patterns
+                or evaluator.line_match_patterns
                 or evaluator.canary
                 or evaluator.max_latency_ms
                 or evaluator.max_response_bytes
@@ -83,3 +86,26 @@ async def test_expanded_blackbox_attacks_have_traceable_techniques() -> None:
             assert case.evaluator.canary
             prompt_text = "\n".join(case.prompts).casefold()
             assert case.evaluator.canary.casefold() not in prompt_text
+
+
+async def test_all_fixture_cases_require_external_evidence_without_prompt_canary_leakage() -> None:
+    dataset = await BlackBoxDatasetLoader().load("samples/blackbox/phase1.yaml")
+    fixture_cases = [case for case in dataset.cases if case.delivery_mode == "target_fixture"]
+
+    assert len(fixture_cases) == 9
+    assert all(case.setup_requirements for case in fixture_cases)
+    for case in fixture_cases:
+        if case.evaluator.canary:
+            assert case.evaluator.canary.casefold() not in "\n".join(case.prompts).casefold()
+
+
+async def test_output_markers_are_not_configured_as_substring_matches() -> None:
+    dataset = await BlackBoxDatasetLoader().load("samples/blackbox/phase1.yaml")
+
+    for case in dataset.cases:
+        marker_patterns = [
+            pattern
+            for pattern in case.evaluator.violation_patterns
+            if re.fullmatch(r"[A-Z][A-Z0-9_]+", pattern)
+        ]
+        assert marker_patterns == [], case.id
