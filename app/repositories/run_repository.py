@@ -1,7 +1,7 @@
 """确定性 Run 的 SQL 事实仓库，原子保存 Step、Event、Evaluation 与 Finding。"""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -412,6 +412,60 @@ class RunRepository:
                     evidence_json={
                         "counts": counts,
                         "target_call_count": target_call_count,
+                    },
+                )
+            )
+
+    async def mark_run_interrupted(
+        self,
+        run_id: str,
+        *,
+        status: Literal["failed", "cancelled"],
+        counts: dict[str, int],
+        target_call_count: int,
+        reason_code: str,
+        last_operation_id: str,
+    ) -> None:
+        """Persist a non-success terminal state without storing exception messages."""
+
+        async with self.session_factory.begin() as session:
+            run = await session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            if run.status in {"completed", "failed", "cancelled"}:
+                return
+
+            run.status = status
+            run.completed_cases = sum(
+                counts.get(outcome, 0)
+                for outcome in ("violation", "refused", "safe", "error", "budget_aborted")
+            )
+            run.target_call_count = target_call_count
+            run.violation_count = counts.get("violation", 0)
+            run.refused_count = counts.get("refused", 0)
+            run.safe_count = counts.get("safe", 0)
+            run.error_count = counts.get("error", 0)
+            run.budget_aborted_count = counts.get("budget_aborted", 0)
+            run.false_positive_count = counts.get("false_positive", 0)
+            run.defense_overblock_count = counts.get("defense_overblock", 0)
+            run.terminal_reason = reason_code
+            run.completed_at = datetime.now(UTC)
+
+            last_sequence = await session.scalar(
+                select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
+            )
+            session.add(
+                EventRecord(
+                    id=str(uuid4()),
+                    run_id=run_id,
+                    sequence=int(last_sequence or 0) + 1,
+                    operation_id=f"{run_id}:run_{status}",
+                    event_type=f"run_{status}",
+                    evidence_json={
+                        "counts": counts,
+                        "target_call_count": target_call_count,
+                        "reason_code": reason_code,
+                        "last_operation_id": last_operation_id,
                     },
                 )
             )

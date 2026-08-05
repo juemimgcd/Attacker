@@ -221,6 +221,13 @@ X-API-Key: replace-with-a-random-secret
 历史。仅接受单个 `prompt` 或 `input` 的自定义模板无法证明多轮攻击结果，对应 Case 会记录为
 `not_evaluable`。
 
+Target 的 `refusal_status_codes` 默认仅包含 `403`。`400`、`401`、`404`、`409`、`422`、`429`
+等未声明状态会记录为证据不完整的 `error`，不会被误计为安全拒绝；如果目标使用其他状态表达安全
+拒绝，应在 Target 配置中显式声明，例如 `"refusal_status_codes":[403,409]`。
+
+确定性 Run 在执行、持久化或装备冻结阶段失败时会进入 `failed` 终态；任务被取消时进入
+`cancelled`。审计事件只保存异常类型和最后一个 operation，不持久化可能包含凭据的异常消息。
+
 ### 启动自适应灰盒评测
 
 ```http

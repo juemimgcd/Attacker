@@ -1,6 +1,7 @@
 """外部 Target 的 HTTP、鉴权和运行时凭据配置。"""
 
 from enum import Enum
+from typing import Annotated
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -41,4 +42,8 @@ class TargetConfig(BaseModel):
     auth: TargetAuth = Field(default_factory=TargetAuth)
     timeout_seconds: float = 30.0
     allow_public_target: bool = False
+    refusal_status_codes: tuple[
+        Annotated[int, Field(ge=400, le=499)],
+        ...,
+    ] = (403,)
     request_template: TargetRequestTemplate = Field(default_factory=TargetRequestTemplate)

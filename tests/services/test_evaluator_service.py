@@ -141,6 +141,31 @@ def test_evaluator_classifies_observable_outcomes(
     assert result.violated is (expected == EvaluationOutcome.violation)
 
 
+@pytest.mark.parametrize("status_code", [400, 401, 404, 409, 422, 429])
+def test_unconfigured_client_errors_do_not_count_as_safe_refusals(status_code: int) -> None:
+    result = EvaluatorService().evaluate(
+        _case(exact_match_patterns=["JAILBREAK_ACCEPTED"]),
+        [_response("JAILBREAK_ACCEPTED", status_code=status_code)],
+        max_response_bytes=4096,
+    )
+
+    assert result.outcome == EvaluationOutcome.error
+    assert result.evidence_complete is False
+    assert result.reason == f"target returned non-refusal client status {status_code}"
+
+
+def test_target_contract_can_configure_a_different_refusal_status() -> None:
+    result = EvaluatorService().evaluate(
+        _case(),
+        [_response(status_code=409)],
+        max_response_bytes=4096,
+        refusal_status_codes=(409,),
+    )
+
+    assert result.outcome == EvaluationOutcome.refused
+    assert result.reason == "target returned configured refusal status 409"
+
+
 def test_evaluator_enforces_the_stricter_case_response_limit() -> None:
     case = _case(max_response_bytes=64)
 

@@ -5,9 +5,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+from asyncio import CancelledError
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+from loguru import logger
 
 from app.repositories.run_repository import RunRepository
 from app.schemas.attack_sample_schema import (
@@ -131,38 +134,58 @@ class DeterministicRunService:
             budget=budget,
             mode="deterministic",
         )
-        await self._freeze_equipment(run_id, target)
-        raw_result = await self.attack_executor.run_once(target=target, sample=sample)
-        result = self._redact_attack_result(
-            raw_result,
-            redacted_keys,
-            secret_values,
-        )
-        await self.repository.record_layered_result(
-            run_id=run_id,
-            operation_id=f"{run_id}:{sample.id}",
-            case=persisted_dataset.cases[0],
-            result=result,
-        )
-        outcome = {
-            EvaluationVerdict.violation: EvaluationOutcome.violation,
-            EvaluationVerdict.safe: EvaluationOutcome.safe,
-            EvaluationVerdict.inconclusive: EvaluationOutcome.error,
-        }[result.judge_result.verdict]
-        counts = {
-            "violation": int(outcome == EvaluationOutcome.violation),
-            "refused": 0,
-            "safe": int(outcome == EvaluationOutcome.safe),
-            "error": int(outcome == EvaluationOutcome.error),
-            "budget_aborted": 0,
-            "false_positive": 0,
-            "defense_overblock": 0,
-        }
-        await self.repository.finalize_run(
-            run_id,
-            counts=counts,
-            target_call_count=1,
-        )
+        counts = self._empty_counts()
+        target_call_count = 0
+        current_operation_id = f"{run_id}:freeze_equipment"
+        try:
+            await self._freeze_equipment(run_id, target)
+            current_operation_id = f"{run_id}:{sample.id}:execute"
+            raw_result = await self.attack_executor.run_once(target=target, sample=sample)
+            target_call_count = 1
+            result = self._redact_attack_result(
+                raw_result,
+                redacted_keys,
+                secret_values,
+            )
+            current_operation_id = f"{run_id}:{sample.id}:persist"
+            await self.repository.record_layered_result(
+                run_id=run_id,
+                operation_id=f"{run_id}:{sample.id}",
+                case=persisted_dataset.cases[0],
+                result=result,
+            )
+            outcome = {
+                EvaluationVerdict.violation: EvaluationOutcome.violation,
+                EvaluationVerdict.safe: EvaluationOutcome.safe,
+                EvaluationVerdict.inconclusive: EvaluationOutcome.error,
+            }[result.judge_result.verdict]
+            counts[outcome.value] = 1
+            current_operation_id = f"{run_id}:finalize"
+            await self.repository.finalize_run(
+                run_id,
+                counts=counts,
+                target_call_count=target_call_count,
+            )
+        except CancelledError as exc:
+            await self._mark_run_interrupted(
+                run_id,
+                status="cancelled",
+                counts=counts,
+                target_call_count=target_call_count,
+                operation_id=current_operation_id,
+                exc=exc,
+            )
+            raise
+        except Exception as exc:
+            await self._mark_run_interrupted(
+                run_id,
+                status="failed",
+                counts=counts,
+                target_call_count=target_call_count,
+                operation_id=current_operation_id,
+                exc=exc,
+            )
+            raise
         return await self.repository.get_report_rows(run_id)
 
     @staticmethod
@@ -241,73 +264,90 @@ class DeterministicRunService:
             budget=request.budget,
             mode=mode,
         )
-        await self._freeze_equipment(
-            run_id,
-            target,
-            source_run_id=equipment_source_run_id,
-            overrides=equipment_overrides,
-        )
-
         started = perf_counter()
         target_call_count = 0
-        counts = {
-            "violation": 0,
-            "refused": 0,
-            "safe": 0,
-            "error": 0,
-            "budget_aborted": 0,
-            "not_evaluable": 0,
-            "false_positive": 0,
-            "defense_overblock": 0,
-        }
-
-        for step_sequence, case in enumerate(dataset.cases, start=1):
-            operation_id = f"{run_id}:{case.id}"
-            existing = await self.repository.get_case_result(operation_id)
-            if existing is not None:
-                self._increment_counts(counts, case, EvaluationOutcome(existing["outcome"]))
-                target_call_count += len(existing.get("calls", []))
-                continue
-
-            precondition_reason = self._precondition_reason(request, case)
-            budget_reason = self._budget_reason(
-                request.budget,
-                started=started,
-                case_index=step_sequence,
-                target_call_count=target_call_count,
-                required_calls=len(case.prompts) * case.repeat_count,
+        counts = self._empty_counts()
+        current_operation_id = f"{run_id}:freeze_equipment"
+        try:
+            await self._freeze_equipment(
+                run_id,
+                target,
+                source_run_id=equipment_source_run_id,
+                overrides=equipment_overrides,
             )
-            if budget_reason:
-                result = self._budget_aborted_result(case, request.budget, budget_reason)
-            elif precondition_reason:
-                result = self._not_evaluable_result(
-                    case,
+            for step_sequence, case in enumerate(dataset.cases, start=1):
+                operation_id = f"{run_id}:{case.id}"
+                current_operation_id = operation_id
+                existing = await self.repository.get_case_result(operation_id)
+                if existing is not None:
+                    self._increment_counts(
+                        counts,
+                        case,
+                        EvaluationOutcome(existing["outcome"]),
+                    )
+                    target_call_count += len(existing.get("calls", []))
+                    continue
+
+                precondition_reason = self._precondition_reason(request, case)
+                budget_reason = self._budget_reason(
                     request.budget,
-                    precondition_reason,
-                    evidence_ref=request.fixture_evidence_refs.get(case.id),
-                )
-            else:
-                result = await self._execute_case(
-                    request,
-                    case,
                     started=started,
-                    calls_before_case=target_call_count,
+                    case_index=step_sequence,
+                    target_call_count=target_call_count,
+                    required_calls=len(case.prompts) * case.repeat_count,
                 )
-                target_call_count += len(result.calls)
+                if budget_reason:
+                    result = self._budget_aborted_result(case, request.budget, budget_reason)
+                elif precondition_reason:
+                    result = self._not_evaluable_result(
+                        case,
+                        request.budget,
+                        precondition_reason,
+                        evidence_ref=request.fixture_evidence_refs.get(case.id),
+                    )
+                else:
+                    result = await self._execute_case(
+                        request,
+                        case,
+                        started=started,
+                        calls_before_case=target_call_count,
+                    )
+                    target_call_count += len(result.calls)
 
-            await self.repository.record_case_result(
-                run_id=run_id,
-                operation_id=operation_id,
-                step_sequence=step_sequence,
-                result=result,
+                await self.repository.record_case_result(
+                    run_id=run_id,
+                    operation_id=operation_id,
+                    step_sequence=step_sequence,
+                    result=result,
+                )
+                self._increment_counts(counts, case, result.outcome)
+
+            current_operation_id = f"{run_id}:finalize"
+            await self.repository.finalize_run(
+                run_id,
+                counts=counts,
+                target_call_count=target_call_count,
             )
-            self._increment_counts(counts, case, result.outcome)
-
-        await self.repository.finalize_run(
-            run_id,
-            counts=counts,
-            target_call_count=target_call_count,
-        )
+        except CancelledError as exc:
+            await self._mark_run_interrupted(
+                run_id,
+                status="cancelled",
+                counts=counts,
+                target_call_count=target_call_count,
+                operation_id=current_operation_id,
+                exc=exc,
+            )
+            raise
+        except Exception as exc:
+            await self._mark_run_interrupted(
+                run_id,
+                status="failed",
+                counts=counts,
+                target_call_count=target_call_count,
+                operation_id=current_operation_id,
+                exc=exc,
+            )
+            raise
         return await self.repository.get_report_rows(run_id)
 
     async def _freeze_equipment(
@@ -416,6 +456,7 @@ class DeterministicRunService:
             case,
             raw_responses,
             max_response_bytes=request.budget.max_response_bytes,
+            refusal_status_codes=request.target.refusal_status_codes,
         )
         return CaseRunResult(
             case=case,
@@ -528,6 +569,47 @@ class DeterministicRunService:
             counts["false_positive"] += 1
         if case.kind == CaseKind.control and outcome == EvaluationOutcome.refused:
             counts["defense_overblock"] += 1
+
+    @staticmethod
+    def _empty_counts() -> dict[str, int]:
+        return {
+            "violation": 0,
+            "refused": 0,
+            "safe": 0,
+            "error": 0,
+            "budget_aborted": 0,
+            "not_evaluable": 0,
+            "false_positive": 0,
+            "defense_overblock": 0,
+        }
+
+    async def _mark_run_interrupted(
+        self,
+        run_id: str,
+        *,
+        status: Literal["failed", "cancelled"],
+        counts: dict[str, int],
+        target_call_count: int,
+        operation_id: str,
+        exc: BaseException,
+    ) -> None:
+        reason_code = type(exc).__name__[:100]
+        try:
+            await self.repository.mark_run_interrupted(
+                run_id,
+                status=status,
+                counts=counts,
+                target_call_count=target_call_count,
+                reason_code=reason_code,
+                last_operation_id=operation_id,
+            )
+        except Exception as terminal_exc:  # noqa: BLE001 - preserve the original failure
+            logger.error(
+                "failed to persist deterministic run terminal state",
+                run_id=run_id,
+                requested_status=status,
+                error_type=type(terminal_exc).__name__,
+            )
 
     @classmethod
     def _redact(

@@ -1,10 +1,13 @@
 import hashlib
+from asyncio import CancelledError
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
 from pydantic import HttpUrl
+from sqlalchemy import select
 
+from app.models import EvaluationRunRecord
 from app.repositories.run_repository import RunRepository
 from app.schemas.attack_sample_schema import (
     BlackBoxCase,
@@ -38,6 +41,19 @@ class RecordingConnector(HTTPTargetConnector):
             latency_ms=1,
             response_bytes=22,
         )
+
+
+class InterruptingConnector(HTTPTargetConnector):
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def call(
+        self,
+        target: TargetConfig,
+        prompt: str,
+        messages: list[dict[str, str]] | None = None,
+    ) -> tuple[dict[str, Any], TargetResponse]:
+        raise self.exc
 
 
 def _case(
@@ -169,3 +185,62 @@ async def test_fixture_evidence_rejects_non_fixture_case_ids(session_factory) ->
             mode="deterministic",
             fixture_evidence_refs={"case-direct": "fixture-log://setup/123"},
         )
+
+
+async def test_unexpected_execution_failure_persists_a_redacted_terminal_state(
+    session_factory,
+) -> None:
+    repository = RunRepository(session_factory)
+    service = DeterministicRunService(
+        repository,
+        connector=InterruptingConnector(RuntimeError("credential=do-not-persist")),
+    )
+
+    with pytest.raises(RuntimeError, match="do-not-persist"):
+        await service.run_dataset(
+            target=_target(),
+            dataset=_dataset(_case(delivery_mode="direct")),
+            budget=RunBudget(max_cases=1, max_target_calls=1),
+            mode="deterministic",
+        )
+
+    async with session_factory() as session:
+        run = await session.scalar(select(EvaluationRunRecord))
+        assert run is not None
+        run_id = run.id
+        assert run.status == "failed"
+        assert run.terminal_reason == "RuntimeError"
+        assert run.completed_at is not None
+
+    rows = await repository.get_report_rows(run_id)
+    failed_event = next(event for event in rows["events"] if event["event_type"] == "run_failed")
+    assert failed_event["evidence"]["reason_code"] == "RuntimeError"
+    assert failed_event["evidence"]["last_operation_id"].endswith(":case-direct")
+    assert "do-not-persist" not in repr(rows)
+
+
+async def test_cancelled_execution_persists_cancelled_terminal_state(session_factory) -> None:
+    repository = RunRepository(session_factory)
+    service = DeterministicRunService(
+        repository,
+        connector=InterruptingConnector(CancelledError("client disconnected")),
+    )
+
+    with pytest.raises(CancelledError):
+        await service.run_dataset(
+            target=_target(),
+            dataset=_dataset(_case(delivery_mode="direct")),
+            budget=RunBudget(max_cases=1, max_target_calls=1),
+            mode="deterministic",
+        )
+
+    async with session_factory() as session:
+        run = await session.scalar(select(EvaluationRunRecord))
+        assert run is not None
+        run_id = run.id
+        assert run.status == "cancelled"
+        assert run.terminal_reason == "CancelledError"
+
+    rows = await repository.get_report_rows(run_id)
+    assert any(event["event_type"] == "run_cancelled" for event in rows["events"])
+    assert "client disconnected" not in repr(rows)
