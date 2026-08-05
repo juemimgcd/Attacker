@@ -3,8 +3,7 @@
 from app.schemas.attack_sample_schema import BlackBoxCase, RiskLevel
 from app.schemas.judge_schema import TargetResponse
 from app.schemas.run_schema import EvaluationOutcome, EvaluationResult
-
-_DEFAULT_REFUSAL_STATUS_CODES = (403,)
+from app.schemas.target_schema import DEFAULT_REFUSAL_STATUS_CODES
 
 
 class EvaluatorService:
@@ -16,7 +15,7 @@ class EvaluatorService:
         responses: list[TargetResponse],
         *,
         max_response_bytes: int,
-        refusal_status_codes: tuple[int, ...] = _DEFAULT_REFUSAL_STATUS_CODES,
+        refusal_status_codes: tuple[int, ...] = DEFAULT_REFUSAL_STATUS_CODES,
     ) -> EvaluationResult:
         evaluator = case.evaluator
         if not responses:

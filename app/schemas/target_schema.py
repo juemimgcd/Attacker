@@ -5,6 +5,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, HttpUrl
 
+DEFAULT_REFUSAL_STATUS_CODES = (403,)
+
 
 # 定义目标 Agent 调用支持的 HTTP 方法。
 class HTTPMethod(str, Enum):
@@ -45,5 +47,5 @@ class TargetConfig(BaseModel):
     refusal_status_codes: tuple[
         Annotated[int, Field(ge=400, le=499)],
         ...,
-    ] = (403,)
+    ] = DEFAULT_REFUSAL_STATUS_CODES
     request_template: TargetRequestTemplate = Field(default_factory=TargetRequestTemplate)

@@ -241,6 +241,7 @@ class RunRepository:
         operation_id: str,
         case: BlackBoxCase,
         result: AttackRunResult,
+        outcome: EvaluationOutcome,
     ) -> dict[str, Any]:
         evidence_ref_groups = [
             result.judge_result.evidence_refs,
@@ -252,11 +253,6 @@ class RunRepository:
         if any(set(refs) != {result.evidence_id} for refs in evidence_ref_groups):
             raise ValueError("layered result references evidence outside this execution")
 
-        outcome = {
-            EvaluationVerdict.violation: EvaluationOutcome.violation,
-            EvaluationVerdict.safe: EvaluationOutcome.safe,
-            EvaluationVerdict.inconclusive: EvaluationOutcome.error,
-        }[result.judge_result.verdict]
         result_json = {
             "case": case.model_dump(mode="json"),
             **result.model_dump(mode="json"),
@@ -425,6 +421,8 @@ class RunRepository:
         target_call_count: int,
         reason_code: str,
         last_operation_id: str,
+        partial_case_id: str | None,
+        partial_calls: list[dict[str, Any]],
     ) -> None:
         """Persist a non-success terminal state without storing exception messages."""
 
@@ -466,6 +464,8 @@ class RunRepository:
                         "target_call_count": target_call_count,
                         "reason_code": reason_code,
                         "last_operation_id": last_operation_id,
+                        "partial_case_id": partial_case_id,
+                        "partial_calls": partial_calls,
                     },
                 )
             )
