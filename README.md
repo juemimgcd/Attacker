@@ -299,6 +299,10 @@ POST /runs/{source_run_id}/replay
 GET  /runs/{run_id}/replay
 ```
 
+灰盒 Replay 默认不会继承或重放源 Run 的审批授权。需要重新执行审批 Case 时，调用方必须在
+Replay 请求中显式提供 `"preauthorize_approvals": true`；未提供时审批 Case 保持拒绝，避免历史
+审批被静默复用到新的 Target 调用。
+
 Replay 差异语义：
 
 | 分类 | 含义 |

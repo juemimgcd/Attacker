@@ -779,10 +779,19 @@ class DeterministicGrayBoxRunService:
             )
             approval_id: str | None = None
             approval_status: str | None = None
-            requires_approval = (
-                case.requires_approval or case.severity in policy.approval_required_severities
+            remaining_steps = policy.max_steps - sequence + 1
+            elapsed_seconds = (datetime.now(UTC) - started_at).total_seconds()
+            gate = self.policy_service.evaluate(
+                policy=policy,
+                target_id=target_id,
+                case=case,
+                remaining_steps=remaining_steps,
+                target_call_count=target_calls,
+                elapsed_seconds=elapsed_seconds,
+                approval_status=approval_status,
+                approval_id=approval_id,
             )
-            if requires_approval and preauthorize_approvals:
+            if gate.decision == ToolPolicyDecision.approval_required and preauthorize_approvals:
                 approval = await self.repository.ensure_approval(
                     run_id=run_id,
                     case=case,
@@ -797,16 +806,16 @@ class DeterministicGrayBoxRunService:
                     reason="explicitly pre-authorized deterministic baseline",
                 )
                 approval_status = str(resolved["status"])
-            gate = self.policy_service.evaluate(
-                policy=policy,
-                target_id=target_id,
-                case=case,
-                remaining_steps=policy.max_steps - sequence + 1,
-                target_call_count=target_calls,
-                elapsed_seconds=(datetime.now(UTC) - started_at).total_seconds(),
-                approval_status=approval_status,
-                approval_id=approval_id,
-            )
+                gate = self.policy_service.evaluate(
+                    policy=policy,
+                    target_id=target_id,
+                    case=case,
+                    remaining_steps=remaining_steps,
+                    target_call_count=target_calls,
+                    elapsed_seconds=elapsed_seconds,
+                    approval_status=approval_status,
+                    approval_id=approval_id,
+                )
             policy_event_id = await self.repository.record_policy_result(
                 run_id=run_id,
                 case_id=case.id,

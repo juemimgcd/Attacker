@@ -78,16 +78,19 @@ class AdaptiveRepository:
             requested=policy.allowed_case_ids,
             available=dataset_case_ids,
             label="case IDs",
+            provided="allowed_case_ids" in policy.model_fields_set,
         )
         allowed_capability_contracts = self._validated_allowlist(
             requested=policy.allowed_capability_contracts,
             available=dataset_capability_contracts,
             label="capability contracts",
+            provided="allowed_capability_contracts" in policy.model_fields_set,
         )
         allowed_provider_instance_refs = self._validated_allowlist(
             requested=policy.allowed_provider_instance_refs,
             available=dataset_provider_refs,
             label="provider instance refs",
+            provided="allowed_provider_instance_refs" in policy.model_fields_set,
         )
         effective_policy = policy.model_copy(
             update={
@@ -172,9 +175,10 @@ class AdaptiveRepository:
         requested: set[str],
         available: set[str],
         label: str,
+        provided: bool,
     ) -> set[str]:
-        if not requested:
-            return available
+        if not provided:
+            return set(available)
         unknown = requested - available
         if unknown:
             raise ValueError(f"policy contains unknown {label}: {', '.join(sorted(unknown))}")
