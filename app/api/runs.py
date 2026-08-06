@@ -5,6 +5,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.schemas.graybox_schema import (
     AdaptiveControlRequest,
+    DeterministicGrayBoxRunRequest,
     GrayBoxRunRequest,
     PlannerResumeRequest,
 )
@@ -68,7 +69,7 @@ async def control_adaptive_run(
 
 @router.post("/graybox/deterministic")
 async def create_graybox_deterministic_run(
-    payload: GrayBoxRunRequest,
+    payload: DeterministicGrayBoxRunRequest,
     request: Request,
 ) -> dict:
     try:

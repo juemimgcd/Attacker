@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+from asyncio import CancelledError
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph.types import Command
+from loguru import logger
 
 from app.infrastructure.model_adapter import PlannerModelAdapter, create_planner_adapter
 from app.repositories.adaptive_repository import AdaptiveRepository
@@ -17,6 +19,7 @@ from app.schemas.adaptive_agent_schema import ObservationSource
 from app.schemas.graybox_schema import (
     AdaptiveControlAction,
     AttackPolicy,
+    DeterministicGrayBoxRunRequest,
     GrayBoxCase,
     GrayBoxExecutionResult,
     GrayBoxOutcome,
@@ -71,6 +74,35 @@ class AdaptiveRuntimeRegistry:
     def contains(self, run_id: str) -> bool:
         return run_id in self._runtimes
 
+    def discard(self, run_id: str) -> None:
+        self._runtimes.pop(run_id, None)
+
+
+async def _persist_interrupted_run(
+    repository: AdaptiveRepository,
+    *,
+    run_id: str,
+    status: Literal["failed", "cancelled"],
+    operation_id: str,
+    exc: BaseException,
+) -> None:
+    """Persist a safe terminal reason while preserving the original exception."""
+
+    try:
+        await repository.finalize_run(
+            run_id=run_id,
+            status=status,
+            terminal_reason=type(exc).__name__[:100],
+            stop_reason=f"{status}_at:{operation_id}",
+        )
+    except Exception as terminal_exc:  # noqa: BLE001 - preserve the original failure
+        logger.error(
+            "failed to persist gray-box run terminal state",
+            run_id=run_id,
+            requested_status=status,
+            error_type=type(terminal_exc).__name__,
+        )
+
 
 class AdaptiveRunService:
     """冻结输入并驱动 LangGraph；SQL 记录事实，checkpoint 记录继续位置。"""
@@ -110,6 +142,46 @@ class AdaptiveRunService:
             candidate_universe_checksum=self._candidate_universe_checksum(dataset.cases),
             equipment_snapshot=self._equipment_snapshot(dataset.cases),
         )
+        try:
+            return await self._start_created_run(
+                request=request,
+                dataset=dataset,
+                run_id=run_id,
+                target_id=target_id,
+                thread_id=thread_id,
+                policy=policy,
+            )
+        except CancelledError as exc:
+            self.registry.discard(run_id)
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="cancelled",
+                operation_id="adaptive_start",
+                exc=exc,
+            )
+            raise
+        except Exception as exc:
+            self.registry.discard(run_id)
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="failed",
+                operation_id="adaptive_start",
+                exc=exc,
+            )
+            raise
+
+    async def _start_created_run(
+        self,
+        *,
+        request: GrayBoxRunRequest,
+        dataset: LoadedGrayBoxDataset,
+        run_id: str,
+        target_id: str,
+        thread_id: str,
+        policy: AttackPolicy,
+    ) -> dict[str, Any]:
         await self._freeze_equipment(
             run_id,
             request.target,
@@ -136,7 +208,9 @@ class AdaptiveRunService:
             "target_id": target_id,
             "thread_id": thread_id,
             "checkpoint_ref": f"langgraph:{thread_id}",
-            "allowed_case_ids": [case.id for case in dataset.cases],
+            "allowed_case_ids": [
+                case.id for case in dataset.cases if case.id in policy.allowed_case_ids
+            ],
             "completed_case_ids": [],
             "denied_action_ids": [],
             "candidate_snapshot_id": None,
@@ -252,19 +326,40 @@ class AdaptiveRunService:
             resolved_by=resolved_by,
             reason=reason,
         )
-        result = await self.graph.graph.ainvoke(
-            Command(
-                resume={
-                    "approval_id": approval_id,
-                    "status": approval["status"],
-                    "recovered": recovered,
-                }
-            ),
-            config={
-                "configurable": {"thread_id": run.thread_id},
-                "recursion_limit": 1_000,
-            },
-        )
+        try:
+            result = await self.graph.graph.ainvoke(
+                Command(
+                    resume={
+                        "approval_id": approval_id,
+                        "status": approval["status"],
+                        "recovered": recovered,
+                    }
+                ),
+                config={
+                    "configurable": {"thread_id": run.thread_id},
+                    "recursion_limit": 1_000,
+                },
+            )
+        except CancelledError as exc:
+            self.registry.discard(run_id)
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="cancelled",
+                operation_id="approval_resume",
+                exc=exc,
+            )
+            raise
+        except Exception as exc:
+            self.registry.discard(run_id)
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="failed",
+                operation_id="approval_resume",
+                exc=exc,
+            )
+            raise
         return await self._status(run_id, result)
 
     async def resume_paused(
@@ -291,13 +386,34 @@ class AdaptiveRunService:
                 planner_override=planner,
             )
             recovered = True
-        result = await self.graph.graph.ainvoke(
-            Command(resume={"recovered": recovered}),
-            config={
-                "configurable": {"thread_id": run.thread_id},
-                "recursion_limit": 1_000,
-            },
-        )
+        try:
+            result = await self.graph.graph.ainvoke(
+                Command(resume={"recovered": recovered}),
+                config={
+                    "configurable": {"thread_id": run.thread_id},
+                    "recursion_limit": 1_000,
+                },
+            )
+        except CancelledError as exc:
+            self.registry.discard(run_id)
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="cancelled",
+                operation_id="planner_resume",
+                exc=exc,
+            )
+            raise
+        except Exception as exc:
+            self.registry.discard(run_id)
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="failed",
+                operation_id="planner_resume",
+                exc=exc,
+            )
+            raise
         return await self._status(run_id, result)
 
     async def request_control(
@@ -538,17 +654,18 @@ class DeterministicGrayBoxRunService:
         repository: AdaptiveRepository,
         *,
         equipment_service: EquipmentService | None = None,
+        connector: GrayBoxConnector | None = None,
     ) -> None:
         self.repository = repository
         self.equipment_service = equipment_service
         self.loader = GrayBoxDatasetLoader()
         self.policy_service = PolicyService()
-        self.connector = GrayBoxConnector()
+        self.connector = connector or GrayBoxConnector()
         self.trace_adapter = ToolTraceAdapter()
         self.evaluator = GrayBoxEvaluatorService()
         self.observation_normalizer = ObservationNormalizer()
 
-    async def run(self, request: GrayBoxRunRequest) -> dict[str, Any]:
+    async def run(self, request: DeterministicGrayBoxRunRequest) -> dict[str, Any]:
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
         return await self.run_dataset(
             target=request.target,
@@ -557,6 +674,7 @@ class DeterministicGrayBoxRunService:
             mode="deterministic_graybox",
             baseline_run_id=request.baseline_run_id,
             test_principal_refs=request.test_principal_refs,
+            preauthorize_approvals=request.preauthorize_approvals,
         )
 
     async def run_dataset(
@@ -570,6 +688,7 @@ class DeterministicGrayBoxRunService:
         test_principal_refs: list[str] | None = None,
         equipment_source_run_id: str | None = None,
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
+        preauthorize_approvals: bool = False,
     ) -> dict[str, Any]:
         AdaptiveRunService._validate_target(target)
         run_id, target_id, _, policy = await self.repository.create_run(
@@ -585,6 +704,50 @@ class DeterministicGrayBoxRunService:
             ),
             equipment_snapshot=AdaptiveRunService._equipment_snapshot(dataset.cases),
         )
+        try:
+            return await self._run_created_dataset(
+                run_id=run_id,
+                target_id=target_id,
+                target=target,
+                dataset=dataset,
+                policy=policy,
+                test_principal_refs=test_principal_refs,
+                equipment_source_run_id=equipment_source_run_id,
+                equipment_overrides=equipment_overrides,
+                preauthorize_approvals=preauthorize_approvals,
+            )
+        except CancelledError as exc:
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="cancelled",
+                operation_id="deterministic_graybox",
+                exc=exc,
+            )
+            raise
+        except Exception as exc:
+            await _persist_interrupted_run(
+                self.repository,
+                run_id=run_id,
+                status="failed",
+                operation_id="deterministic_graybox",
+                exc=exc,
+            )
+            raise
+
+    async def _run_created_dataset(
+        self,
+        *,
+        run_id: str,
+        target_id: str,
+        target: TargetConfig,
+        dataset: LoadedGrayBoxDataset,
+        policy: AttackPolicy,
+        test_principal_refs: list[str] | None,
+        equipment_source_run_id: str | None,
+        equipment_overrides: dict[str, dict[str, Any]] | None,
+        preauthorize_approvals: bool,
+    ) -> dict[str, Any]:
         if self.equipment_service is not None:
             if equipment_source_run_id is not None:
                 await self.equipment_service.clone_run_bindings(
@@ -616,7 +779,10 @@ class DeterministicGrayBoxRunService:
             )
             approval_id: str | None = None
             approval_status: str | None = None
-            if case.requires_approval or case.severity in policy.approval_required_severities:
+            requires_approval = (
+                case.requires_approval or case.severity in policy.approval_required_severities
+            )
+            if requires_approval and preauthorize_approvals:
                 approval = await self.repository.ensure_approval(
                     run_id=run_id,
                     case=case,
@@ -628,7 +794,7 @@ class DeterministicGrayBoxRunService:
                     approval_id=approval.id,
                     approved=True,
                     resolved_by="deterministic-baseline",
-                    reason="pre-authorized isolated sandbox baseline",
+                    reason="explicitly pre-authorized deterministic baseline",
                 )
                 approval_status = str(resolved["status"])
             gate = self.policy_service.evaluate(

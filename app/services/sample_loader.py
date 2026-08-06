@@ -88,6 +88,10 @@ class GrayBoxDatasetLoader:
         path: Path,
         case_ids: list[str] | None,
     ) -> LoadedGrayBoxDataset:
+        path = path.resolve()
+        samples_root = Path("samples/graybox").resolve()
+        if not path.is_relative_to(samples_root):
+            raise ValueError("gray-box dataset_path must resolve inside samples/graybox")
         raw_bytes = path.read_bytes()
         raw_data = yaml.safe_load(raw_bytes)
         dataset = Dataset[dict[str, Any], str, dict[str, Any]].from_file(path)

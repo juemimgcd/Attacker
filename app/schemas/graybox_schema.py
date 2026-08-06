@@ -304,6 +304,12 @@ class GrayBoxRunRequest(BaseModel):
     baseline_run_id: str | None = None
 
 
+class DeterministicGrayBoxRunRequest(GrayBoxRunRequest):
+    """Deterministic baseline options that must never affect adaptive execution."""
+
+    preauthorize_approvals: bool = False
+
+
 class ApprovalResolveRequest(BaseModel):
     approved: bool
     resolved_by: str = Field(min_length=1, max_length=200)

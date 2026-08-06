@@ -35,6 +35,26 @@ class PolicyService:
                 decision=ToolPolicyDecision.deny,
                 reason="case is outside the run allowlist",
             )
+        if not case.enabled:
+            return PolicyGateResult(
+                decision=ToolPolicyDecision.deny,
+                reason="case is disabled",
+            )
+        if not case.compatible:
+            return PolicyGateResult(
+                decision=ToolPolicyDecision.deny,
+                reason="case is incompatible with the current runtime",
+            )
+        if case.capability_contract not in policy.allowed_capability_contracts:
+            return PolicyGateResult(
+                decision=ToolPolicyDecision.deny,
+                reason="capability contract is outside the run allowlist",
+            )
+        if case.provider_instance_ref not in policy.allowed_provider_instance_refs:
+            return PolicyGateResult(
+                decision=ToolPolicyDecision.deny,
+                reason="provider instance is outside the run allowlist",
+            )
         if remaining_steps <= 0:
             return PolicyGateResult(
                 decision=ToolPolicyDecision.deny,
