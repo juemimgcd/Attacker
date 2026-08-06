@@ -257,6 +257,28 @@ Content-Type: application/json
 
 将 Planner backend 设为 `deterministic` 时不会产生物理模型请求，适合先验证完整自适应工作流。
 
+### 启动确定性灰盒基线
+
+```http
+POST /runs/graybox/deterministic
+Content-Type: application/json
+
+{
+  "target": {
+    "name": "local-agent",
+    "endpoint": "http://localhost:9000/agent"
+  },
+  "dataset_path": "samples/graybox/phase2.yaml",
+  "case_ids": ["gb_approval_control"],
+  "preauthorize_approvals": true
+}
+```
+
+确定性灰盒默认不会替调用方批准高风险 Case；需要执行审批 Case 时，必须显式设置
+`preauthorize_approvals=true`，该选择会与审批事实一起写入运行记录。灰盒数据集路径仅允许位于
+`samples/graybox`，显式提供的 Case、Capability Contract 和 Provider Instance allowlist 会按原范围
+冻结，系统不会将其静默扩大为整个数据集。
+
 ### 审批与恢复
 
 ```http
@@ -276,6 +298,10 @@ GET  /runs/{run_id}/report.md
 POST /runs/{source_run_id}/replay
 GET  /runs/{run_id}/replay
 ```
+
+灰盒 Replay 默认不会继承或重放源 Run 的审批授权。需要重新执行审批 Case 时，调用方必须在
+Replay 请求中显式提供 `"preauthorize_approvals": true`；未提供时审批 Case 保持拒绝，避免历史
+审批被静默复用到新的 Target 调用。
 
 Replay 差异语义：
 

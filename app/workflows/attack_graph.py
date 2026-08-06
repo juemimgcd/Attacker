@@ -583,14 +583,21 @@ class AttackGraph:
         )
         facts = await self.repository.load_adaptive_facts(state["run_id"])
         approvals = await self.repository.list_approvals(state["run_id"])
+        allowed_cases = [
+            case
+            for case in runtime.cases.values()
+            if case.enabled
+            and case.compatible
+            and case.id in runtime.policy.allowed_case_ids
+            and case.capability_contract in runtime.policy.allowed_capability_contracts
+            and case.provider_instance_ref in runtime.policy.allowed_provider_instance_refs
+        ]
         result = self.finish_gate_service.evaluate(
             required_coverage_tags={
-                tag
-                for case in runtime.cases.values()
-                for tag in (case.coverage_tags or [case.category])
+                tag for case in allowed_cases for tag in (case.coverage_tags or [case.category])
             },
             required_control_action_ids={
-                case.id for case in runtime.cases.values() if case.kind == CaseKind.control
+                case.id for case in allowed_cases if case.kind == CaseKind.control
             },
             coverage=facts["coverage"],
             completed_action_ids=set(state["completed_case_ids"]),

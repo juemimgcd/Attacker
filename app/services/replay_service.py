@@ -159,6 +159,7 @@ class ReplayService:
                 ),
                 equipment_source_run_id=equipment_source_run_id,
                 equipment_overrides=equipment_overrides,
+                preauthorize_approvals=request.preauthorize_approvals,
             )
         else:
             raise ValueError(f"unsupported replay source mode: {source.mode}")

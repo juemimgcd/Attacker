@@ -12,4 +12,5 @@ class ReplayRunRequest(BaseModel):
     evaluator_version: str = "core-evidence-v1"
     profile: StatefulProfile | None = None
     target: TargetConfig | None = None
+    preauthorize_approvals: bool = False
     equipment_bindings: dict[str, dict] = Field(default_factory=dict)

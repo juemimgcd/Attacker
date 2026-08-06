@@ -12,7 +12,7 @@ from loguru import logger
 from app.equipment.security import redact
 from app.observability import record_job_event
 from app.repositories.job_repository import JobRepository
-from app.schemas.graybox_schema import GrayBoxRunRequest
+from app.schemas.graybox_schema import DeterministicGrayBoxRunRequest, GrayBoxRunRequest
 from app.schemas.job_schema import JobKind
 from app.schemas.run_schema import DeterministicRunRequest
 from app.schemas.stateful_schema import StatefulRunRequest
@@ -46,7 +46,7 @@ class JobDispatcher:
             )
         elif kind == JobKind.deterministic_graybox.value:
             result = await self.deterministic_graybox_service.run(
-                GrayBoxRunRequest.model_validate(payload)
+                DeterministicGrayBoxRunRequest.model_validate(payload)
             )
         elif kind == JobKind.stateful.value:
             result = await self.stateful_run_service.run(StatefulRunRequest.model_validate(payload))

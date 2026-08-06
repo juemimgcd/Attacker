@@ -49,7 +49,11 @@ class FakeBlackBoxService:
 
 
 class FakeGrayBoxService:
+    def __init__(self) -> None:
+        self.last_kwargs: dict[str, Any] | None = None
+
     async def run_dataset(self, **kwargs):
+        self.last_kwargs = kwargs
         assert kwargs["dataset"].startswith("graybox:")
         assert kwargs["policy"] == "policy"
         assert kwargs["mode"] == "replay_graybox"
@@ -89,6 +93,29 @@ async def test_replay_dispatches_http_run_with_resupplied_target(mode: str) -> N
 
     expected = "blackbox-replay" if mode == "deterministic" else "graybox-replay"
     assert result["run_id"] == expected
+
+
+async def test_graybox_replay_forwards_explicit_approval_authorization() -> None:
+    graybox = FakeGrayBoxService()
+    service = ReplayService(
+        cast(Any, FakeRepository("deterministic_graybox")),
+        cast(Any, FakeStatefulService()),
+        cast(Any, FakeBlackBoxService()),
+        cast(Any, graybox),
+    )
+
+    await service.replay("source", ReplayRunRequest(target=_target()))
+
+    assert graybox.last_kwargs is not None
+    assert graybox.last_kwargs["preauthorize_approvals"] is False
+
+    await service.replay(
+        "source",
+        ReplayRunRequest(target=_target(), preauthorize_approvals=True),
+    )
+
+    assert graybox.last_kwargs is not None
+    assert graybox.last_kwargs["preauthorize_approvals"] is True
 
 
 @pytest.mark.parametrize(

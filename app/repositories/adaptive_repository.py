@@ -71,16 +71,33 @@ class AdaptiveRepository:
         run_id = str(uuid4())
         target_id = str(uuid4())
         thread_id = f"attack-run:{run_id}"
+        dataset_case_ids = {case.id for case in dataset.cases}
+        dataset_capability_contracts = {case.capability_contract for case in dataset.cases}
+        dataset_provider_refs = {case.provider_instance_ref for case in dataset.cases}
+        allowed_case_ids = self._validated_allowlist(
+            requested=policy.allowed_case_ids,
+            available=dataset_case_ids,
+            label="case IDs",
+            provided="allowed_case_ids" in policy.model_fields_set,
+        )
+        allowed_capability_contracts = self._validated_allowlist(
+            requested=policy.allowed_capability_contracts,
+            available=dataset_capability_contracts,
+            label="capability contracts",
+            provided="allowed_capability_contracts" in policy.model_fields_set,
+        )
+        allowed_provider_instance_refs = self._validated_allowlist(
+            requested=policy.allowed_provider_instance_refs,
+            available=dataset_provider_refs,
+            label="provider instance refs",
+            provided="allowed_provider_instance_refs" in policy.model_fields_set,
+        )
         effective_policy = policy.model_copy(
             update={
                 "allowed_target_ids": {target_id},
-                "allowed_case_ids": {case.id for case in dataset.cases},
-                "allowed_capability_contracts": {
-                    case.capability_contract for case in dataset.cases
-                },
-                "allowed_provider_instance_refs": {
-                    case.provider_instance_ref for case in dataset.cases
-                },
+                "allowed_case_ids": allowed_case_ids,
+                "allowed_capability_contracts": allowed_capability_contracts,
+                "allowed_provider_instance_refs": allowed_provider_instance_refs,
             }
         )
         async with self.session_factory.begin() as session:
@@ -151,6 +168,21 @@ class AdaptiveRepository:
                 )
             )
         return run_id, target_id, thread_id, effective_policy
+
+    @staticmethod
+    def _validated_allowlist(
+        *,
+        requested: set[str],
+        available: set[str],
+        label: str,
+        provided: bool,
+    ) -> set[str]:
+        if not provided:
+            return set(available)
+        unknown = requested - available
+        if unknown:
+            raise ValueError(f"policy contains unknown {label}: {', '.join(sorted(unknown))}")
+        return set(requested)
 
     async def load_runtime_snapshot(self, run_id: str) -> dict[str, Any]:
         async with self.session_factory() as session:
