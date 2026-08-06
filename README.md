@@ -149,7 +149,8 @@ curl -X POST http://127.0.0.1:8000/runs/stateful \
 
 `dataset_path` 仅接受 `samples/stateful/` 下的文件（解析符号链接与 `..` 后仍须位于该目录），
 避免 API 调用方借数据集加载器读取仓库中的任意本地文件。运行失败或被取消时，服务会按 Run/Case
-作用域尽力清理测试夹具，并以 `failed` 或 `cancelled` 终态保留不含异常消息的审计事件。
+作用域清理测试夹具；瞬时失败会使用同一幂等 operation ID 重试一次，持续失败则写入
+`state_cleanup_failed` 与 Run 终态证据。缺文件的公开错误和审计事件不会包含本地绝对路径或异常消息。
 
 可用 profile：
 
@@ -308,7 +309,8 @@ Replay 请求中显式提供 `"preauthorize_approvals": true`；未提供时审�
 审批被静默复用到新的 Target 调用。
 
 Replay 使用源 Run 持久化的 `case_order` 恢复当时实际执行的 Case 子集和顺序，不会把按
-`case_ids` 过滤的运行静默扩展成完整数据集；缺少该字段的旧运行继续按完整快照兼容恢复。
+`case_ids` 过滤的运行静默扩展成完整数据集。若该持久化字段缺失、重复或包含快照中不存在的
+Case，Replay 会拒绝执行，避免在无法证明原始范围时扩大对 Target 的调用。
 
 Replay 差异语义：
 

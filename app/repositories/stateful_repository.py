@@ -512,6 +512,7 @@ class StatefulRepository:
         terminal_reason: str,
         *,
         status: Literal["completed", "failed", "cancelled"] = "completed",
+        cleanup_failures: list[dict[str, str | int]] | None = None,
     ) -> None:
         async with self.session_factory.begin() as session:
             run = await session.get(EvaluationRunRecord, run_id)
@@ -539,6 +540,8 @@ class StatefulRepository:
                     "terminal_reason": terminal_reason,
                     "status": status,
                     "outcomes": dict(outcomes),
+                    "cleanup_incomplete": bool(cleanup_failures),
+                    "cleanup_failures": cleanup_failures or [],
                 },
             )
 
@@ -687,7 +690,7 @@ class StatefulRepository:
         self,
         session: AsyncSession,
         run_id: str,
-    ) -> list[str] | None:
+    ) -> list[str]:
         event = await session.scalar(
             select(EventRecord).where(
                 EventRecord.run_id == run_id,
@@ -695,7 +698,7 @@ class StatefulRepository:
             )
         )
         if event is None or "case_order" not in event.evidence_json:
-            return None
+            raise ValueError(f"persisted case order for run {run_id} is missing")
         raw_order = event.evidence_json["case_order"]
         if not isinstance(raw_order, list) or any(not isinstance(item, str) for item in raw_order):
             raise ValueError(f"persisted case order for run {run_id} is invalid")
@@ -706,12 +709,10 @@ class StatefulRepository:
     @staticmethod
     def _restore_case_order(
         cases: list[CaseT],
-        case_order: list[str] | None,
+        case_order: list[str],
         *,
         run_id: str,
     ) -> list[CaseT]:
-        if case_order is None:
-            return cases
         cases_by_id = {str(case.id): case for case in cases}
         if len(cases_by_id) != len(cases):
             raise ValueError(f"persisted dataset for run {run_id} contains duplicate case IDs")

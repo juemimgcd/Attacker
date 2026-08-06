@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import select
 
 from app.models import EventRecord
@@ -70,7 +71,23 @@ async def test_replay_inputs_are_reconstructed_from_persisted_snapshots(
     assert [case.id for case in loaded_stateful.cases] == ["st_memory_poisoning_attack"]
 
 
-async def test_legacy_replay_without_case_order_uses_the_full_snapshot(session_factory) -> None:
+@pytest.mark.parametrize(
+    ("persisted_order", "expected_error"),
+    [
+        (None, "is missing"),
+        ("not-a-list", "is invalid"),
+        (
+            ["bb_direct_override_attack", "bb_direct_override_attack"],
+            "contains duplicates",
+        ),
+        (["bb_unknown_attack"], "contains unknown cases"),
+    ],
+)
+async def test_replay_rejects_untrusted_case_order(
+    session_factory,
+    persisted_order: object,
+    expected_error: str,
+) -> None:
     dataset = await BlackBoxDatasetLoader().load(
         "samples/blackbox/phase1.yaml",
         ["bb_direct_override_attack"],
@@ -90,10 +107,12 @@ async def test_legacy_replay_without_case_order_uses_the_full_snapshot(session_f
         )
         assert event is not None
         legacy_evidence = dict(event.evidence_json)
-        legacy_evidence.pop("case_order")
+        if persisted_order is None:
+            legacy_evidence.pop("case_order")
+        else:
+            legacy_evidence["case_order"] = persisted_order
         event.evidence_json = legacy_evidence
 
-    loaded, _ = await StatefulRepository(session_factory).load_blackbox_replay_inputs(run_id)
-
     assert len(dataset.snapshot["cases"]) > len(dataset.cases)
-    assert len(loaded.cases) == len(dataset.snapshot["cases"])
+    with pytest.raises(ValueError, match=expected_error):
+        await StatefulRepository(session_factory).load_blackbox_replay_inputs(run_id)

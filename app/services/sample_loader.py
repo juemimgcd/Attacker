@@ -14,6 +14,22 @@ from app.schemas.run_schema import LoadedDataset
 from app.schemas.stateful_schema import LoadedStatefulDataset, StatefulCase
 
 
+def _load_dataset_source(
+    path: Path,
+    *,
+    stage: str,
+) -> tuple[bytes, Any, Dataset[dict[str, Any], str, dict[str, Any]]]:
+    """Load one dataset while keeping resolved server paths out of public errors."""
+
+    try:
+        raw_bytes = path.read_bytes()
+        raw_data = yaml.safe_load(raw_bytes)
+        dataset = Dataset[dict[str, Any], str, dict[str, Any]].from_file(path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"{stage} dataset file not found") from exc
+    return raw_bytes, raw_data, dataset
+
+
 class AttackSampleLoader:
     """兼容早期单条 AttackSample 的轻量加载器。"""
 
@@ -41,9 +57,7 @@ class BlackBoxDatasetLoader:
         return await asyncio.to_thread(self._load_sync, Path(path), case_ids)
 
     def _load_sync(self, path: Path, case_ids: list[str] | None) -> LoadedDataset:
-        raw_bytes = path.read_bytes()
-        raw_data = yaml.safe_load(raw_bytes)
-        dataset = Dataset[dict[str, Any], str, dict[str, Any]].from_file(path)
+        raw_bytes, raw_data, dataset = _load_dataset_source(path, stage="black-box")
 
         cases: list[BlackBoxCase] = []
         for eval_case in dataset.cases:
@@ -92,9 +106,7 @@ class GrayBoxDatasetLoader:
         samples_root = Path("samples/graybox").resolve()
         if not path.is_relative_to(samples_root):
             raise ValueError("gray-box dataset_path must resolve inside samples/graybox")
-        raw_bytes = path.read_bytes()
-        raw_data = yaml.safe_load(raw_bytes)
-        dataset = Dataset[dict[str, Any], str, dict[str, Any]].from_file(path)
+        raw_bytes, raw_data, dataset = _load_dataset_source(path, stage="gray-box")
         cases: list[GrayBoxCase] = []
         for eval_case in dataset.cases:
             case = GrayBoxCase.model_validate(eval_case.inputs)
@@ -142,9 +154,7 @@ class StatefulDatasetLoader:
         samples_root = Path("samples/stateful").resolve()
         if not path.is_relative_to(samples_root):
             raise ValueError("stateful dataset_path must resolve inside samples/stateful")
-        raw_bytes = path.read_bytes()
-        raw_data = yaml.safe_load(raw_bytes)
-        dataset = Dataset[dict[str, Any], str, dict[str, Any]].from_file(path)
+        raw_bytes, raw_data, dataset = _load_dataset_source(path, stage="stateful")
         cases: list[StatefulCase] = []
         for eval_case in dataset.cases:
             case = StatefulCase.model_validate(eval_case.inputs)

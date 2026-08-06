@@ -27,6 +27,8 @@ from app.services.stateful_evaluator_service import StatefulEvaluatorService
 if TYPE_CHECKING:
     from app.services.equipment_service import EquipmentService
 
+_INTERRUPTED_CLEANUP_ATTEMPTS = 2
+
 
 class StatefulRunService:
     """使用内置 Profile 验证平台契约，不代表真实生产 Memory/RAG 已被验证。"""
@@ -86,19 +88,27 @@ class StatefulRunService:
                 equipment_overrides=equipment_overrides,
             )
         except CancelledError as exc:
-            await self._cleanup_after_interruption(run_id=run_id, dataset=dataset)
+            cleanup_failures = await self._cleanup_after_interruption(
+                run_id=run_id,
+                dataset=dataset,
+            )
             await self._finalize_interrupted_run(
                 run_id=run_id,
                 status="cancelled",
                 exc=exc,
+                cleanup_failures=cleanup_failures,
             )
             raise
         except Exception as exc:
-            await self._cleanup_after_interruption(run_id=run_id, dataset=dataset)
+            cleanup_failures = await self._cleanup_after_interruption(
+                run_id=run_id,
+                dataset=dataset,
+            )
             await self._finalize_interrupted_run(
                 run_id=run_id,
                 status="failed",
                 exc=exc,
+                cleanup_failures=cleanup_failures,
             )
             raise
 
@@ -177,7 +187,7 @@ class StatefulRunService:
         *,
         run_id: str,
         dataset: LoadedStatefulDataset,
-    ) -> None:
+    ) -> list[dict[str, str | int]]:
         scopes = [
             (
                 f"{run_id}:{case.id}",
@@ -191,19 +201,51 @@ class StatefulRunService:
                 f"{run_id}:protected-control:cleanup",
             )
         )
+        failures: list[dict[str, str | int]] = []
         for scope_id, operation_id in scopes:
-            try:
-                await self.repository.cleanup(
-                    run_id=run_id,
-                    scope_id=scope_id,
-                    operation_id=operation_id,
-                )
-            except Exception as cleanup_exc:  # noqa: BLE001 - continue remaining scoped cleanup
-                logger.error(
-                    "failed to clean interrupted stateful fixture scope",
-                    run_id=run_id,
-                    error_type=type(cleanup_exc).__name__,
-                )
+            for attempt in range(1, _INTERRUPTED_CLEANUP_ATTEMPTS + 1):
+                try:
+                    await self.repository.cleanup(
+                        run_id=run_id,
+                        scope_id=scope_id,
+                        operation_id=operation_id,
+                    )
+                    break
+                except Exception as cleanup_exc:  # noqa: BLE001 - isolate scoped cleanup
+                    if attempt < _INTERRUPTED_CLEANUP_ATTEMPTS:
+                        logger.warning(
+                            "retrying interrupted stateful fixture cleanup",
+                            run_id=run_id,
+                            attempt=attempt,
+                            error_type=type(cleanup_exc).__name__,
+                        )
+                        continue
+                    failure: dict[str, str | int] = {
+                        "scope_id": scope_id,
+                        "error_type": type(cleanup_exc).__name__[:100],
+                        "attempts": attempt,
+                    }
+                    failures.append(failure)
+                    try:
+                        await self.repository.append_event(
+                            run_id=run_id,
+                            operation_id=f"{operation_id}:failed",
+                            event_type="state_cleanup_failed",
+                            evidence={"cleanup_failure": failure},
+                        )
+                    except Exception as audit_exc:  # noqa: BLE001 - terminal event also carries it
+                        logger.error(
+                            "failed to persist stateful cleanup failure evidence",
+                            run_id=run_id,
+                            error_type=type(audit_exc).__name__,
+                        )
+                    logger.error(
+                        "failed to clean interrupted stateful fixture scope",
+                        run_id=run_id,
+                        attempts=attempt,
+                        error_type=type(cleanup_exc).__name__,
+                    )
+        return failures
 
     async def _finalize_interrupted_run(
         self,
@@ -211,12 +253,14 @@ class StatefulRunService:
         run_id: str,
         status: Literal["failed", "cancelled"],
         exc: BaseException,
+        cleanup_failures: list[dict[str, str | int]],
     ) -> None:
         try:
             await self.repository.finalize_run(
                 run_id,
                 type(exc).__name__[:100],
                 status=status,
+                cleanup_failures=cleanup_failures,
             )
         except Exception as terminal_exc:  # noqa: BLE001 - preserve the original failure
             logger.error(
