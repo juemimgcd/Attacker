@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING, Any
+from asyncio import CancelledError
+from typing import TYPE_CHECKING, Any, Literal
+
+from loguru import logger
 
 from app.repositories.stateful_repository import StatefulRepository
 from app.schemas.stateful_schema import (
+    LoadedStatefulDataset,
     MemoryEvidence,
     RecoveryEvidence,
     RetrievalTrace,
@@ -57,7 +61,7 @@ class StatefulRunService:
     async def run_dataset(
         self,
         *,
-        dataset,
+        dataset: LoadedStatefulDataset,
         profile: StatefulProfile,
         target_name: str,
         mode: str,
@@ -72,6 +76,42 @@ class StatefulRunService:
             target_name=target_name,
             mode=mode,
         )
+        try:
+            return await self._run_created_dataset(
+                run_id=run_id,
+                dataset=dataset,
+                profile=profile,
+                target_name=target_name,
+                equipment_source_run_id=equipment_source_run_id,
+                equipment_overrides=equipment_overrides,
+            )
+        except CancelledError as exc:
+            await self._cleanup_after_interruption(run_id=run_id, dataset=dataset)
+            await self._finalize_interrupted_run(
+                run_id=run_id,
+                status="cancelled",
+                exc=exc,
+            )
+            raise
+        except Exception as exc:
+            await self._cleanup_after_interruption(run_id=run_id, dataset=dataset)
+            await self._finalize_interrupted_run(
+                run_id=run_id,
+                status="failed",
+                exc=exc,
+            )
+            raise
+
+    async def _run_created_dataset(
+        self,
+        *,
+        run_id: str,
+        dataset: LoadedStatefulDataset,
+        profile: StatefulProfile,
+        target_name: str,
+        equipment_source_run_id: str | None,
+        equipment_overrides: dict[str, dict[str, Any]] | None,
+    ) -> dict[str, Any]:
         if self.equipment_service is not None:
             if equipment_source_run_id is not None:
                 await self.equipment_service.clone_run_bindings(
@@ -131,6 +171,60 @@ class StatefulRunService:
             "status": run.status,
             "profile": profile.value,
         }
+
+    async def _cleanup_after_interruption(
+        self,
+        *,
+        run_id: str,
+        dataset: LoadedStatefulDataset,
+    ) -> None:
+        scopes = [
+            (
+                f"{run_id}:{case.id}",
+                f"{run_id}:stateful:{case.id}:{sequence}:cleanup",
+            )
+            for sequence, case in enumerate(dataset.cases, start=1)
+        ]
+        scopes.append(
+            (
+                f"{run_id}:protected-control",
+                f"{run_id}:protected-control:cleanup",
+            )
+        )
+        for scope_id, operation_id in scopes:
+            try:
+                await self.repository.cleanup(
+                    run_id=run_id,
+                    scope_id=scope_id,
+                    operation_id=operation_id,
+                )
+            except Exception as cleanup_exc:  # noqa: BLE001 - continue remaining scoped cleanup
+                logger.error(
+                    "failed to clean interrupted stateful fixture scope",
+                    run_id=run_id,
+                    error_type=type(cleanup_exc).__name__,
+                )
+
+    async def _finalize_interrupted_run(
+        self,
+        *,
+        run_id: str,
+        status: Literal["failed", "cancelled"],
+        exc: BaseException,
+    ) -> None:
+        try:
+            await self.repository.finalize_run(
+                run_id,
+                type(exc).__name__[:100],
+                status=status,
+            )
+        except Exception as terminal_exc:  # noqa: BLE001 - preserve the original failure
+            logger.error(
+                "failed to persist stateful run terminal state",
+                run_id=run_id,
+                requested_status=status,
+                error_type=type(terminal_exc).__name__,
+            )
 
     async def _run_case(
         self,

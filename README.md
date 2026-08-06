@@ -147,6 +147,10 @@ curl -X POST http://127.0.0.1:8000/runs/stateful \
   -d '{"profile":"hardened","dataset_path":"samples/stateful/phase3.yaml"}'
 ```
 
+`dataset_path` 仅接受 `samples/stateful/` 下的文件（解析符号链接与 `..` 后仍须位于该目录），
+避免 API 调用方借数据集加载器读取仓库中的任意本地文件。运行失败或被取消时，服务会按 Run/Case
+作用域尽力清理测试夹具，并以 `failed` 或 `cancelled` 终态保留不含异常消息的审计事件。
+
 可用 profile：
 
 - `vulnerable`：预置易受攻击行为；
@@ -302,6 +306,9 @@ GET  /runs/{run_id}/replay
 灰盒 Replay 默认不会继承或重放源 Run 的审批授权。需要重新执行审批 Case 时，调用方必须在
 Replay 请求中显式提供 `"preauthorize_approvals": true`；未提供时审批 Case 保持拒绝，避免历史
 审批被静默复用到新的 Target 调用。
+
+Replay 使用源 Run 持久化的 `case_order` 恢复当时实际执行的 Case 子集和顺序，不会把按
+`case_ids` 过滤的运行静默扩展成完整数据集；缺少该字段的旧运行继续按完整快照兼容恢复。
 
 Replay 差异语义：
 

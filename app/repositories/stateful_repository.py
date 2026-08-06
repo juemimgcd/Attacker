@@ -3,7 +3,7 @@
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol, TypeVar
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -35,6 +35,13 @@ from app.schemas.stateful_schema import (
     StatefulProfile,
     StateIdentity,
 )
+
+
+class CaseWithId(Protocol):
+    id: str
+
+
+CaseT = TypeVar("CaseT", bound=CaseWithId)
 
 
 class StatefulRepository:
@@ -499,21 +506,27 @@ class StatefulRepository:
                     },
                 )
 
-    async def finalize_run(self, run_id: str, terminal_reason: str) -> None:
+    async def finalize_run(
+        self,
+        run_id: str,
+        terminal_reason: str,
+        *,
+        status: Literal["completed", "failed", "cancelled"] = "completed",
+    ) -> None:
         async with self.session_factory.begin() as session:
             run = await session.get(EvaluationRunRecord, run_id)
             if run is None:
                 raise LookupError(f"run {run_id} not found")
-            if run.status == "completed":
+            if run.status in {"completed", "failed", "cancelled"}:
                 return
             steps = (
                 await session.scalars(select(RunStepRecord).where(RunStepRecord.run_id == run_id))
             ).all()
             outcomes = Counter(step.outcome for step in steps)
-            run.status = "completed"
+            run.status = status
             run.terminal_reason = terminal_reason
             run.completed_at = datetime.now(UTC)
-            run.completed_cases = len(steps)
+            run.completed_cases = sum(step.outcome != "pending" for step in steps)
             run.violation_count = outcomes.get("violation", 0)
             run.safe_count = outcomes.get("safe", 0)
             run.error_count = outcomes.get("error", 0) + outcomes.get("inconclusive", 0)
@@ -521,8 +534,12 @@ class StatefulRepository:
                 session,
                 run_id=run_id,
                 operation_id=f"{run_id}:run_terminal",
-                event_type="run_completed",
-                evidence={"terminal_reason": terminal_reason, "outcomes": dict(outcomes)},
+                event_type=f"run_{status}",
+                evidence={
+                    "terminal_reason": terminal_reason,
+                    "status": status,
+                    "outcomes": dict(outcomes),
+                },
             )
 
     async def get_run(self, run_id: str) -> EvaluationRunRecord:
@@ -542,8 +559,10 @@ class StatefulRepository:
             dataset = await session.get(DatasetSnapshotRecord, run.dataset_id)
             if dataset is None:
                 raise LookupError(f"dataset for run {run_id} not found")
+            case_order = await self._load_case_order(session, run_id)
             raw_cases = dataset.snapshot_json.get("cases", [])
             cases = [StatefulCase.model_validate(raw_case["inputs"]) for raw_case in raw_cases]
+            cases = self._restore_case_order(cases, case_order, run_id=run_id)
             return LoadedStatefulDataset(
                 name=dataset.name,
                 version=dataset.version,
@@ -565,10 +584,12 @@ class StatefulRepository:
             policy = await session.get(PolicySnapshotRecord, run.policy_id)
             if dataset is None or policy is None:
                 raise LookupError(f"replay inputs for run {run_id} not found")
+            case_order = await self._load_case_order(session, run_id)
             cases = [
                 BlackBoxCase.model_validate(raw_case["inputs"])
                 for raw_case in dataset.snapshot_json.get("cases", [])
             ]
+            cases = self._restore_case_order(cases, case_order, run_id=run_id)
             return (
                 LoadedDataset(
                     name=dataset.name,
@@ -593,10 +614,12 @@ class StatefulRepository:
             policy = await session.get(PolicySnapshotRecord, run.policy_id)
             if dataset is None or policy is None:
                 raise LookupError(f"replay inputs for run {run_id} not found")
+            case_order = await self._load_case_order(session, run_id)
             cases = [
                 GrayBoxCase.model_validate(raw_case["inputs"])
                 for raw_case in dataset.snapshot_json.get("cases", [])
             ]
+            cases = self._restore_case_order(cases, case_order, run_id=run_id)
             return (
                 LoadedGrayBoxDataset(
                     name=dataset.name,
@@ -659,6 +682,46 @@ class StatefulRepository:
                 )
             ).all()
             return [self._replay_dict(replay) for replay in replays]
+
+    async def _load_case_order(
+        self,
+        session: AsyncSession,
+        run_id: str,
+    ) -> list[str] | None:
+        event = await session.scalar(
+            select(EventRecord).where(
+                EventRecord.run_id == run_id,
+                EventRecord.event_type == "run_started",
+            )
+        )
+        if event is None or "case_order" not in event.evidence_json:
+            return None
+        raw_order = event.evidence_json["case_order"]
+        if not isinstance(raw_order, list) or any(not isinstance(item, str) for item in raw_order):
+            raise ValueError(f"persisted case order for run {run_id} is invalid")
+        if len(raw_order) != len(set(raw_order)):
+            raise ValueError(f"persisted case order for run {run_id} contains duplicates")
+        return raw_order
+
+    @staticmethod
+    def _restore_case_order(
+        cases: list[CaseT],
+        case_order: list[str] | None,
+        *,
+        run_id: str,
+    ) -> list[CaseT]:
+        if case_order is None:
+            return cases
+        cases_by_id = {str(case.id): case for case in cases}
+        if len(cases_by_id) != len(cases):
+            raise ValueError(f"persisted dataset for run {run_id} contains duplicate case IDs")
+        unknown = set(case_order) - cases_by_id.keys()
+        if unknown:
+            raise ValueError(
+                f"persisted case order for run {run_id} contains unknown cases: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        return [cases_by_id[case_id] for case_id in case_order]
 
     async def _append_event(
         self,
