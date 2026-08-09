@@ -15,13 +15,11 @@ from loguru import logger
 
 from app.infrastructure.model_adapter import PlannerModelAdapter, create_planner_adapter
 from app.repositories.adaptive_repository import AdaptiveRepository
-from app.schemas.adaptive_agent_schema import ObservationSource
 from app.schemas.graybox_schema import (
     AdaptiveControlAction,
     AttackPolicy,
     DeterministicGrayBoxRunRequest,
     GrayBoxCase,
-    GrayBoxExecutionResult,
     GrayBoxOutcome,
     GrayBoxRunRequest,
     LoadedGrayBoxDataset,
@@ -30,13 +28,12 @@ from app.schemas.graybox_schema import (
     ToolPolicyDecision,
 )
 from app.schemas.target_schema import TargetConfig
+from app.services.graybox_case_pipeline import GrayBoxCasePipeline
 from app.services.graybox_connector import GrayBoxConnector
-from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
-from app.services.observation_normalizer import ObservationNormalizer
 from app.services.policy_service import PolicyService
+from app.services.run_lifecycle import RunCreatedHook, notify_run_created
 from app.services.sample_loader import GrayBoxDatasetLoader
 from app.services.target_binding import canonical_target_binding, canonical_target_ref
-from app.services.tool_trace_adapter import ToolTraceAdapter
 from app.workflows.attack_graph import AttackGraph
 from app.workflows.attack_state import AttackGraphState
 
@@ -124,7 +121,16 @@ class AdaptiveRunService:
             checkpointer=checkpointer,
         )
 
-    async def start(self, request: GrayBoxRunRequest) -> dict[str, Any]:
+    async def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
+        await self.repository.get_run(run_id)
+        return await self.repository.list_approvals(run_id)
+
+    async def start(
+        self,
+        request: GrayBoxRunRequest,
+        *,
+        on_run_created: RunCreatedHook | None = None,
+    ) -> dict[str, Any]:
         """创建 Run、冻结绑定和候选宇宙，然后启动同一 thread 的图执行。"""
 
         self._validate_target(request.target)
@@ -143,6 +149,7 @@ class AdaptiveRunService:
             equipment_snapshot=self._equipment_snapshot(dataset.cases),
         )
         try:
+            await notify_run_created(on_run_created, run_id)
             return await self._start_created_run(
                 request=request,
                 dataset=dataset,
@@ -660,12 +667,14 @@ class DeterministicGrayBoxRunService:
         self.equipment_service = equipment_service
         self.loader = GrayBoxDatasetLoader()
         self.policy_service = PolicyService()
-        self.connector = connector or GrayBoxConnector()
-        self.trace_adapter = ToolTraceAdapter()
-        self.evaluator = GrayBoxEvaluatorService()
-        self.observation_normalizer = ObservationNormalizer()
+        self.case_pipeline = GrayBoxCasePipeline(repository, connector=connector)
 
-    async def run(self, request: DeterministicGrayBoxRunRequest) -> dict[str, Any]:
+    async def run(
+        self,
+        request: DeterministicGrayBoxRunRequest,
+        *,
+        on_run_created: RunCreatedHook | None = None,
+    ) -> dict[str, Any]:
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
         return await self.run_dataset(
             target=request.target,
@@ -675,6 +684,7 @@ class DeterministicGrayBoxRunService:
             baseline_run_id=request.baseline_run_id,
             test_principal_refs=request.test_principal_refs,
             preauthorize_approvals=request.preauthorize_approvals,
+            on_run_created=on_run_created,
         )
 
     async def run_dataset(
@@ -689,6 +699,7 @@ class DeterministicGrayBoxRunService:
         equipment_source_run_id: str | None = None,
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
         preauthorize_approvals: bool = False,
+        on_run_created: RunCreatedHook | None = None,
     ) -> dict[str, Any]:
         AdaptiveRunService._validate_target(target)
         run_id, target_id, _, policy = await self.repository.create_run(
@@ -705,6 +716,7 @@ class DeterministicGrayBoxRunService:
             equipment_snapshot=AdaptiveRunService._equipment_snapshot(dataset.cases),
         )
         try:
+            await notify_run_created(on_run_created, run_id)
             return await self._run_created_dataset(
                 run_id=run_id,
                 target_id=target_id,
@@ -833,89 +845,18 @@ class DeterministicGrayBoxRunService:
                     policy=gate,
                 )
                 continue
-            step = await self.repository.ensure_step(
+            await self.case_pipeline.run_case(
                 run_id=run_id,
-                case_id=case.id,
+                case=case,
+                target=target,
                 operation_id=operation_id,
                 sequence=sequence,
-            )
-            request_body, response = await self.connector.execute(
-                target=target,
-                case=case,
-                operation_id=operation_id,
                 approval_id=approval_id,
-            )
-            fields = set(case.redact_fields)
-            sanitized_request = self.trace_adapter.sanitize(
-                request_body,
-                redacted_fields=fields,
                 secret_values=secret_values,
-            )
-            sanitized_response = response.model_copy(
-                update={
-                    "body": self.trace_adapter.sanitize(
-                        response.body,
-                        redacted_fields=fields,
-                        secret_values=secret_values,
-                    ),
-                    "text": self.trace_adapter.sanitize(
-                        response.text,
-                        redacted_fields=fields,
-                        secret_values=secret_values,
-                    ),
-                }
-            )
-            trace = self.trace_adapter.parse(
-                sanitized_response,
-                redacted_fields=fields,
-                secret_values=secret_values,
-            )
-            await self.repository.record_target_execution(
-                run_id=run_id,
-                step_id=step.id,
-                operation_id=operation_id,
-                request_body=sanitized_request,
-                response=sanitized_response,
-                trace_result=trace,
-            )
-            normalized = self.observation_normalizer.normalize_target(
-                observation_ref=f"{operation_id}:observation",
-                response=sanitized_response,
-                trace=trace,
-            )
-            await self.repository.record_observation(
-                run_id=run_id,
-                operation_id=f"{operation_id}:observation",
-                source=ObservationSource.target,
-                summary=normalized.summary,
-                step_id=step.id,
-            )
-            target_calls += 1
-            evaluation = self.evaluator.evaluate(
-                case=case,
-                response=sanitized_response,
-                trace_result=trace,
-            )
-            await self.repository.record_evaluation(
-                run_id=run_id,
-                step_id=step.id,
-                operation_id=operation_id,
-                case_id=case.id,
-                evaluation=evaluation,
-            )
-            await self.repository.complete_case(
-                run_id=run_id,
-                operation_id=operation_id,
-                result=GrayBoxExecutionResult(
-                    case=case,
-                    request_body=sanitized_request,
-                    response=sanitized_response,
-                    trace=trace.trace,
-                    evaluation=evaluation,
-                    policy=PolicyGateResult.model_validate(gate),
-                ),
+                policy=PolicyGateResult.model_validate(gate),
                 policy_event_ids=[policy_event_id],
             )
+            target_calls += 1
         await self.repository.finalize_run(
             run_id=run_id,
             status="completed",

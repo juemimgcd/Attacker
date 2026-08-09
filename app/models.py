@@ -67,6 +67,7 @@ class EvaluationRunRecord(Base):
     thread_id: Mapped[str | None] = mapped_column(String(100), unique=True)
     mode: Mapped[str] = mapped_column(String(32), default="deterministic")
     status: Mapped[str] = mapped_column(String(32), default="running")
+    event_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     total_cases: Mapped[int] = mapped_column(Integer, default=0)
     completed_cases: Mapped[int] = mapped_column(Integer, default=0)
     target_call_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -404,6 +405,7 @@ class RunJobRecord(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"), index=True)
     request_id: Mapped[str] = mapped_column(String(200), nullable=False)
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
     payload_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)

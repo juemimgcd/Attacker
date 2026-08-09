@@ -23,6 +23,10 @@ def test_empty_sqlite_database_upgrades_to_v1_head(tmp_path, monkeypatch) -> Non
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
+        run_columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+        job_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(run_jobs)").fetchall()
+        }
     assert {
         "runs",
         "events",
@@ -32,3 +36,5 @@ def test_empty_sqlite_database_upgrades_to_v1_head(tmp_path, monkeypatch) -> Non
         "retrieval_events",
         "replays",
     } <= tables
+    assert "event_sequence" in run_columns
+    assert "run_id" in job_columns

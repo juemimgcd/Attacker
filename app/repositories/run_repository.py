@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,6 +22,7 @@ from app.models import (
     StateSnapshotRecord,
     TargetRecord,
 )
+from app.repositories.event_store import EventStore
 from app.schemas.attack_sample_schema import BlackBoxCase
 from app.schemas.judge_schema import AttackRunResult, EvaluationVerdict
 from app.schemas.run_schema import CaseRunResult, EvaluationOutcome, LoadedDataset, RunBudget
@@ -31,8 +32,13 @@ from app.services.finding_fingerprint import finding_fingerprint
 class RunRepository:
     """以 operation_id 提供 Case 级幂等，并为报告返回完整事实投影。"""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        event_store: EventStore | None = None,
+    ) -> None:
         self.session_factory = session_factory
+        self.events = event_store or EventStore(session_factory)
 
     async def create_run(
         self,
@@ -79,20 +85,17 @@ class RunRepository:
             )
             session.add(run)
             await session.flush()
-            session.add(
-                EventRecord(
-                    id=str(uuid4()),
-                    run_id=run_id,
-                    sequence=1,
-                    operation_id=f"{run_id}:run_started",
-                    event_type="run_started",
-                    evidence_json={
-                        "dataset_name": dataset.name,
-                        "dataset_sha256": dataset.sha256,
-                        "case_order": [case.id for case in dataset.cases],
-                        "budget": budget.model_dump(mode="json"),
-                    },
-                )
+            await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                operation_id=f"{run_id}:run_started",
+                event_type="run_started",
+                evidence={
+                    "dataset_name": dataset.name,
+                    "dataset_sha256": dataset.sha256,
+                    "case_order": [case.id for case in dataset.cases],
+                    "budget": budget.model_dump(mode="json"),
+                },
             )
         return run_id
 
@@ -119,10 +122,6 @@ class RunRepository:
 
         result_json = result.model_dump(mode="json")
         async with self.session_factory.begin() as session:
-            last_sequence = await session.scalar(
-                select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
-            )
-            event_sequence = int(last_sequence or 0)
             step = RunStepRecord(
                 id=str(uuid4()),
                 run_id=run_id,
@@ -138,58 +137,44 @@ class RunRepository:
 
             evidence_event_ids: list[str] = []
             for call_index, call in enumerate(result.calls, start=1):
-                event_sequence += 1
-                event_id = str(uuid4())
-                session.add(
-                    EventRecord(
-                        id=event_id,
-                        run_id=run_id,
-                        step_id=step.id,
-                        sequence=event_sequence,
-                        operation_id=f"{operation_id}:target:{call_index}",
-                        event_type="target_called",
-                        evidence_json=call.model_dump(mode="json"),
-                    )
+                event_id = await self.events.append_in_session(
+                    session,
+                    run_id=run_id,
+                    step_id=step.id,
+                    operation_id=f"{operation_id}:target:{call_index}",
+                    event_type="target_called",
+                    evidence=call.model_dump(mode="json"),
                 )
                 evidence_event_ids.append(event_id)
 
-            event_sequence += 1
-            evaluation_event_id = str(uuid4())
-            session.add(
-                EventRecord(
-                    id=evaluation_event_id,
-                    run_id=run_id,
-                    step_id=step.id,
-                    sequence=event_sequence,
-                    operation_id=f"{operation_id}:evaluation",
-                    event_type=(
-                        "evaluation_skipped"
-                        if result.outcome == EvaluationOutcome.not_evaluable
-                        else "evaluation_completed"
-                    ),
-                    evidence_json={
-                        "case_id": result.case.id,
-                        "required_evidence": result.case.required_evidence,
-                        "evaluation": result.evaluation.model_dump(mode="json"),
-                        "budget": result.budget.model_dump(mode="json"),
-                        "precondition_evidence": result.precondition_evidence,
-                    },
-                )
+            evaluation_event_id = await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                step_id=step.id,
+                operation_id=f"{operation_id}:evaluation",
+                event_type=(
+                    "evaluation_skipped"
+                    if result.outcome == EvaluationOutcome.not_evaluable
+                    else "evaluation_completed"
+                ),
+                evidence={
+                    "case_id": result.case.id,
+                    "required_evidence": result.case.required_evidence,
+                    "evaluation": result.evaluation.model_dump(mode="json"),
+                    "budget": result.budget.model_dump(mode="json"),
+                    "precondition_evidence": result.precondition_evidence,
+                },
             )
             evidence_event_ids.append(evaluation_event_id)
 
             if result.outcome == EvaluationOutcome.budget_aborted:
-                event_sequence += 1
-                session.add(
-                    EventRecord(
-                        id=str(uuid4()),
-                        run_id=run_id,
-                        step_id=step.id,
-                        sequence=event_sequence,
-                        operation_id=f"{operation_id}:budget",
-                        event_type="budget_exhausted",
-                        evidence_json={"reason": result.evaluation.reason},
-                    )
+                await self.events.append_in_session(
+                    session,
+                    run_id=run_id,
+                    step_id=step.id,
+                    operation_id=f"{operation_id}:budget",
+                    event_type="budget_exhausted",
+                    evidence={"reason": result.evaluation.reason},
                 )
 
             if result.evaluation.violated:
@@ -216,20 +201,16 @@ class RunRepository:
                         is_control=result.case.kind.value == "control",
                     )
                 )
-                event_sequence += 1
-                session.add(
-                    EventRecord(
-                        id=str(uuid4()),
-                        run_id=run_id,
-                        step_id=step.id,
-                        sequence=event_sequence,
-                        operation_id=f"{operation_id}:finding_event",
-                        event_type="finding_created",
-                        evidence_json={
-                            "case_id": result.case.id,
-                            "evidence_event_ids": evidence_event_ids,
-                        },
-                    )
+                await self.events.append_in_session(
+                    session,
+                    run_id=run_id,
+                    step_id=step.id,
+                    operation_id=f"{operation_id}:finding_event",
+                    event_type="finding_created",
+                    evidence={
+                        "case_id": result.case.id,
+                        "evidence_event_ids": evidence_event_ids,
+                    },
                 )
 
         return result_json
@@ -282,42 +263,29 @@ class RunRepository:
                     return existing.result_json
                 raise RuntimeError("layered result conflicts with an existing run step") from None
 
-            last_sequence = await session.scalar(
-                select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
-            )
-            event_sequence = int(last_sequence or 0)
-
-            event_sequence += 1
-            session.add(
-                EventRecord(
-                    id=result.evidence_id,
-                    run_id=run_id,
-                    step_id=step_id,
-                    sequence=event_sequence,
-                    operation_id=f"{operation_id}:target:1",
-                    event_type="target_called",
-                    evidence_json={
-                        "request_body": result.request_body,
-                        "response": result.target_response.model_dump(mode="json"),
-                    },
-                )
+            await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                step_id=step_id,
+                operation_id=f"{operation_id}:target:1",
+                event_type="target_called",
+                evidence={
+                    "request_body": result.request_body,
+                    "response": result.target_response.model_dump(mode="json"),
+                },
+                event_id=result.evidence_id,
             )
 
-            event_sequence += 1
-            evaluation_event_id = str(uuid4())
-            session.add(
-                EventRecord(
-                    id=evaluation_event_id,
-                    run_id=run_id,
-                    step_id=step_id,
-                    sequence=event_sequence,
-                    operation_id=f"{operation_id}:evaluation",
-                    event_type="evaluation_completed",
-                    evidence_json={
-                        "sample_id": result.sample_id,
-                        "judge_result": result.judge_result.model_dump(mode="json"),
-                    },
-                )
+            evaluation_event_id = await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                step_id=step_id,
+                operation_id=f"{operation_id}:evaluation",
+                event_type="evaluation_completed",
+                evidence={
+                    "sample_id": result.sample_id,
+                    "judge_result": result.judge_result.model_dump(mode="json"),
+                },
             )
 
             if result.judge_result.verdict == EvaluationVerdict.violation:
@@ -351,20 +319,16 @@ class RunRepository:
                         is_control=case.kind.value == "control",
                     )
                 )
-                event_sequence += 1
-                session.add(
-                    EventRecord(
-                        id=str(uuid4()),
-                        run_id=run_id,
-                        step_id=step_id,
-                        sequence=event_sequence,
-                        operation_id=f"{operation_id}:finding_event",
-                        event_type="finding_created",
-                        evidence_json={
-                            "case_id": result.sample_id,
-                            "evidence_event_ids": evidence_event_ids,
-                        },
-                    )
+                await self.events.append_in_session(
+                    session,
+                    run_id=run_id,
+                    step_id=step_id,
+                    operation_id=f"{operation_id}:finding_event",
+                    event_type="finding_created",
+                    evidence={
+                        "case_id": result.sample_id,
+                        "evidence_event_ids": evidence_event_ids,
+                    },
                 )
 
         return result_json
@@ -395,21 +359,15 @@ class RunRepository:
             run.defense_overblock_count = counts.get("defense_overblock", 0)
             run.completed_at = datetime.now(UTC)
 
-            last_sequence = await session.scalar(
-                select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
-            )
-            session.add(
-                EventRecord(
-                    id=str(uuid4()),
-                    run_id=run_id,
-                    sequence=int(last_sequence or 0) + 1,
-                    operation_id=f"{run_id}:run_completed",
-                    event_type="run_completed",
-                    evidence_json={
-                        "counts": counts,
-                        "target_call_count": target_call_count,
-                    },
-                )
+            await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                operation_id=f"{run_id}:run_completed",
+                event_type="run_completed",
+                evidence={
+                    "counts": counts,
+                    "target_call_count": target_call_count,
+                },
             )
 
     async def mark_run_interrupted(
@@ -449,25 +407,19 @@ class RunRepository:
             run.terminal_reason = reason_code
             run.completed_at = datetime.now(UTC)
 
-            last_sequence = await session.scalar(
-                select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
-            )
-            session.add(
-                EventRecord(
-                    id=str(uuid4()),
-                    run_id=run_id,
-                    sequence=int(last_sequence or 0) + 1,
-                    operation_id=f"{run_id}:run_{status}",
-                    event_type=f"run_{status}",
-                    evidence_json={
-                        "counts": counts,
-                        "target_call_count": target_call_count,
-                        "reason_code": reason_code,
-                        "last_operation_id": last_operation_id,
-                        "partial_case_id": partial_case_id,
-                        "partial_calls": partial_calls,
-                    },
-                )
+            await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                operation_id=f"{run_id}:run_{status}",
+                event_type=f"run_{status}",
+                evidence={
+                    "counts": counts,
+                    "target_call_count": target_call_count,
+                    "reason_code": reason_code,
+                    "last_operation_id": last_operation_id,
+                    "partial_case_id": partial_case_id,
+                    "partial_calls": partial_calls,
+                },
             )
 
     async def get_report_rows(self, run_id: str) -> dict[str, Any]:

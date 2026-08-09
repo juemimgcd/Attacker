@@ -16,7 +16,6 @@ from app.repositories.adaptive_repository import AdaptiveRepository
 from app.schemas.adaptive_agent_schema import (
     CandidateSnapshot,
     InformationGain,
-    ObservationSource,
     PlannerReasonCode,
 )
 from app.schemas.attack_sample_schema import CaseKind
@@ -28,7 +27,6 @@ from app.schemas.attack_state_schema import (
 )
 from app.schemas.graybox_schema import (
     FindingSummary,
-    GrayBoxExecutionResult,
     GrayBoxOutcome,
     PlannerContext,
     PlannerDecision,
@@ -47,13 +45,11 @@ from app.schemas.run_control_schema import (
 )
 from app.services.candidate_builder import CandidateBuilder
 from app.services.finish_gate_service import FinishGateService
+from app.services.graybox_case_pipeline import GrayBoxCasePipeline
 from app.services.graybox_connector import GrayBoxConnector
-from app.services.graybox_evaluator_service import GrayBoxEvaluatorService
 from app.services.hypothesis_service import HypothesisService
-from app.services.observation_normalizer import ObservationNormalizer
 from app.services.policy_service import PolicyService
 from app.services.run_control import RunControlService
-from app.services.tool_trace_adapter import ToolTraceAdapter
 from app.workflows.attack_state import AttackGraphState
 
 
@@ -73,12 +69,19 @@ class AttackGraph:
         self.candidate_builder = CandidateBuilder()
         self.finish_gate_service = FinishGateService()
         self.hypothesis_service = HypothesisService()
-        self.observation_normalizer = ObservationNormalizer()
         self.run_control = RunControlService()
-        self.connector = GrayBoxConnector()
-        self.trace_adapter = ToolTraceAdapter()
-        self.evaluator = GrayBoxEvaluatorService()
+        self.case_pipeline = GrayBoxCasePipeline(repository)
         self.graph = self._build().compile(checkpointer=checkpointer)
+
+    @property
+    def connector(self) -> GrayBoxConnector:
+        """保留连接器替换点，同时让所有执行都经过共享流水线。"""
+
+        return self.case_pipeline.connector
+
+    @connector.setter
+    def connector(self, connector: GrayBoxConnector) -> None:
+        self.case_pipeline.connector = connector
 
     def _build(self) -> StateGraph:
         """声明节点和条件边；checkpoint 只负责恢复控制流位置。"""
@@ -780,78 +783,27 @@ class AttackGraph:
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         operation_id = str(state["current_operation_id"])
-        step = await self.repository.ensure_step(
+        execution = await self.case_pipeline.execute_target(
             run_id=state["run_id"],
-            case_id=case.id,
+            case=case,
+            target=runtime.target,
             operation_id=operation_id,
             sequence=state["graph_step_count"],
-        )
-        try:
-            await self.repository.load_target_execution(operation_id)
-            return {"current_step_id": step.id, "next_action": "normalize"}
-        except LookupError:
-            pass
-
-        request_body, response = await self.connector.execute(
-            target=runtime.target,
-            case=case,
-            operation_id=operation_id,
             approval_id=state.get("approval_id"),
-        )
-        redacted_fields = set(case.redact_fields)
-        secret_values = runtime.secret_values
-        sanitized_request = self.trace_adapter.sanitize(
-            request_body,
-            redacted_fields=redacted_fields,
-            secret_values=secret_values,
-        )
-        sanitized_response = response.model_copy(
-            update={
-                "body": self.trace_adapter.sanitize(
-                    response.body,
-                    redacted_fields=redacted_fields,
-                    secret_values=secret_values,
-                ),
-                "text": self.trace_adapter.sanitize(
-                    response.text,
-                    redacted_fields=redacted_fields,
-                    secret_values=secret_values,
-                ),
-            }
-        )
-        trace = self.trace_adapter.parse(
-            sanitized_response,
-            redacted_fields=redacted_fields,
-            secret_values=secret_values,
-        )
-        await self.repository.record_target_execution(
-            run_id=state["run_id"],
-            step_id=step.id,
-            operation_id=operation_id,
-            request_body=sanitized_request,
-            response=sanitized_response,
-            trace_result=trace,
+            secret_values=runtime.secret_values,
         )
         return {
-            "current_step_id": step.id,
+            "current_step_id": execution.step_id,
             "target_call_count": state["target_call_count"] + 1,
             "next_action": "normalize",
         }
 
     async def normalize_observation(self, state: AttackGraphState) -> dict[str, Any]:
         operation_id = str(state["current_operation_id"])
-        _, response, trace = await self.repository.load_target_execution(operation_id)
-        normalized = self.observation_normalizer.normalize_target(
-            observation_ref=f"{operation_id}:observation",
-            response=response,
-            trace=trace,
-        )
-        observation = await self.repository.record_observation(
+        observation = await self.case_pipeline.normalize_observation(
             run_id=state["run_id"],
-            operation_id=f"{operation_id}:observation",
-            source=ObservationSource.target,
-            summary=normalized.summary,
-            step_id=state.get("current_step_id"),
+            operation_id=operation_id,
+            step_id=str(state["current_step_id"]),
         )
         return {
             "observation_refs": list(
@@ -864,18 +816,11 @@ class AttackGraph:
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         operation_id = str(state["current_operation_id"])
-        _, response, trace = await self.repository.load_target_execution(operation_id)
-        evaluation = self.evaluator.evaluate(
-            case=case,
-            response=response,
-            trace_result=trace,
-        )
-        event_id = await self.repository.record_evaluation(
+        _, event_id = await self.case_pipeline.evaluate(
             run_id=state["run_id"],
-            step_id=str(state["current_step_id"]),
+            case=case,
             operation_id=operation_id,
-            case_id=case.id,
-            evaluation=evaluation,
+            step_id=str(state["current_step_id"]),
         )
         return {"evaluation_event_id": event_id, "next_action": "persist"}
 
@@ -885,25 +830,17 @@ class AttackGraph:
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         operation_id = str(state["current_operation_id"])
-        request_body, response, trace = await self.repository.load_target_execution(operation_id)
         evaluation = await self.repository.load_evaluation(operation_id)
         policy = PolicyGateResult(
             decision=ToolPolicyDecision(str(state["policy_decision"])),
             reason=str(state["policy_reason"]),
             approval_id=state.get("approval_id"),
         )
-        result = GrayBoxExecutionResult(
-            case=case,
-            request_body=request_body,
-            response=response,
-            trace=trace.trace,
-            evaluation=evaluation,
-            policy=policy,
-        )
-        finding_id = await self.repository.complete_case(
+        finding_id = await self.case_pipeline.persist(
             run_id=state["run_id"],
+            case=case,
             operation_id=operation_id,
-            result=result,
+            policy=policy,
             policy_event_ids=state["policy_event_ids"],
         )
         findings = state["finding_summaries"]

@@ -13,10 +13,44 @@ from app.equipment.security import redact
 from app.observability import record_job_event
 from app.repositories.job_repository import JobRepository
 from app.schemas.graybox_schema import DeterministicGrayBoxRunRequest, GrayBoxRunRequest
-from app.schemas.job_schema import JobKind
+from app.schemas.job_schema import JobKind, RunJobCreate
 from app.schemas.run_schema import DeterministicRunRequest
 from app.schemas.stateful_schema import StatefulRunRequest
+from app.services.run_lifecycle import RunCreatedHook
 from conf.settings import WorkerSettings
+
+
+class JobCancellationRequested(RuntimeError):
+    """Worker 观察到持久取消请求；与租约故障区分处理。"""
+
+
+class JobApplicationService:
+    """持久 Job 的应用边界；HTTP 层不直接操作租约仓库。"""
+
+    def __init__(self, repository: JobRepository, *, default_max_attempts: int) -> None:
+        self.repository = repository
+        self.default_max_attempts = default_max_attempts
+
+    async def enqueue(self, request: RunJobCreate) -> dict[str, Any]:
+        return await self.repository.enqueue(
+            request,
+            default_max_attempts=self.default_max_attempts,
+        )
+
+    async def list(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        return await self.repository.list(status=status, limit=limit)
+
+    async def get(self, job_id: str) -> dict[str, Any]:
+        return await self.repository.get(job_id)
+
+    async def cancel(self, job_id: str) -> dict[str, Any]:
+        return await self.repository.cancel(job_id)
+
+    async def retry(self, job_id: str) -> dict[str, Any]:
+        return await self.repository.retry(job_id)
+
+    async def metrics_snapshot(self, *, stale_after_seconds: int) -> dict[str, Any]:
+        return await self.repository.metrics_snapshot(stale_after_seconds=stale_after_seconds)
 
 
 class JobDispatcher:
@@ -35,21 +69,33 @@ class JobDispatcher:
         self.deterministic_graybox_service = deterministic_graybox_service
         self.stateful_run_service = stateful_run_service
 
-    async def dispatch(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def dispatch(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        on_run_created: RunCreatedHook | None = None,
+    ) -> dict[str, Any]:
         if kind == JobKind.deterministic.value:
             result = await self.deterministic_run_service.run(
-                DeterministicRunRequest.model_validate(payload)
+                DeterministicRunRequest.model_validate(payload),
+                on_run_created=on_run_created,
             )
         elif kind == JobKind.adaptive.value:
             result = await self.adaptive_run_service.start(
-                GrayBoxRunRequest.model_validate(payload)
+                GrayBoxRunRequest.model_validate(payload),
+                on_run_created=on_run_created,
             )
         elif kind == JobKind.deterministic_graybox.value:
             result = await self.deterministic_graybox_service.run(
-                DeterministicGrayBoxRunRequest.model_validate(payload)
+                DeterministicGrayBoxRunRequest.model_validate(payload),
+                on_run_created=on_run_created,
             )
         elif kind == JobKind.stateful.value:
-            result = await self.stateful_run_service.run(StatefulRunRequest.model_validate(payload))
+            result = await self.stateful_run_service.run(
+                StatefulRunRequest.model_validate(payload),
+                on_run_created=on_run_created,
+            )
         else:
             raise ValueError(f"unsupported job kind {kind}")
         return self._result_reference(result)
@@ -131,7 +177,7 @@ class JobWorker:
 
         job_id = str(job["id"])
         lease_token = str(job["lease_token"])
-        heartbeat: asyncio.Task[None] | None = None
+        monitor: asyncio.Task[None] | None = None
         dispatch_task: asyncio.Task[dict[str, Any]] | None = None
         try:
             if await self.repository.is_cancel_requested(job_id):
@@ -141,26 +187,58 @@ class JobWorker:
                 worker_id=self.worker_id,
                 lease_token=lease_token,
             )
-            heartbeat = asyncio.create_task(
-                self._lease_heartbeat(job_id, lease_token),
-                name=f"attacker-job-heartbeat-{job_id}",
+            monitor = asyncio.create_task(
+                self._monitor_lease_and_cancellation(job_id, lease_token),
+                name=f"attacker-job-monitor-{job_id}",
             )
+
+            async def bind_run(run_id: str) -> None:
+                binding = asyncio.create_task(
+                    self.repository.bind_run(
+                        job_id,
+                        run_id=run_id,
+                        worker_id=self.worker_id,
+                        lease_token=lease_token,
+                    ),
+                    name=f"attacker-job-bind-run-{job_id}",
+                )
+                try:
+                    await asyncio.shield(binding)
+                except asyncio.CancelledError:
+                    # Run 已存在时必须先保存关联，随后才把取消传回 Run Service。
+                    await binding
+                    raise
+
             dispatch_task = asyncio.create_task(
-                self.dispatcher.dispatch(str(job["kind"]), dict(job["payload"])),
+                self.dispatcher.dispatch(
+                    str(job["kind"]),
+                    dict(job["payload"]),
+                    on_run_created=bind_run,
+                ),
                 name=f"attacker-job-dispatch-{job_id}",
             )
             done, _ = await asyncio.wait(
-                {dispatch_task, heartbeat},
+                {dispatch_task, monitor},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if heartbeat in done:
+            if monitor in done:
                 dispatch_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await dispatch_task
-                heartbeat_error = heartbeat.exception()
+                monitor_error = monitor.exception()
+                if isinstance(monitor_error, JobCancellationRequested):
+                    await self.repository.fail(
+                        job_id,
+                        worker_id=self.worker_id,
+                        lease_token=lease_token,
+                        error_code="job_cancelled",
+                        error_summary="cancellation was requested while the run was executing",
+                    )
+                    record_job_event("cancelled")
+                    return
                 raise RuntimeError(
-                    "job lease heartbeat stopped before execution completed"
-                ) from heartbeat_error
+                    "job lease/cancellation monitor stopped before execution completed"
+                ) from monitor_error
             result = dispatch_task.result()
             if await self.repository.is_cancel_requested(job_id):
                 await self.repository.fail(
@@ -205,20 +283,26 @@ class JobWorker:
                 dispatch_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await dispatch_task
-            if heartbeat is not None:
-                heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await heartbeat
+            if monitor is not None:
+                if not monitor.done():
+                    monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
 
-    async def _lease_heartbeat(self, job_id: str, lease_token: str) -> None:
+    async def _monitor_lease_and_cancellation(self, job_id: str, lease_token: str) -> None:
+        loop = asyncio.get_running_loop()
+        next_heartbeat = loop.time() + self.settings.heartbeat_seconds
         while True:
-            await asyncio.sleep(self.settings.heartbeat_seconds)
-            await self.repository.heartbeat(
-                job_id,
-                worker_id=self.worker_id,
-                lease_token=lease_token,
-                lease_seconds=self.settings.lease_seconds,
-            )
+            await asyncio.sleep(min(self.settings.poll_seconds, self.settings.heartbeat_seconds))
+            if await self.repository.is_cancel_requested(job_id):
+                raise JobCancellationRequested("job cancellation was requested")
+            if loop.time() >= next_heartbeat:
+                await self.repository.heartbeat(
+                    job_id,
+                    worker_id=self.worker_id,
+                    lease_token=lease_token,
+                    lease_seconds=self.settings.lease_seconds,
+                )
+                next_heartbeat = loop.time() + self.settings.heartbeat_seconds
 
     async def _worker_heartbeat(self, *, draining: bool) -> None:
         await self.repository.worker_heartbeat(

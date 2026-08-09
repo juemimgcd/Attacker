@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -23,14 +23,20 @@ from app.models import (
     RunEquipmentSnapshotRecord,
     TargetRecord,
 )
+from app.repositories.event_store import EventStore
 from app.schemas.equipment_schema import DiscoveredPackage, PackageType, ProviderInstanceCreate
 
 
 class EquipmentRepository:
     """用数据库唯一约束保证版本不可变、operation 幂等和租约清理可恢复。"""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        event_store: EventStore | None = None,
+    ) -> None:
         self.session_factory = session_factory
+        self.events = event_store or EventStore(session_factory)
 
     async def register_packages(self, packages: list[DiscoveredPackage]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -475,43 +481,32 @@ class EquipmentRepository:
             record.error_code = error_code
             record.completed_at = datetime.now(UTC)
             if record.run_id is not None:
-                sequence = (
-                    await session.scalar(
-                        select(func.max(EventRecord.sequence)).where(
-                            EventRecord.run_id == record.run_id
-                        )
-                    )
-                    or 0
-                ) + 1
-                session.add(
-                    EventRecord(
-                        id=str(uuid4()),
-                        run_id=record.run_id,
-                        step_id=record.step_id,
-                        sequence=sequence,
-                        operation_id=f"{operation_id}:event",
-                        event_type=(
-                            evidence[0].get("event_type", "equipment_execution_completed")
-                            if evidence
-                            else "equipment_execution_completed"
-                        ),
-                        evidence_json={
-                            "package_id": record.package_id,
-                            "package_version": record.package_version,
-                            "package_checksum": record.package_checksum,
-                            "provider_instance_id": record.provider_instance_id,
-                            "config_revision": record.config_revision,
-                            "secret_binding_revision": record.secret_binding_revision,
-                            "capability": record.capability,
-                            "test_principal_ref": record.test_principal_ref,
-                            "status": status,
-                            "physical_attempts": physical_attempts,
-                            "input_summary": record.input_summary_json,
-                            "output_summary": output_summary,
-                            "error_code": error_code,
-                            "redacted": True,
-                        },
-                    )
+                await self.events.append_in_session(
+                    session,
+                    run_id=record.run_id,
+                    step_id=record.step_id,
+                    operation_id=f"{operation_id}:event",
+                    event_type=(
+                        evidence[0].get("event_type", "equipment_execution_completed")
+                        if evidence
+                        else "equipment_execution_completed"
+                    ),
+                    evidence={
+                        "package_id": record.package_id,
+                        "package_version": record.package_version,
+                        "package_checksum": record.package_checksum,
+                        "provider_instance_id": record.provider_instance_id,
+                        "config_revision": record.config_revision,
+                        "secret_binding_revision": record.secret_binding_revision,
+                        "capability": record.capability,
+                        "test_principal_ref": record.test_principal_ref,
+                        "status": status,
+                        "physical_attempts": physical_attempts,
+                        "input_summary": record.input_summary_json,
+                        "output_summary": output_summary,
+                        "error_code": error_code,
+                        "redacted": True,
+                    },
                 )
             else:
                 await self._audit(
@@ -962,9 +957,8 @@ class EquipmentRepository:
             )
         )
 
-    @classmethod
     async def _record_cleanup_event(
-        cls,
+        self,
         session: AsyncSession,
         lease: ResourceLeaseRecord,
         *,
@@ -981,7 +975,7 @@ class EquipmentRepository:
             "error": error,
         }
         if lease.run_id is None:
-            await cls._audit(
+            await self._audit(
                 session,
                 event_type=event_type,
                 package_id=None,
@@ -994,27 +988,13 @@ class EquipmentRepository:
             )
         )
         event_operation_id = f"{operation_id}:{event_type}:{lease.cleanup_attempts}"
-        existing_event = await session.scalar(
-            select(EventRecord).where(EventRecord.operation_id == event_operation_id)
-        )
-        if existing_event is not None:
-            return
-        sequence = (
-            await session.scalar(
-                select(func.max(EventRecord.sequence)).where(EventRecord.run_id == lease.run_id)
-            )
-            or 0
-        ) + 1
-        session.add(
-            EventRecord(
-                id=str(uuid4()),
-                run_id=lease.run_id,
-                step_id=creator.step_id if creator is not None else None,
-                sequence=sequence,
-                operation_id=event_operation_id,
-                event_type=event_type,
-                evidence_json=evidence,
-            )
+        await self.events.append_in_session(
+            session,
+            run_id=lease.run_id,
+            step_id=creator.step_id if creator is not None else None,
+            operation_id=event_operation_id,
+            event_type=event_type,
+            evidence=evidence,
         )
 
 

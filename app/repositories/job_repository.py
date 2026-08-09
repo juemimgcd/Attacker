@@ -223,6 +223,24 @@ class JobRepository:
             allowed_statuses={JobStatus.leased.value, JobStatus.running.value},
         )
 
+    async def bind_run(
+        self,
+        job_id: str,
+        *,
+        run_id: str,
+        worker_id: str,
+        lease_token: str,
+    ) -> None:
+        """在 Run 创建后立即保存绑定，供取消、查询和故障恢复定位执行实例。"""
+
+        await self._lease_update(
+            job_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            values={"run_id": run_id, "updated_at": _now()},
+            allowed_statuses={JobStatus.running.value},
+        )
+
     async def complete(
         self,
         job_id: str,
@@ -312,6 +330,7 @@ class JobRepository:
             record.lease_token = None
             record.lease_expires_at = None
             record.cancel_requested = False
+            record.run_id = None
             record.error_code = None
             record.error_summary = None
             record.completed_at = None
@@ -475,6 +494,7 @@ class JobRepository:
     ) -> dict[str, Any]:
         result = {
             "id": record.id,
+            "run_id": record.run_id,
             "request_id": record.request_id,
             "kind": record.kind,
             "status": record.status,

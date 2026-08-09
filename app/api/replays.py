@@ -23,7 +23,7 @@ async def replay_run(
 
 @router.get("/{run_id}/replay")
 async def get_replay(run_id: str, request: Request) -> dict:
-    replays = await request.app.state.stateful_repository.list_replays(run_id)
-    if not replays:
-        raise HTTPException(status_code=404, detail=f"replay for run {run_id} not found")
-    return {"run_id": run_id, "replays": replays}
+    try:
+        return await request.app.state.replay_service.get_replays(run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

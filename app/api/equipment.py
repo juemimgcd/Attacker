@@ -35,7 +35,7 @@ async def _list(
     capability: str | None = None,
     tag: str | None = None,
 ) -> list[dict[str, Any]]:
-    return await request.app.state.equipment_repository.list_packages(
+    return await request.app.state.equipment_service.list_packages(
         package_type=package_type,
         package_id=package_id,
         version=version,
@@ -69,7 +69,7 @@ async def list_provider_packages(
 @router.get("/provider-packages/{package_id}")
 async def get_provider_package(package_id: str, request: Request) -> dict[str, Any]:
     try:
-        return await request.app.state.equipment_repository.get_package(
+        return await request.app.state.equipment_service.get_package(
             PackageType.provider, package_id
         )
     except EQUIPMENT_ERRORS as exc:
@@ -85,7 +85,7 @@ async def list_provider_instances(
     enabled: bool | None = None,
     include_history: bool = False,
 ) -> list[dict[str, Any]]:
-    return await request.app.state.equipment_repository.list_provider_instances(
+    return await request.app.state.equipment_service.list_provider_instances(
         instance_id=instance_id,
         environment=environment,
         health_status=health_status,
@@ -97,7 +97,7 @@ async def list_provider_instances(
 @router.get("/provider-instances/{instance_id}")
 async def get_provider_instance(instance_id: str, request: Request) -> dict[str, Any]:
     try:
-        return await request.app.state.equipment_repository.get_provider_instance(instance_id)
+        return await request.app.state.equipment_service.get_provider_instance(instance_id)
     except EQUIPMENT_ERRORS as exc:
         _raise_http(exc)
 
@@ -123,7 +123,7 @@ async def list_skills(
 @router.get("/skills/{skill_id}")
 async def get_skill(skill_id: str, request: Request) -> dict[str, Any]:
     try:
-        return await request.app.state.equipment_repository.get_package(PackageType.skill, skill_id)
+        return await request.app.state.equipment_service.get_package(PackageType.skill, skill_id)
     except EQUIPMENT_ERRORS as exc:
         _raise_http(exc)
 
@@ -179,7 +179,7 @@ async def _enable(
     enabled: bool,
 ) -> dict[str, Any]:
     try:
-        return await request.app.state.equipment_repository.set_package_enabled(
+        return await request.app.state.equipment_service.set_package_enabled(
             package_type, package_id, enabled
         )
     except EQUIPMENT_ERRORS as exc:
@@ -229,7 +229,9 @@ async def create_provider_instance(
 @router.post("/provider-instances/{instance_id}/enable")
 async def enable_provider_instance(instance_id: str, request: Request) -> dict[str, Any]:
     try:
-        return await request.app.state.equipment_repository.set_instance_enabled(instance_id, True)
+        return await request.app.state.equipment_service.set_provider_instance_enabled(
+            instance_id, True
+        )
     except EQUIPMENT_ERRORS as exc:
         _raise_http(exc)
 
@@ -237,7 +239,9 @@ async def enable_provider_instance(instance_id: str, request: Request) -> dict[s
 @router.post("/provider-instances/{instance_id}/disable")
 async def disable_provider_instance(instance_id: str, request: Request) -> dict[str, Any]:
     try:
-        return await request.app.state.equipment_repository.set_instance_enabled(instance_id, False)
+        return await request.app.state.equipment_service.set_provider_instance_enabled(
+            instance_id, False
+        )
     except EQUIPMENT_ERRORS as exc:
         _raise_http(exc)
 

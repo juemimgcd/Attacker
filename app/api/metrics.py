@@ -41,10 +41,10 @@ async def prometheus_metrics(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid metrics API key",
             )
-    repository = getattr(request.app.state, "job_repository", None)
-    if repository is not None:
+    job_service = getattr(request.app.state, "job_application_service", None)
+    if job_service is not None:
         try:
-            snapshot = await repository.metrics_snapshot(
+            snapshot = await job_service.metrics_snapshot(
                 stale_after_seconds=settings.worker.heartbeat_seconds * 3
             )
             refresh_job_metrics(snapshot)

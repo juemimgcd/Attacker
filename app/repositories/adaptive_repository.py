@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -18,6 +18,7 @@ from app.models import (
     RunStepRecord,
     TargetRecord,
 )
+from app.repositories.event_store import EventStore
 from app.schemas.adaptive_agent_schema import (
     CandidateSnapshot,
     CoverageFact,
@@ -51,8 +52,13 @@ from app.services.finding_fingerprint import finding_fingerprint
 class AdaptiveRepository:
     """为每个 operation 提供幂等写入，并保持 run 内事件顺序和引用完整性。"""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        event_store: EventStore | None = None,
+    ) -> None:
         self.session_factory = session_factory
+        self.events = event_store or EventStore(session_factory)
 
     async def create_run(
         self,
@@ -144,28 +150,25 @@ class AdaptiveRepository:
             )
             session.add(run)
             await session.flush()
-            session.add(
-                EventRecord(
-                    id=str(uuid4()),
-                    run_id=run_id,
-                    sequence=1,
-                    operation_id=f"{run_id}:run_started",
-                    event_type="run_started",
-                    evidence_json={
-                        "goal_id": f"{mode}:{run_id}",
-                        "mode": mode,
-                        "thread_id": thread_id,
-                        "dataset_sha256": dataset.sha256,
-                        "case_order": [case.id for case in dataset.cases],
-                        "policy": effective_policy.model_dump(mode="json"),
-                        "baseline_run_id": baseline_run_id,
-                        "planner": planner_snapshot,
-                        "test_principal_refs": test_principal_refs or [],
-                        "evaluator_snapshot": evaluator_snapshot,
-                        "candidate_universe_checksum": candidate_universe_checksum,
-                        "equipment_snapshot": equipment_snapshot or [],
-                    },
-                )
+            await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                operation_id=f"{run_id}:run_started",
+                event_type="run_started",
+                evidence={
+                    "goal_id": f"{mode}:{run_id}",
+                    "mode": mode,
+                    "thread_id": thread_id,
+                    "dataset_sha256": dataset.sha256,
+                    "case_order": [case.id for case in dataset.cases],
+                    "policy": effective_policy.model_dump(mode="json"),
+                    "baseline_run_id": baseline_run_id,
+                    "planner": planner_snapshot,
+                    "test_principal_refs": test_principal_refs or [],
+                    "evaluator_snapshot": evaluator_snapshot,
+                    "candidate_universe_checksum": candidate_universe_checksum,
+                    "equipment_snapshot": equipment_snapshot or [],
+                },
             )
         return run_id, target_id, thread_id, effective_policy
 
@@ -217,20 +220,13 @@ class AdaptiveRepository:
         evidence: dict[str, Any],
         step_id: str | None = None,
     ) -> str:
-        async with self.session_factory.begin() as session:
-            existing = await session.scalar(
-                select(EventRecord).where(EventRecord.operation_id == operation_id)
-            )
-            if existing is not None:
-                return existing.id
-            return await self._append_event(
-                session,
-                run_id=run_id,
-                operation_id=operation_id,
-                event_type=event_type,
-                evidence=evidence,
-                step_id=step_id,
-            )
+        return await self.events.append(
+            run_id=run_id,
+            operation_id=operation_id,
+            event_type=event_type,
+            evidence=evidence,
+            step_id=step_id,
+        )
 
     async def initialize_hypotheses(
         self,
@@ -1422,26 +1418,14 @@ class AdaptiveRepository:
         evidence: dict[str, Any],
         step_id: str | None = None,
     ) -> str:
-        existing = await session.scalar(
-            select(EventRecord).where(EventRecord.operation_id == operation_id)
-        )
-        if existing is not None:
-            return existing.id
-        last_sequence = await session.scalar(
-            select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
-        )
-        event = EventRecord(
-            id=str(uuid4()),
+        return await self.events.append_in_session(
+            session,
             run_id=run_id,
-            step_id=step_id,
-            sequence=int(last_sequence or 0) + 1,
             operation_id=operation_id,
             event_type=event_type,
-            evidence_json=evidence,
+            evidence=evidence,
+            step_id=step_id,
         )
-        session.add(event)
-        await session.flush()
-        return event.id
 
     async def _execution_evidence_ids(
         self,

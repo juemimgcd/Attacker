@@ -18,6 +18,7 @@ from app.infrastructure.database import Database
 from app.infrastructure.secrets import build_secret_broker
 from app.repositories.adaptive_repository import AdaptiveRepository
 from app.repositories.equipment_repository import EquipmentRepository
+from app.repositories.event_store import EventStore
 from app.repositories.job_repository import JobRepository
 from app.repositories.run_repository import RunRepository
 from app.repositories.stateful_repository import StatefulRepository
@@ -27,7 +28,7 @@ from app.services.adaptive_run_service import (
 )
 from app.services.equipment_service import EquipmentService
 from app.services.harness_service import HarnessService
-from app.services.job_service import JobDispatcher
+from app.services.job_service import JobApplicationService, JobDispatcher
 from app.services.replay_service import ReplayService
 from app.services.report_service import ReportService
 from app.services.run_service import DeterministicRunService
@@ -55,11 +56,14 @@ class AppRuntime:
     stateful_run_service: StatefulRunService
     replay_service: ReplayService
     report_service: ReportService
+    job_application_service: JobApplicationService
     job_dispatcher: JobDispatcher
     catalog_ready: bool
 
     def install_on(self, app: Any) -> None:
         for field_name in self.__dataclass_fields__:
+            if field_name.endswith("_repository"):
+                continue
             setattr(app.state, field_name, getattr(self, field_name))
 
 
@@ -82,10 +86,11 @@ async def create_runtime(
         ):
             pass
         async with open_checkpointer(config.checkpoint, setup_schema=False) as checkpointer:
-            run_repository = RunRepository(database.session_factory)
-            adaptive_repository = AdaptiveRepository(database.session_factory)
-            stateful_repository = StatefulRepository(database.session_factory)
-            equipment_repository = EquipmentRepository(database.session_factory)
+            event_store = EventStore(database.session_factory)
+            run_repository = RunRepository(database.session_factory, event_store)
+            adaptive_repository = AdaptiveRepository(database.session_factory, event_store)
+            stateful_repository = StatefulRepository(database.session_factory, event_store)
+            equipment_repository = EquipmentRepository(database.session_factory, event_store)
             job_repository = JobRepository(database.session_factory)
             equipment_metrics = EquipmentMetrics()
             equipment_service = EquipmentService(
@@ -137,6 +142,10 @@ async def create_runtime(
                 run_repository,
             )
             report_service = ReportService(run_repository, equipment_repository)
+            job_application_service = JobApplicationService(
+                job_repository,
+                default_max_attempts=config.worker.max_attempts,
+            )
             job_dispatcher = JobDispatcher(
                 deterministic_run_service=run_service,
                 adaptive_run_service=adaptive_run_service,
@@ -160,6 +169,7 @@ async def create_runtime(
                 stateful_run_service=stateful_run_service,
                 replay_service=replay_service,
                 report_service=report_service,
+                job_application_service=job_application_service,
                 job_dispatcher=job_dispatcher,
                 catalog_ready=True,
             )

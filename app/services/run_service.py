@@ -41,6 +41,7 @@ from app.schemas.target_schema import TargetConfig
 from app.services.attack_executor import AttackExecutor
 from app.services.evaluator_service import EvaluatorService
 from app.services.prompt_governance import redact_sensitive_text
+from app.services.run_lifecycle import RunCreatedHook, notify_run_created
 from app.services.sample_loader import BlackBoxDatasetLoader
 from app.services.target_binding import canonical_target_binding, canonical_target_ref
 from app.services.target_connector.http_connector import HTTPTargetConnector
@@ -78,7 +79,12 @@ class DeterministicRunService:
         self.attack_executor = attack_executor or AttackExecutor(connector=self.connector)
         self.equipment_service = equipment_service
 
-    async def run(self, request: DeterministicRunRequest) -> dict[str, Any]:
+    async def run(
+        self,
+        request: DeterministicRunRequest,
+        *,
+        on_run_created: RunCreatedHook | None = None,
+    ) -> dict[str, Any]:
         self._validate_target(request)
         dataset_path = Path(request.dataset_path).resolve()
         samples_root = Path("samples").resolve()
@@ -91,6 +97,7 @@ class DeterministicRunService:
             budget=request.budget,
             mode="deterministic",
             fixture_evidence_refs=request.fixture_evidence_refs,
+            on_run_created=on_run_created,
         )
 
     async def run_single(
@@ -264,6 +271,7 @@ class DeterministicRunService:
         equipment_source_run_id: str | None = None,
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
         fixture_evidence_refs: dict[str, str] | None = None,
+        on_run_created: RunCreatedHook | None = None,
     ) -> dict[str, Any]:
         """执行冻结数据集，并在每个 Case 后持久化可恢复审计事实。"""
 
@@ -307,6 +315,7 @@ class DeterministicRunService:
             target_call_count += 1
 
         try:
+            await notify_run_created(on_run_created, run_id)
             await self._freeze_equipment(
                 run_id,
                 target,
