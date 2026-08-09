@@ -22,6 +22,7 @@ from app.models import (
     StateSnapshotRecord,
     TargetRecord,
 )
+from app.repositories.event_store import EventStore
 from app.schemas.attack_sample_schema import BlackBoxCase
 from app.schemas.graybox_schema import AttackPolicy, GrayBoxCase, LoadedGrayBoxDataset
 from app.schemas.run_schema import LoadedDataset, RunBudget
@@ -47,8 +48,13 @@ CaseT = TypeVar("CaseT", bound=CaseWithId)
 class StatefulRepository:
     """所有状态对象带 Run 和身份作用域，避免测试夹具跨运行泄露。"""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        event_store: EventStore | None = None,
+    ) -> None:
         self.session_factory = session_factory
+        self.events = event_store or EventStore(session_factory)
 
     async def create_run(
         self,
@@ -734,26 +740,14 @@ class StatefulRepository:
         evidence: dict[str, Any],
         step_id: str | None = None,
     ) -> str:
-        existing = await session.scalar(
-            select(EventRecord).where(EventRecord.operation_id == operation_id)
-        )
-        if existing is not None:
-            return existing.id
-        sequence = await session.scalar(
-            select(func.max(EventRecord.sequence)).where(EventRecord.run_id == run_id)
-        )
-        event = EventRecord(
-            id=str(uuid4()),
+        return await self.events.append_in_session(
+            session,
             run_id=run_id,
-            step_id=step_id,
-            sequence=int(sequence or 0) + 1,
             operation_id=operation_id,
             event_type=event_type,
-            evidence_json=evidence,
+            evidence=evidence,
+            step_id=step_id,
         )
-        session.add(event)
-        await session.flush()
-        return event.id
 
     @staticmethod
     def _fixture_dict(fixture: StateFixtureRecord) -> dict[str, Any]:

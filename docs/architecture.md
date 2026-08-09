@@ -1,513 +1,281 @@
 # Attacker Architecture
 
-> 本文描述 Attacker v1 的目标架构。当前代码仍是 FastAPI + DuckDB/Parquet 原型；本文
-> 不代表所有能力已经实现。
+> 本文描述截至 2026-08-09 的已实现架构。历史阶段计划保留在
+> `docs/superpowers/plans/`，不作为当前运行时事实来源。
 
-## 1. 架构目标
+## 1. 系统目标与边界
 
-Attacker 在明确授权的测试环境中评测 AI Agent，并输出可解释、可追踪、可回放的风险
-证据。系统同时支持：
+Attacker 在明确授权的测试环境中评测 AI Agent，保存可追踪、可恢复、可重建报告的
+Evidence 和 Finding。系统支持两种编排方式与三个观测阶段：
 
-- **Deterministic Mode**：固定 Dataset 和执行顺序，不调用 LLM；
-- **Adaptive Mode**：由 LangGraph 编排，使用 LLM 规划下一条已批准 Case；
-- **Human Review**：高风险步骤执行前暂停并等待批准；
-- **Recovery**：进程中断后从 checkpoint 恢复工作流；
-- **Replay**：使用历史快照重新评测并比较 Finding。
-- **Black-box Evaluation**：仅通过标准 Request/Response 测试输入和输出边界；
-- **Gray-box Evaluation**：通过脱敏 Tool/Policy Trace 验证授权和副作用；
-- **Stateful Evaluation**：通过测试专用 Memory/RAG 接口验证持久污染和隔离。
+- Deterministic：固定 Case 顺序，不依赖 Planner 或 LangGraph；
+- Adaptive：LangGraph 只编排候选选择、审批、恢复和停止；
+- Black-box：观察请求、响应、预算与 Evaluator；
+- Gray-box：额外观察脱敏后的 Tool/Policy/Approval Trace；
+- Stateful：额外观察隔离测试 Memory、RAG、身份和清理事实。
+
+Planner 不是授权主体，checkpoint 不是审计事实源，Job 状态也不能代替 Run 状态。
+
+## 2. 当前组件关系
 
 ```text
-+-------------------------------------------------------+
-| API / Application                                    |
-| FastAPI / RunService / ApprovalService / ReportService|
-+---------------------------+---------------------------+
-                            |
-              +-------------+-------------+
-              |                           |
-              v                           v
-+---------------------------+  +------------------------+
-| Deterministic Runner      |  | LangGraph Workflow     |
-| fixed case order          |  | plan / route / resume  |
-+-------------+-------------+  +-----------+------------+
-              |                            |
-              +-------------+--------------+
-                            v
-+-------------------------------------------------------+
-| Deterministic Domain Core                             |
-| Policy / Connector / Evaluator / Evidence / Finding  |
-+---------------------------+---------------------------+
-                            |
-              +-------------+-------------+
-              |                           |
-              v                           v
-+---------------------------+  +------------------------+
-| SQLite Business Facts     |  | Graph Checkpoint       |
-| Run/Event/Finding/Replay  |  | control-flow recovery  |
-+---------------------------+  +------------------------+
+FastAPI routes / CLI
+        |
+        v
+Application services
+Run / Adaptive / Replay / Equipment / Job / Report / Harness
+        |
+        +-----------------------+
+        |                       |
+        v                       v
+Domain pipelines          LangGraph workflow
+Policy / Evaluator        plan / gate / pause / resume / stop
+GrayBoxCasePipeline              |
+        |                        |
+        +-----------+------------+
+                    v
+Repositories + EventStore
+        |
+        +-----------------------+
+        |                       |
+        v                       v
+SQLAlchemy business DB     LangGraph checkpoint
+SQLite (local/test)        SQLite (local/test)
+PostgreSQL (production)    PostgreSQL (production)
 ```
 
-## 2. 设计原则
+依赖方向是 `api -> services/workflows -> repositories -> infrastructure`。FastAPI
+`app.state` 只安装应用服务和运行时设施，不暴露 Repository；Worker CLI 可从
+`AppRuntime` 取得 `JobRepository`，因为租约领取本身就是 Worker 基础设施职责。
 
-### 2.1 Deterministic core, agentic orchestration
+## 3. 模块职责
 
-Policy、Target 调用、Evaluator、Evidence、Finding 和报告都是确定性核心。LLM 只在
-Adaptive Mode 的 Planner Node 中提出下一步。
+| 模块 | 责任 | 不负责 |
+|---|---|---|
+| `app/api` | HTTP 参数、状态码、应用服务调用 | SQL、租约、策略推断 |
+| `app/services` | Use case 编排、Policy、Evaluator、共享 Pipeline | FastAPI 响应细节 |
+| `app/workflows` | Adaptive 控制流与 checkpoint 投影 | 业务事实存储 |
+| `app/repositories` | 事务、幂等、查询和事实持久化 | Case 选择、HTTP 路由 |
+| `app/infrastructure` | 数据库、checkpoint、Secret、模型 Adapter | 评测结论 |
+| `app/equipment` | Catalog、Schema、Runner、安全执行辅助 | 绕过 Core Policy |
+| `app/schemas` | 跨层输入、输出与持久快照契约 | I/O 副作用 |
 
-### 2.2 Policy before execution
+`app/runtime.py` 是 composition root：按依赖顺序创建数据库、共享 `EventStore`、
+Repository、应用服务、工作流与装备运行时。
 
-Planner 输出不是授权。每次 Target 调用前必须重新校验：
+## 4. 运行路径
 
-- Target 是否在授权范围；
-- Case 是否属于当前 Dataset 和 allowlist；
-- 风险等级是否需要审批；
-- 运行时间、步骤和 Target 调用预算是否充足。
-
-### 2.3 Evidence before claims
-
-Finding 必须引用已保存的 Evidence Event。报告不能根据临时 Graph State 或日志推断
-安全结论。
-
-### 2.4 Bounded autonomy
-
-Adaptive Mode 只能：
-
-- 从批准 Case 中选择下一条；
-- 给出选择理由；
-- 根据已脱敏 Finding 摘要调整顺序；
-- 在预算内继续或结束。
-
-它不能创建任意攻击、修改 Target、绕过审批或覆盖 Judge。
-
-### 2.5 Two stores, two responsibilities
-
-- SQLite 保存产品和审计事实；
-- LangGraph Checkpoint 保存控制流恢复状态。
-
-两者不得互相替代。
-
-## 3. 运行模式
-
-### 3.1 Deterministic Mode
+### 4.1 Deterministic black-box
 
 ```text
-create run
-  -> load dataset snapshot
-  -> iterate cases
-  -> policy gate
-  -> execute target
+load and freeze dataset
+  -> create Run
+  -> freeze equipment binding
+  -> iterate Cases
+  -> validate preconditions and budget
+  -> call Target
   -> evaluate
-  -> persist event/finding
-  -> generate report
+  -> persist Event / Finding
+  -> finalize Run
 ```
 
-用途：
+它不经过 LangGraph。`DeterministicRunService` 负责数据集路径边界、预算、目标绑定、
+中断终态和逐 Case 恢复事实。
 
-- 回归评测；
-- Judge 校准；
-- 演示可复现结果；
-- 为 Adaptive Mode 提供比较基线。
+### 4.2 Gray-box shared pipeline
 
-Deterministic Mode 不经过 LangGraph，避免把普通批处理包装成无意义的状态图。
+确定性灰盒和自适应灰盒共用 `GrayBoxCasePipeline`：
 
-### 3.2 Adaptive Mode
+```text
+ensure Step
+  -> execute Target with stable operation_id
+  -> redact request and response
+  -> parse Tool/Policy/Approval Trace
+  -> persist target execution
+  -> normalize untrusted observation
+  -> deterministic evaluation
+  -> persist case and optional Finding
+```
+
+两种模式只在“Case 如何被选中、是否暂停审批、何时停止”上不同。连接器、脱敏、
+Trace 解析、评估和落库只有一份实现，避免基线与自适应语义漂移。
+
+### 4.3 Adaptive gray-box
+
+当前图节点为：
 
 ```text
 START
-  |
-  v
-initialize_run
-  |
-  v
-plan_next_case <---------------------------+
-  |                                        |
-  v                                        |
-policy_gate                                |
-  |                                        |
-  +-- denied ----------> record_skip -------+
-  |                                        |
-  +-- approval_required -> human_review     |
-  |                         |               |
-  |                         +-- rejected ---+
-  |                         |
-  |                         +-- approved
-  v
-execute_target
-  |
-  v
-evaluate_result
-  |
-  v
-persist_evidence
-  |
-  v
-decide_next
-  |
-  +-- continue -----------------------------+
-  |
-  +-- finish -> generate_report -> END
+  -> initialize_run
+  -> build_candidates
+  -> plan_next_case
+       | execute candidate
+       v
+     policy_gate
+       | approval required -> prepare_human_review -> human_review --+
+       | deny -> skip                                           |
+       | allow                                                  |
+       v                                                        |
+     execute -> normalize_observation -> evaluate -> persist    |
+       -> update_facts -> decide_next -> build_candidates -------+
+
+plan_next_case -> finish_gate -> finalize -> END
+plan_next_case -> planner_pause -> build_candidates
 ```
 
-### 3.3 三阶段安全评测
+Policy Gate 在所有 Target 副作用之前运行。Human Review 恢复后再次经过 Policy Gate；
+审批不是跨 Run 或跨 Case 的永久授权。
 
-运行模式描述“如何调度 Case”，三个安全阶段描述“可以观测目标 Agent 的哪些边界”。
-两者是正交关系：
+### 4.4 Stateful
 
-| 阶段 | Target 契约 | 主要证据 | 安全能力 |
-|---|---|---|---|
-| 纯黑盒 | Request/Response | 请求、响应、Evaluator、预算 | 注入、泄露、多轮上下文污染、资源消耗 |
-| 灰盒 Agent | Tool/Policy/Approval Trace | 工具、参数、身份、授权和副作用 | 工具越权、参数越权、审批绕过、工具输出污染、循环 |
-| 带状态 Agent | Memory/RAG/Checkpoint | Memory 快照、Retrieval Trace、隔离标识、恢复事件 | Memory/RAG 污染、跨用户污染、恢复安全、Replay |
+`StatefulRunService` 使用测试专用的 `MemoryAdapter` 和 `RAGAdapter`，所有数据按
+run/tenant/user/session 隔离。正常结束、异常和协程取消都会尝试清理夹具，并记录清理
+成功或失败事实。脆弱 Profile 只用于显式沙箱测试，不能解释为生产后端已被验证。
 
-三个阶段全部属于最终架构。第一阶段主要使用 Deterministic Mode；第二阶段引入完整
-LangGraph Adaptive Workflow；第三阶段在同一工作流上增加状态、知识和恢复观测能力。
-
-#### 纯黑盒边界
-
-- 不要求访问目标内部实现；
-- 不根据猜测宣称工具越权；
-- 使用 Canary 检测泄露；
-- 使用多轮 Session 检测短期上下文污染；
-- 使用运行预算检测资源消耗。
-
-#### 灰盒边界
-
-- Target 通过 Adapter 提供脱敏 `ToolEvent`、`PolicyEvent` 和 `ApprovalEvent`；
-- Tool Trace 必须包含调用身份、参数摘要、Policy Decision 和实际副作用；
-- 测试使用 Mock Tool 或沙箱资源；
-- 最终文本和 Tool Trace 共同构成 Finding Evidence。
-
-#### 带状态边界
-
-- Memory 和 RAG 只能连接隔离测试数据；
-- Retrieval Trace 包含文档 ID、排名、来源和权限过滤结果；
-- Session、User 和 Tenant ID 必须进入隔离校验；
-- Checkpoint 恢复时重新校验 Policy；
-- 测试结束后清理污染数据并记录清理结果。
-
-## 4. Graph State
-
-Graph State 是控制流投影，不是完整业务对象：
-
-```python
-class AttackGraphState(TypedDict):
-    run_id: str
-    target_id: str
-    dataset_version: str
-    policy_version: str
-    allowed_case_ids: list[str]
-    completed_case_ids: list[str]
-    current_case_id: str | None
-    finding_summaries: list[dict]
-    target_call_count: int
-    remaining_steps: int
-    next_action: str
-    event_sequence: int
-    status: str
-```
-
-约束：
-
-- 使用 ID 引用数据库对象；
-- 不保存 Target 凭据；
-- 不保存未经脱敏的完整响应；
-- Finding 只传递 Planner 所需摘要；
-- `remaining_steps` 只是控制流缓存，真实预算以数据库和 Policy 为准；
-- 恢复时先读取业务数据库，再校验 checkpoint。
-
-## 5. 节点职责
-
-| 节点 | 是否调用 LLM | 输入 | 输出 |
-|---|---:|---|---|
-| `initialize_run` | 否 | `run_id` | 快照、预算、已完成 Case |
-| `plan_next_case` | 是 | allowlist、脱敏摘要 | `PlannerDecision` |
-| `policy_gate` | 否 | Case、Target、Policy、预算 | allow/deny/approval |
-| `human_review` | 否 | Approval Request | interrupt/resume |
-| `execute_target` | 否 | 已批准 Case | Target Response Event |
-| `evaluate_result` | 否 | Case、响应引用 | Evaluator Results |
-| `persist_evidence` | 否 | Evaluator Results | Event/Finding 引用 |
-| `record_skip` | 否 | Policy/审批结果 | Skip Event |
-| `decide_next` | 否 | 预算、状态、停止规则 | continue/finish |
-| `generate_report` | 否 | `run_id` | Markdown/JSON 报告 |
-
-Node 不直接包含复杂 SQL、HTTP 模板或 Judge 规则；这些逻辑属于领域服务和 Adapter。
-
-## 6. Planner 契约
-
-Planner 使用窄输入：
-
-```python
-class PlannerContext(BaseModel):
-    allowed_cases: list[CaseSummary]
-    completed_case_ids: list[str]
-    finding_summaries: list[FindingSummary]
-    remaining_steps: int
-
-
-class PlannerDecision(BaseModel):
-    action: Literal["execute_case", "finish_run"]
-    case_id: str | None
-    reason: str
-```
-
-验证规则：
-
-- `execute_case` 必须提供 `case_id`；
-- `case_id` 必须存在于 allowlist 且尚未完成；
-- `finish_run` 不允许携带 `case_id`；
-- 非法或无法解析的输出生成 `planner_rejected` Event；
-- 连续失败达到上限后，Run 进入 `failed`，不回退到任意工具调用。
-
-## 7. Policy 与预算
-
-```python
-class AttackPolicy(BaseModel):
-    allowed_target_ids: set[str]
-    allowed_case_ids: set[str]
-    max_steps: int
-    max_target_calls: int
-    max_duration_seconds: int
-    approval_required_severities: set[RiskLevel]
-    stop_on_critical: bool
-```
-
-预算分为：
-
-- Graph step 上限；
-- Planner 模型请求上限；
-- Target 调用上限；
-- 总持续时间；
-- 单次 Target 超时；
-- Case 重试上限。
-
-Policy Gate 在 Target 调用前执行最终校验。Graph 条件边只负责路由，不能替代安全校验。
-
-## 8. Human Review
-
-高风险 Case 触发 `interrupt`，创建 Approval Request：
+### 4.5 Durable Job
 
 ```text
-approval_id
-run_id
-case_id
-requested_at
-risk_summary
-status: pending | approved | rejected | expired
-resolved_at
-resolved_by
-reason
+enqueue -> lease -> running -> create Run -> bind job.run_id
+    |                                  |
+    | cancel_requested                 v
+    +------------------------> cancel dispatch task
+                                      -> Run persists cancelled
+                                      -> Job becomes cancelled
 ```
 
-恢复规则：
+`JobRepository` 负责 request 幂等、租约 owner/token/expiry、重试和恢复；
+`JobDispatcher` 只把已校验 payload 路由到 Run Service。Run 创建钩子会立即写入
+`run_jobs.run_id`。Worker 在轮询取消信号的同时续租，并通过 `asyncio` 协作式取消中断
+正在等待的 Target 调用。
 
-1. API 使用 `run_id` 和 `approval_id` 提交决定；
-2. ApprovalService 校验请求仍为 pending；
-3. 决定以 Event 写入业务数据库；
-4. 通过相同 LangGraph `thread_id` 恢复；
-5. `policy_gate` 再次确认 Target、Case 和预算；
-6. 只有批准且仍满足 Policy 时才能执行。
+取消的硬边界：Connector 必须在可取消的 async await 点执行 I/O。无法协作取消的本地
+阻塞代码仍需要进程隔离或 Harness 超时，不能仅依赖协程取消。
 
-审批不是永久授权，不能复用于其他 Run 或 Case。
+## 5. 事实、幂等与并发
 
-## 9. Checkpoint 与业务事实
+### 5.1 EventStore
 
-### 9.1 Checkpoint
+所有 Run Event 通过共享 `EventStore` 追加：
 
-Checkpoint 保存：
+- `operation_id` 全局唯一，重复提交返回已有 Event；
+- `runs.event_sequence` 是 Run 内序号分配器；
+- 单条原子 `UPDATE ... RETURNING` 递增序号；
+- Event 与同一领域变更可在一个数据库事务中提交；
+- 不使用并发不安全的 `MAX(sequence) + 1`。
 
-- `thread_id`；
-- 当前节点；
-- Graph State；
-- 条件边；
-- interrupt；
-- 恢复所需元数据。
+该设计保证同一 Run 的并发写入得到唯一、单调序号。序号表达已提交顺序，不表达不同
+外部系统副作用之间的全局因果关系。
 
-其用途是“从哪里继续执行”。
+### 5.2 Stable operation IDs
 
-### 9.2 SQLite
+Target、Evaluation、Approval、Memory/RAG 与清理操作使用稳定 `operation_id`。恢复时先查
+业务事实：已完成的物理调用被复用，不重复执行；Finding 和 Event 同样按稳定标识幂等。
 
-SQLite 保存：
+### 5.3 Two stores
 
-- Target 和授权快照；
-- Dataset、Case、Policy、Evaluator 版本；
-- Run 和 Step；
-- Event 和 Evidence；
-- Finding；
-- Approval Decision；
-- Tool/Policy/Approval Trace；
-- Memory Snapshot 和 Retrieval Event；
-- Session、User 和 Tenant 隔离标识；
-- Replay；
-- 报告索引。
+SQLAlchemy 业务库保存“实际发生了什么”：
 
-其用途是“实际发生了什么”。
+- Run、Step、Event、Evidence、Finding；
+- Dataset、Target、Policy、Evaluator 和 Equipment 快照；
+- Approval、Replay、Memory、Retrieval 和 Cleanup；
+- Durable Job、租约和 Worker heartbeat。
 
-### 9.3 一致性
+LangGraph checkpoint 只保存“控制流从哪里继续”：当前节点、interrupt 和有界 State。
+报告和 Replay 只从业务库重建；checkpoint 不能覆盖已提交业务事实。
 
-- 每个有副作用节点生成稳定 `operation_id`；
-- Repository 对 `operation_id` 建唯一约束；
-- 节点重试不会重复调用 Target 或重复创建 Finding；
-- Tool 调用和 Memory 写入同样使用稳定 `operation_id`；
-- Event 使用 Run 内单调 `sequence`；
-- 完成领域事务后才推进 checkpoint；
-- checkpoint 与数据库冲突时，以数据库最后提交事件为准；
-- 报告完全从数据库重建。
+## 6. Graph State 契约
 
-## 10. Evaluator Pipeline
+`AttackGraphState` 只保存恢复所需的引用、摘要、计数和停止状态，主要分组如下：
 
-```text
-Target Response
-  -> transport validation
-  -> deterministic rules
-  -> structured response checks
-  -> optional model judge
-  -> finding aggregator
+- identity：`run_id`、`target_id`、`thread_id`、`checkpoint_ref`；
+- candidate/control：候选快照、已完成/拒绝 Case、当前 operation/step；
+- facts：coverage、hypothesis/observation/finding/information-gain refs；
+- policy/review：decision、reason、policy Event、approval；
+- bounded usage：Planner/Provider/Target 调用、token、cost、duration 派生计数；
+- loop control：重复决策、重复状态、无收益步数、transport failure；
+- terminal：`next_action`、`status`、`terminal_reason`、`stop_reason`。
+
+完整响应、原始 Trace、Secret 和权威预算事实不进入 checkpoint。恢复时先读取 SQL 事实，
+再重建运行时对象并重新校验 Policy。
+
+## 7. Policy、Planner 与 Evidence
+
+Planner 只接收候选快照、脱敏 Observation、Evidence 引用、Coverage/Hypothesis 摘要和剩余
+步数。它只能返回结构化 `PlannerDecision`，不能创建任意工具调用、Target 或攻击动作。
+
+Policy Gate 校验：
+
+- Target、Case、Capability Contract 和 Provider Instance allowlist；
+- Target 调用、Provider 调用、Graph step、duration 与 cost 预算；
+- Case 风险等级和审批状态；
+- 身份引用、重复次数和停止规则。
+
+Finding 必须引用已持久化 Evidence。Trace 不完整时灰盒结果显式降为 inconclusive/error，
+不能根据最终文本猜测内部工具越权。Planner 与可选 Model Judge 使用不同 Adapter、快照和
+用量统计。
+
+## 8. Secret 与执行安全
+
+- Target Secret 只保存在请求期/运行时内存或受控 Secret Broker lease 中；
+- Durable Job payload 拒绝 password、token、API key 等明文字段；
+- Request、Response、Trace、日志和报告在持久化前脱敏；
+- checkpoint 不保存 Header、Token 或完整未信任输出；
+- 默认目标是本地、测试或沙箱；公共/不可解析目标需要显式授权开关；
+- Planner 没有 Shell、文件系统、浏览器或任意 HTTP 能力；
+- Equipment 不能绕过 Core Policy、审批、预算、Evidence 和清理边界。
+
+OIDC/JWT、用户体系、RBAC 和审批人组织权限仍不属于当前已交付范围；部署方必须在入口层
+提供这些控制，不能把 API key 等同于完整身份治理。
+
+## 9. 启动与关闭
+
+`create_runtime` 的关键顺序：
+
+1. 创建并初始化业务数据库；
+2. 在锁保护下准备 checkpoint schema；
+3. 创建共享 EventStore 与 Repository；
+4. 构建 Equipment/Harness，并重载 Catalog；
+5. 恢复待清理资源；
+6. 构建 Run、Replay、Report、Job 应用服务和 LangGraph；
+7. 将非 Repository 组件安装到 FastAPI `app.state`。
+
+关闭时停止接收请求/任务，Worker 排空或取消在途任务，关闭 checkpoint，最后 dispose
+数据库。模块 import 阶段不得连接数据库、模型或 Target。
+
+## 10. 架构决策记录
+
+| 决策 | 选择 | 原因 |
+|---|---|---|
+| ADR-001 | SQL 事实与 graph checkpoint 分离 | 审计事实和控制流恢复的生命周期不同 |
+| ADR-002 | Deterministic 不进入 LangGraph | 普通批处理不需要额外恢复状态机 |
+| ADR-003 | Planner 只选批准候选 | 自主性不能扩大授权边界 |
+| ADR-004 | GrayBoxCasePipeline 跨模式复用 | 防止连接器、脱敏、Trace 和评估语义漂移 |
+| ADR-005 | EventStore 原子分配 Run sequence | 消除 `MAX + 1` 并发竞争 |
+| ADR-006 | Job 显式绑定 Run 并协作取消 | Job 生命周期必须能定位并终止真实执行 |
+| ADR-007 | API 只依赖应用服务 | HTTP 层不拥有事务和持久化规则 |
+
+新增能力应先判断属于 Application、Workflow、Pipeline、Repository 还是 Infrastructure，
+避免在 Router 或 Graph Node 中堆叠 SQL、HTTP 模板和 Evaluator 规则。
+
+## 11. 验证基线
+
+合入架构变更前至少执行：
+
+```bash
+uv sync --locked --python 3.12
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+uv run pytest -q
+uv run python -m compileall -q app conf alembic
 ```
 
-不同阶段要求不同 Evidence：
+持久化变更还必须验证 Alembic 从空库升级到 head。并发/恢复类变更需要包含行为测试，
+例如同一 Run 并发追加 Event、运行中 Job 取消、Target 调用幂等和 checkpoint 恢复。
 
-| 阶段 | Finding 最低 Evidence |
-|---|---|
-| 纯黑盒 | Target Request、Target Response、Evaluator Result |
-| 灰盒 Agent | 黑盒 Evidence + Tool/Policy/Approval Trace |
-| 带状态 Agent | 灰盒 Evidence + Memory/Retrieval/Checkpoint Event |
+## 12. 相关文档
 
-Evidence 不足时结果标记为 `inconclusive`，不能根据最终文本推断内部工具、权限或
-Memory 行为。
-
-优先级：
-
-1. 连接错误和超时单独记录；
-2. 确定性规则优先；
-3. 结构化响应检查其次；
-4. 只有模糊语义场景才使用 Model Judge；
-5. Model Judge 输出结构化结果和理由；
-6. Finding 保存实际命中的 Evidence 引用。
-
-Planner 和 Model Judge 使用不同 Adapter 配置和调用统计，避免职责混淆。
-
-## 11. Connector 契约
-
-```python
-class TargetConnector(Protocol):
-    async def execute(
-        self,
-        *,
-        target: TargetSnapshot,
-        case: AttackCase,
-        operation_id: str,
-    ) -> TargetExecutionResult:
-        ...
-```
-
-Connector 负责：
-
-- 按 Target 模板构造请求；
-- 在最后时刻注入凭据；
-- 超时和响应大小限制；
-- Redirect 目标复核；
-- 解析 JSON/text；
-- 返回统一结果。
-
-Connector 不负责 Case 选择、Policy 决策、Finding 判定和报告。
-
-## 12. 安全模型
-
-### 12.1 Target allowlist
-
-- Target 必须显式配置；
-- 默认面向本地、测试和沙箱；
-- 不扫描未知资产；
-- 不从目标响应发现新 endpoint。
-
-### 12.2 Action allowlist
-
-- Planner 只能选择已批准 Case；
-- 不提供 Shell、浏览器、文件系统和通用 HTTP；
-- 不允许 Planner 直接生成并执行任意 prompt；
-- 高风险 Case 必须审批。
-
-### 12.3 Secret separation
-
-- 凭据不进入 Graph State；
-- 凭据不发送给 Planner；
-- 日志、Evidence 和报告写入前脱敏；
-- checkpoint 不保存 Headers 和 Token；
-- tracing 默认只记录 ID、状态和用量。
-
-## 13. Bootstrap 与 Shutdown
-
-启动顺序：
-
-1. 读取并校验配置；
-2. 初始化日志与脱敏；
-3. 创建 SQLAlchemy Engine；
-4. 校验 Schema 版本；
-5. 创建 Repository；
-6. 创建 Target Connector；
-7. 创建 Planner Model Adapter；
-8. 创建 LangGraph checkpointer；
-9. 编译状态图；
-10. 注册 FastAPI 路由。
-
-关闭顺序：
-
-1. 停止接收新 Run；
-2. 标记或等待正在执行的节点；
-3. flush 领域事件；
-4. 关闭 Model/HTTP Client；
-5. 关闭数据库与 checkpointer。
-
-模块导入阶段不得连接模型、数据库或外部服务。
-
-## 14. 与 AtlasClaw 的取舍
-
-### 借鉴
-
-- 类型化依赖和明确的运行上下文；
-- 外层 Policy、预算、中止与 Evidence；
-- async-first；
-- 模型、Connector 和 Repository Adapter；
-- 启动与关闭生命周期；
-- 结构化事件和敏感数据边界。
-
-### 针对 Attacker 的调整
-
-- 使用 LangGraph 表达明确的评测状态机；
-- 仅 Planner Node 使用模型；
-- 将审批和恢复作为安全评测的一等能力；
-- Checkpoint 与审计事实严格分离。
-
-### 不复制
-
-- 公共 Providers/Skills 市场或从未知 URL 自助安装代码；
-- 通用 Agent Skills、Hooks、Channels；
-- 通用 Memory；
-- 多租户与 Token Pool；
-- 任意工具发现；
-- 与 v1 无关的基础设施。
-
-Attacker vNext 仅增加面向安全评测的受控装备契约：Core 拥有 Capability Contract、
-Policy Gate、预算、审批、Evidence/Finding、持久化快照、Replay 和清理边界；部署方可从
-本地目录或离线包提供 Provider/Skill/Case Pack。企业代码不能通过装备扩展绕过 Core，
-`trusted_enterprise` 子进程只提供故障隔离，`untrusted` 代码必须在平台支持的强沙箱中
-运行。详细边界见 [Equipment Development](equipment-development.md)。
-
-## 15. 架构验收
-
-- 纯黑盒、灰盒 Agent 和带状态 Agent 三个阶段全部通过；
-- 不少于 30 条 Case，其中三个阶段分别不少于 12、10、8 条；
-- Deterministic Mode 不依赖 LLM 和 LangGraph；
-- Adaptive Mode 的所有路径都经过 Policy Gate；
-- Planner 无法选择 allowlist 外的 Case；
-- 高风险 Case 未批准时不能执行；
-- 进程中断后能通过相同 `thread_id` 恢复；
-- 节点重试不重复调用 Target/Tool、写入 Memory 或创建 Finding；
-- 每个 Finding 都能追溯到 Event 和 Evidence；
-- 灰盒 Finding 包含 Tool/Policy Trace，不根据最终文本推断工具越权；
-- Memory/RAG 污染可以被隔离、测量和清理；
-- 跨用户和跨租户污染率为 0；
-- 报告能完全从 SQLite 重建；
-- checkpoint 丢失不会导致业务证据丢失；
-- 模型上下文、日志和 checkpoint 不包含 Target 凭据；
-- Adaptive 与 Deterministic 使用相同 Dataset 和 Evaluator 比较。
+- [Equipment Development](equipment-development.md)：Provider、Skill、Case Pack 和 Contract；
+- [Production Runbook](operations/production-runbook.md)：生产部署、迁移、排空和灾备；
+- `target/summary.md`：V1 验收范围；
+- `TECH_STACK.md`：技术栈与版本边界。

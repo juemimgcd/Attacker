@@ -24,10 +24,7 @@ def _require_queue_enabled() -> None:
 async def enqueue_job(payload: RunJobCreate, request: Request) -> dict:
     _require_queue_enabled()
     try:
-        return await request.app.state.job_repository.enqueue(
-            payload,
-            default_max_attempts=settings.worker.max_attempts,
-        )
+        return await request.app.state.job_application_service.enqueue(payload)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -39,7 +36,7 @@ async def list_jobs(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[dict]:
     _require_queue_enabled()
-    return await request.app.state.job_repository.list(
+    return await request.app.state.job_application_service.list(
         status=job_status.value if job_status else None,
         limit=limit,
     )
@@ -49,7 +46,7 @@ async def list_jobs(
 async def get_job(job_id: str, request: Request) -> dict:
     _require_queue_enabled()
     try:
-        return await request.app.state.job_repository.get(job_id)
+        return await request.app.state.job_application_service.get(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -58,7 +55,7 @@ async def get_job(job_id: str, request: Request) -> dict:
 async def cancel_job(job_id: str, request: Request) -> dict:
     _require_queue_enabled()
     try:
-        return await request.app.state.job_repository.cancel(job_id)
+        return await request.app.state.job_application_service.cancel(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -67,7 +64,7 @@ async def cancel_job(job_id: str, request: Request) -> dict:
 async def retry_job(job_id: str, request: Request) -> dict:
     _require_queue_enabled()
     try:
-        return await request.app.state.job_repository.retry(job_id)
+        return await request.app.state.job_application_service.retry(job_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

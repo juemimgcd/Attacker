@@ -35,6 +35,12 @@ class ReplayService:
         self.equipment_repository = equipment_repository
         self.report_repository = report_repository
 
+    async def get_replays(self, run_id: str) -> dict[str, Any]:
+        replays = await self.repository.list_replays(run_id)
+        if not replays:
+            raise LookupError(f"replay for run {run_id} not found")
+        return {"run_id": run_id, "replays": replays}
+
     async def replay(
         self,
         source_run_id: str,

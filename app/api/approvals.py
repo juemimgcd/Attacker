@@ -10,8 +10,7 @@ router = APIRouter(prefix="/runs", tags=["approvals"])
 @router.get("/{run_id}/approvals")
 async def list_approvals(run_id: str, request: Request) -> list[dict]:
     try:
-        await request.app.state.adaptive_repository.get_run(run_id)
-        return await request.app.state.adaptive_repository.list_approvals(run_id)
+        return await request.app.state.adaptive_run_service.list_approvals(run_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

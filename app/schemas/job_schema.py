@@ -67,6 +67,7 @@ class RunJobView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    run_id: str | None = None
     request_id: str
     kind: JobKind
     status: JobStatus

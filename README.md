@@ -400,7 +400,7 @@ Durable Job 不接受 password、token、API key 等原始 Secret 字段；敏�
 │   ├── equipment/           # 装备发现、校验、执行与 Catalog
 │   ├── infrastructure/      # 数据库、Checkpoint、Secret 与模型适配
 │   ├── repositories/        # SQL 事实存储与持久化 Job
-│   ├── services/            # Policy、Evaluator、Report、Replay、Job
+│   ├── services/            # 应用服务、Policy、Evaluator 与共享执行 Pipeline
 │   └── workflows/           # LangGraph 自适应工作流
 ├── contracts/               # 版本化 Capability Contract
 ├── equipment/               # 内置 Provider、Skill 与 Case Pack

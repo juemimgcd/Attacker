@@ -62,6 +62,70 @@ class EquipmentService:
         self.catalog = catalog
         self.metrics = metrics
 
+    async def list_packages(
+        self,
+        *,
+        package_type: PackageType,
+        package_id: str | None = None,
+        version: str | None = None,
+        enabled: bool | None = None,
+        validation_status: str | None = None,
+        capability: str | None = None,
+        tag: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await self.repository.list_packages(
+            package_type=package_type,
+            package_id=package_id,
+            version=version,
+            enabled=enabled,
+            validation_status=validation_status,
+            capability=capability,
+            tag=tag,
+        )
+
+    async def get_package(
+        self,
+        package_type: PackageType,
+        package_id: str,
+        version: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.repository.get_package(package_type, package_id, version)
+
+    async def list_provider_instances(
+        self,
+        *,
+        instance_id: str | None = None,
+        environment: str | None = None,
+        health_status: str | None = None,
+        enabled: bool | None = None,
+        include_history: bool = False,
+    ) -> list[dict[str, Any]]:
+        return await self.repository.list_provider_instances(
+            instance_id=instance_id,
+            environment=environment,
+            health_status=health_status,
+            enabled=enabled,
+            include_history=include_history,
+        )
+
+    async def get_provider_instance(self, instance_id: str) -> dict[str, Any]:
+        return await self.repository.get_provider_instance(instance_id)
+
+    async def set_package_enabled(
+        self,
+        package_type: PackageType,
+        package_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        return await self.repository.set_package_enabled(package_type, package_id, enabled)
+
+    async def set_provider_instance_enabled(
+        self,
+        instance_id: str,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        return await self.repository.set_instance_enabled(instance_id, enabled)
+
     async def reload(self) -> dict[str, Any]:
         started = perf_counter()
         packages = self.catalog.discover()
