@@ -1,11 +1,13 @@
 """自适应 Run 的 SQL 事实仓库，持久化候选、审批、执行、Evaluation 与 Finding。"""
 
+import secrets
 from collections import Counter
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -73,8 +75,9 @@ class AdaptiveRepository:
         evaluator_snapshot: dict[str, Any] | None = None,
         candidate_universe_checksum: str | None = None,
         equipment_snapshot: list[dict[str, str]] | None = None,
+        requested_run_id: str | None = None,
     ) -> tuple[str, str, str, AttackPolicy]:
-        run_id = str(uuid4())
+        run_id = requested_run_id if requested_run_id is not None else str(uuid4())
         target_id = str(uuid4())
         thread_id = f"attack-run:{run_id}"
         dataset_case_ids = {case.id for case in dataset.cases}
@@ -1328,8 +1331,12 @@ class AdaptiveRepository:
             run.status = status
             run.terminal_reason = terminal_reason
             run.completed_at = datetime.now(UTC)
-            run.completed_cases = sum(
-                count for outcome, count in outcomes.items() if outcome != "pending"
+            run.completed_cases = len(
+                {
+                    step.case_id
+                    for step in steps
+                    if step.outcome not in {"pending", "policy_denied", "approval_rejected"}
+                }
             )
             run.violation_count = outcomes.get("violation", 0)
             run.refused_count = outcomes.get("refused", 0)
@@ -1407,6 +1414,117 @@ class AdaptiveRepository:
             if run is None:
                 raise LookupError(f"run {run_id} not found")
             return run
+
+    async def acquire_resume_claim(
+        self,
+        *,
+        run_id: str,
+        claim_kind: str,
+        checkpoint_id: str,
+        lease_seconds: int,
+    ) -> str:
+        """Atomically claim one checkpoint without holding a transaction during graph I/O."""
+
+        if claim_kind not in {"start", "approval", "planner"}:
+            raise ValueError("unsupported adaptive resume claim kind")
+        if not checkpoint_id:
+            raise ValueError("adaptive resume claim requires a checkpoint identity")
+        if lease_seconds <= 0:
+            raise ValueError("adaptive resume claim lease must be positive")
+
+        now = datetime.now(UTC)
+        owner_token = secrets.token_hex(32)
+        async with self.session_factory.begin() as session:
+            claimed = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(EvaluationRunRecord)
+                    .where(
+                        EvaluationRunRecord.id == run_id,
+                        or_(
+                            EvaluationRunRecord.resume_claim_owner_token.is_(None),
+                            EvaluationRunRecord.resume_claim_expires_at <= now,
+                        ),
+                    )
+                    .values(
+                        resume_claim_kind=claim_kind,
+                        resume_claim_checkpoint_id=checkpoint_id,
+                        resume_claim_owner_token=owner_token,
+                        resume_claim_expires_at=now + timedelta(seconds=lease_seconds),
+                    )
+                ),
+            )
+            if claimed.rowcount == 1:
+                return owner_token
+            exists = await session.scalar(
+                select(EvaluationRunRecord.id).where(EvaluationRunRecord.id == run_id)
+            )
+            if exists is None:
+                raise LookupError(f"run {run_id} not found")
+            raise ValueError("another resume request already owns the run checkpoint")
+
+    async def renew_resume_claim(
+        self,
+        *,
+        run_id: str,
+        claim_kind: str,
+        checkpoint_id: str,
+        owner_token: str,
+        lease_seconds: int,
+    ) -> None:
+        """Renew only the exact checkpoint claim still owned by this caller."""
+
+        now = datetime.now(UTC)
+        async with self.session_factory.begin() as session:
+            renewed = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(EvaluationRunRecord)
+                    .where(
+                        EvaluationRunRecord.id == run_id,
+                        EvaluationRunRecord.resume_claim_kind == claim_kind,
+                        EvaluationRunRecord.resume_claim_checkpoint_id == checkpoint_id,
+                        EvaluationRunRecord.resume_claim_owner_token == owner_token,
+                        EvaluationRunRecord.resume_claim_expires_at > now,
+                    )
+                    .values(
+                        resume_claim_expires_at=now + timedelta(seconds=lease_seconds),
+                    )
+                ),
+            )
+            if renewed.rowcount != 1:
+                raise RuntimeError("adaptive resume claim was lost")
+
+    async def release_resume_claim(
+        self,
+        *,
+        run_id: str,
+        claim_kind: str,
+        checkpoint_id: str,
+        owner_token: str,
+    ) -> bool:
+        """Release only this caller's exact claim; never clear a takeover owner's lease."""
+
+        async with self.session_factory.begin() as session:
+            released = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(EvaluationRunRecord)
+                    .where(
+                        EvaluationRunRecord.id == run_id,
+                        EvaluationRunRecord.resume_claim_kind == claim_kind,
+                        EvaluationRunRecord.resume_claim_checkpoint_id == checkpoint_id,
+                        EvaluationRunRecord.resume_claim_owner_token == owner_token,
+                    )
+                    .values(
+                        resume_claim_kind=None,
+                        resume_claim_checkpoint_id=None,
+                        resume_claim_owner_token=None,
+                        resume_claim_expires_at=None,
+                    )
+                ),
+            )
+            return released.rowcount == 1
 
     async def _append_event(
         self,

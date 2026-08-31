@@ -2,7 +2,9 @@
 
 from fastapi import Depends, FastAPI
 
+from app import __version__
 from app.api.approvals import router as approvals_router
+from app.api.console import router as console_router
 from app.api.equipment import router as equipment_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
@@ -23,9 +25,10 @@ def create_app() -> FastAPI:
         title=settings.app.app_name,
         debug=settings.app.debug,
         lifespan=create_lifespan(),
-        version="v0.1.0",
+        version=__version__,
     )
     app.add_middleware(RequestObservabilityMiddleware, config=settings.observability)
+    app.include_router(console_router)
 
     protected = [Depends(require_api_key)]
     app.include_router(

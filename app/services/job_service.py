@@ -9,14 +9,18 @@ from typing import Any
 
 from loguru import logger
 
-from app.equipment.security import redact
 from app.observability import record_job_event
 from app.repositories.job_repository import JobRepository
 from app.schemas.graybox_schema import DeterministicGrayBoxRunRequest, GrayBoxRunRequest
-from app.schemas.job_schema import JobKind, RunJobCreate
+from app.schemas.job_schema import JobKind, JobStatus, RunJobCreate
 from app.schemas.run_schema import DeterministicRunRequest
 from app.schemas.stateful_schema import StatefulRunRequest
-from app.services.run_lifecycle import RunCreatedHook
+from app.services.run_lifecycle import (
+    RunCreatedHook,
+    RunCreationCancelled,
+    bind_requested_run_id,
+    requested_run_id_from_hook,
+)
 from conf.settings import WorkerSettings
 
 
@@ -76,29 +80,50 @@ class JobDispatcher:
         *,
         on_run_created: RunCreatedHook | None = None,
     ) -> dict[str, Any]:
+        return await self._dispatch(
+            kind,
+            payload,
+            on_run_created=on_run_created,
+        )
+
+    async def _dispatch(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        on_run_created: RunCreatedHook | None,
+    ) -> dict[str, Any]:
+        requested_run_id = requested_run_id_from_hook(on_run_created)
         if kind == JobKind.deterministic.value:
             result = await self.deterministic_run_service.run(
                 DeterministicRunRequest.model_validate(payload),
                 on_run_created=on_run_created,
+                requested_run_id=requested_run_id,
             )
         elif kind == JobKind.adaptive.value:
             result = await self.adaptive_run_service.start(
                 GrayBoxRunRequest.model_validate(payload),
                 on_run_created=on_run_created,
+                requested_run_id=requested_run_id,
             )
         elif kind == JobKind.deterministic_graybox.value:
             result = await self.deterministic_graybox_service.run(
                 DeterministicGrayBoxRunRequest.model_validate(payload),
                 on_run_created=on_run_created,
+                requested_run_id=requested_run_id,
             )
         elif kind == JobKind.stateful.value:
             result = await self.stateful_run_service.run(
                 StatefulRunRequest.model_validate(payload),
                 on_run_created=on_run_created,
+                requested_run_id=requested_run_id,
             )
         else:
             raise ValueError(f"unsupported job kind {kind}")
-        return self._result_reference(result)
+        reference = self._result_reference(result)
+        if requested_run_id is not None and reference["run_id"] != requested_run_id:
+            raise RuntimeError("job dispatch returned a different Run identifier")
+        return reference
 
     @staticmethod
     def _result_reference(result: dict[str, Any]) -> dict[str, Any]:
@@ -180,19 +205,28 @@ class JobWorker:
         monitor: asyncio.Task[None] | None = None
         dispatch_task: asyncio.Task[dict[str, Any]] | None = None
         try:
-            if await self.repository.is_cancel_requested(job_id):
-                raise RuntimeError("job was cancelled before execution")
-            await self.repository.mark_running(
+            started = await self.repository.mark_running(
                 job_id,
                 worker_id=self.worker_id,
                 lease_token=lease_token,
             )
+            if not started:
+                await self.repository.fail(
+                    job_id,
+                    worker_id=self.worker_id,
+                    lease_token=lease_token,
+                    error_code="job_cancelled",
+                    error_summary="cancellation was accepted before the run started",
+                )
+                record_job_event("cancelled")
+                return
             monitor = asyncio.create_task(
                 self._monitor_lease_and_cancellation(job_id, lease_token),
                 name=f"attacker-job-monitor-{job_id}",
             )
+            run_creation_cancellation = asyncio.Event()
 
-            async def bind_run(run_id: str) -> None:
+            async def bind_run(run_id: str) -> bool:
                 binding = asyncio.create_task(
                     self.repository.bind_run(
                         job_id,
@@ -203,17 +237,24 @@ class JobWorker:
                     name=f"attacker-job-bind-run-{job_id}",
                 )
                 try:
-                    await asyncio.shield(binding)
+                    cancel_requested = bool(await asyncio.shield(binding))
                 except asyncio.CancelledError:
                     # Run 已存在时必须先保存关联，随后才把取消传回 Run Service。
-                    await binding
+                    cancel_requested = bool(await binding)
+                    if cancel_requested:
+                        run_creation_cancellation.set()
                     raise
+                if cancel_requested:
+                    run_creation_cancellation.set()
+                return cancel_requested
+
+            run_created_hook = bind_requested_run_id(bind_run, job_id)
 
             dispatch_task = asyncio.create_task(
                 self.dispatcher.dispatch(
                     str(job["kind"]),
                     dict(job["payload"]),
-                    on_run_created=bind_run,
+                    on_run_created=run_created_hook,
                 ),
                 name=f"attacker-job-dispatch-{job_id}",
             )
@@ -222,11 +263,14 @@ class JobWorker:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if monitor in done:
-                dispatch_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await dispatch_task
                 monitor_error = monitor.exception()
                 if isinstance(monitor_error, JobCancellationRequested):
+                    if run_creation_cancellation.is_set():
+                        await asyncio.gather(dispatch_task, return_exceptions=True)
+                    else:
+                        dispatch_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await dispatch_task
                     await self.repository.fail(
                         job_id,
                         worker_id=self.worker_id,
@@ -250,24 +294,38 @@ class JobWorker:
                 )
                 record_job_event("cancelled")
                 return
-            await self.repository.complete(
+            completed = await self.repository.complete(
                 job_id,
                 worker_id=self.worker_id,
                 lease_token=lease_token,
                 result=result,
             )
+            if completed["status"] == JobStatus.cancelled.value:
+                record_job_event("cancelled")
+                return
             record_job_event("succeeded")
             logger.info("durable job completed", job_id=job_id, worker_id=self.worker_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - worker boundary serializes package failures
-            safe_error = str(redact(str(exc))) or type(exc).__name__
+        except RunCreationCancelled:
             with suppress(Exception):
                 await self.repository.fail(
                     job_id,
                     worker_id=self.worker_id,
                     lease_token=lease_token,
-                    error_code=type(exc).__name__[:100],
+                    error_code="job_cancelled",
+                    error_summary="cancellation was accepted before Run execution",
+                )
+            record_job_event("cancelled")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - worker boundary serializes package failures
+            error_type = type(exc).__name__[:100]
+            safe_error = "job execution failed"
+            with suppress(Exception):
+                await self.repository.fail(
+                    job_id,
+                    worker_id=self.worker_id,
+                    lease_token=lease_token,
+                    error_code=error_type,
                     error_summary=safe_error,
                 )
             record_job_event("failed")
@@ -275,8 +333,7 @@ class JobWorker:
                 "durable job failed",
                 job_id=job_id,
                 worker_id=self.worker_id,
-                error_type=type(exc).__name__,
-                error_summary=safe_error,
+                error_type=error_type,
             )
         finally:
             if dispatch_task is not None and not dispatch_task.done():
@@ -292,7 +349,6 @@ class JobWorker:
         loop = asyncio.get_running_loop()
         next_heartbeat = loop.time() + self.settings.heartbeat_seconds
         while True:
-            await asyncio.sleep(min(self.settings.poll_seconds, self.settings.heartbeat_seconds))
             if await self.repository.is_cancel_requested(job_id):
                 raise JobCancellationRequested("job cancellation was requested")
             if loop.time() >= next_heartbeat:
@@ -303,6 +359,7 @@ class JobWorker:
                     lease_seconds=self.settings.lease_seconds,
                 )
                 next_heartbeat = loop.time() + self.settings.heartbeat_seconds
+            await asyncio.sleep(min(self.settings.poll_seconds, self.settings.heartbeat_seconds))
 
     async def _worker_heartbeat(self, *, draining: bool) -> None:
         await self.repository.worker_heartbeat(

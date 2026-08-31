@@ -11,8 +11,10 @@ import socket
 from pathlib import Path
 from typing import Any
 
+from alembic.config import Config as AlembicConfig
 from prometheus_client import start_http_server
 
+from alembic import command as alembic_command
 from app.equipment.catalog import EquipmentCatalog
 from app.equipment.development import (
     contract_check,
@@ -23,7 +25,13 @@ from app.equipment.runner import EquipmentRunner
 from app.infrastructure.database import Database
 from app.repositories.equipment_repository import EquipmentRepository
 from app.runtime import create_runtime
-from app.schemas.equipment_schema import PackageType, SkillDryRunRequest
+from app.schemas.equipment_schema import (
+    EquipmentReplayMode,
+    PackageType,
+    SkillDryRunRequest,
+)
+from app.schemas.replay_schema import ReplayRunRequest
+from app.schemas.stateful_schema import StatefulProfile, StatefulRunRequest
 from app.services.equipment_service import EquipmentService
 from app.services.harness_service import HarnessService
 from app.services.job_service import JobWorker
@@ -80,6 +88,13 @@ def _parser() -> argparse.ArgumentParser:
     config = commands.add_parser("config")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     config_commands.add_parser("validate-production")
+
+    migrate = commands.add_parser("migrate")
+    migrate.add_argument("--revision", default="head")
+
+    demo = commands.add_parser("demo")
+    demo.add_argument("--dataset", default="samples/stateful/phase3.yaml")
+    demo.add_argument("--report", default=None)
     return parser
 
 
@@ -89,6 +104,10 @@ async def _run(args: argparse.Namespace) -> Any:
         return {"status": "valid", "profile": "production"}
     if args.command == "worker":
         return await _run_worker(args)
+    if args.command == "migrate":
+        return await asyncio.to_thread(_run_migrate, args.revision)
+    if args.command == "demo":
+        return await _run_demo(args)
 
     database = Database.from_settings(settings.database)
     await database.initialize()
@@ -185,6 +204,81 @@ async def _run_worker(args: argparse.Namespace) -> dict[str, Any]:
         if metrics_thread is not None:
             metrics_thread.join(timeout=5)
     return {"status": "stopped", "worker_id": args.worker_id}
+
+
+async def _run_demo(args: argparse.Namespace) -> dict[str, Any]:
+    """运行内置漏洞基线和加固 Replay，并生成可审计 Markdown 报告。"""
+
+    if settings.app.app_env.lower() in {"production", "prod"}:
+        raise ValueError("attacker demo is disabled in production environments")
+
+    async with create_runtime(settings, recover_cleanups=True) as runtime:
+        source = await runtime.stateful_run_service.run(
+            StatefulRunRequest(
+                profile=StatefulProfile.vulnerable,
+                dataset_path=args.dataset,
+                target_name="golden-path-sandbox",
+            )
+        )
+        source_run_id = str(source["run_id"])
+        snapshots = await runtime.equipment_repository.list_snapshots(source_run_id)
+        bindings = {
+            snapshot["package_id"]: {
+                "version": snapshot["version"],
+                "checksum": snapshot["checksum"],
+                **(
+                    {"provider_instance_id": snapshot["provider_instance_id"]}
+                    if snapshot.get("provider_instance_id")
+                    else {}
+                ),
+            }
+            for snapshot in snapshots
+        }
+        replay = await runtime.replay_service.replay(
+            source_run_id,
+            ReplayRunRequest(
+                mode=EquipmentReplayMode.upgrade_comparison,
+                profile=StatefulProfile.hardened,
+                equipment_bindings=bindings,
+            ),
+        )
+        replay_run_id = str(replay["run_id"])
+        report_path = (
+            Path(args.report)
+            if args.report
+            else Path("data") / f"attacker-demo-report-{replay_run_id}.md"
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            await runtime.report_service.build_markdown(replay_run_id),
+            encoding="utf-8",
+        )
+        return {
+            "source_run_id": source_run_id,
+            "source_profile": StatefulProfile.vulnerable.value,
+            "replay_run_id": replay_run_id,
+            "replay_profile": StatefulProfile.hardened.value,
+            "diff": replay["replay"]["diff"],
+            "report": str(report_path.resolve()),
+        }
+
+
+def _run_migrate(revision: str) -> dict[str, str]:
+    """从源码树或已安装 wheel 中运行同一套 Alembic migration。"""
+
+    app_root = Path(__file__).resolve().parent
+    package_root = app_root.parent
+    migrations = app_root / "migrations"
+    config_path = app_root / "alembic.ini"
+    if not migrations.is_dir():
+        migrations = package_root / "alembic"
+        config_path = package_root / "alembic.ini"
+
+    config = AlembicConfig(str(config_path))
+    config.set_main_option("script_location", str(migrations))
+    config.set_main_option("prepend_sys_path", str(package_root))
+    alembic_command.upgrade(config, revision)
+    return {"status": "migrated", "revision": revision}
 
 
 def main() -> None:

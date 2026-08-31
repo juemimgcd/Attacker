@@ -63,8 +63,9 @@ class StatefulRepository:
         profile: StatefulProfile,
         target_name: str,
         mode: str = "deterministic_stateful",
+        requested_run_id: str | None = None,
     ) -> str:
-        run_id = str(uuid4())
+        run_id = requested_run_id if requested_run_id is not None else str(uuid4())
         async with self.session_factory.begin() as session:
             target = TargetRecord(
                 id=str(uuid4()),

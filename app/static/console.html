@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="attacker-api-prefix" content="__API_PREFIX__">
+    <title>Attacker 控制台</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2319232a'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Arial' font-size='18' font-weight='700' fill='white'%3EA%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="./console/assets/console.css?v=__APP_VERSION__">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主内容</a>
+
+    <header class="topbar">
+      <a class="brand" href="./console" aria-label="Attacker 控制台首页">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span>
+          <strong>Attacker</strong>
+          <small>安全评测控制台</small>
+        </span>
+      </a>
+
+      <div class="topbar-actions">
+        <span class="connection" id="connection-status" data-status="loading">
+          <span aria-hidden="true"></span>
+          <span>正在连接</span>
+        </span>
+        <details class="api-key-settings" id="api-key-settings">
+          <summary>API 设置</summary>
+          <form id="api-key-form">
+            <label for="api-key">X-API-Key</label>
+            <input
+              id="api-key"
+              name="api-key"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="本地未配置时留空"
+            >
+            <p>只保存在当前浏览器标签页，关闭标签页后清除。</p>
+            <div class="button-row">
+              <button class="button button-secondary" type="button" id="clear-api-key">
+                清除
+              </button>
+              <button class="button button-primary" type="submit">应用</button>
+            </div>
+          </form>
+        </details>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <nav class="primary-nav" aria-label="控制台主导航">
+        <button type="button" data-view="jobs" aria-current="page">
+          <span aria-hidden="true">●</span>
+          任务与运行
+        </button>
+        <button type="button" data-view="new">
+          <span aria-hidden="true">＋</span>
+          新建评测
+        </button>
+      </nav>
+
+      <main id="main-content" tabindex="-1">
+        <section class="view" id="jobs-view" aria-labelledby="jobs-heading">
+          <header class="view-header">
+            <div>
+              <p class="eyebrow">Durable Jobs</p>
+              <h1 id="jobs-heading" tabindex="-1">任务与运行</h1>
+              <p>查看任务状态，并进入由 SQL 事实生成的运行报告。</p>
+            </div>
+            <div class="view-actions">
+              <button class="button button-secondary" type="button" id="refresh-jobs">
+                刷新
+              </button>
+              <button class="button button-primary" type="button" data-go-new>
+                新建评测
+              </button>
+            </div>
+          </header>
+
+          <div
+            class="notice notice-error"
+            id="jobs-error"
+            role="alert"
+            hidden
+          ></div>
+          <div class="state-panel" id="jobs-loading" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <p>正在读取任务队列…</p>
+          </div>
+          <div class="state-panel" id="jobs-empty" hidden>
+            <strong>还没有评测任务</strong>
+            <p>从一个隔离、无外部网络依赖的 stateful 基线开始。</p>
+            <button class="button button-primary" type="button" data-go-new>
+              创建第一条评测
+            </button>
+          </div>
+
+          <div class="jobs-table" id="jobs-content" aria-busy="true" hidden>
+            <div class="job-row job-row-heading" aria-hidden="true">
+              <span>状态</span>
+              <span>任务</span>
+              <span>创建时间</span>
+              <span>尝试</span>
+              <span></span>
+            </div>
+            <ol id="jobs-list"></ol>
+          </div>
+        </section>
+
+        <section class="view" id="new-view" aria-labelledby="new-heading" hidden>
+          <header class="view-header">
+            <div>
+              <p class="eyebrow">Built-in Stateful Evaluation</p>
+              <h1 id="new-heading" tabindex="-1">新建内置评测</h1>
+              <p>任务只访问隔离适配器，数据集和目标绑定不可由浏览器改写。</p>
+            </div>
+          </header>
+
+          <div class="new-run-layout">
+            <form class="run-form" id="new-run-form">
+              <div class="field">
+                <label for="profile">行为 Profile</label>
+                <select id="profile" name="profile">
+                  <option value="hardened" selected>Hardened（推荐）</option>
+                  <option value="vulnerable">Vulnerable（漏洞基线）</option>
+                  <option value="regressed">Regressed（回归样本）</option>
+                </select>
+                <p id="profile-help">
+                  验证身份隔离、污染过滤和恢复策略均处于加固状态。
+                </p>
+              </div>
+
+              <fieldset>
+                <legend>固定执行边界</legend>
+                <dl class="boundary-list">
+                  <div>
+                    <dt>数据集</dt>
+                    <dd><code>samples/stateful/phase3.yaml</code></dd>
+                  </div>
+                  <div>
+                    <dt>目标</dt>
+                    <dd><code>isolated-stateful-sandbox</code></dd>
+                  </div>
+                  <div>
+                    <dt>外部 Target</dt>
+                    <dd>不调用</dd>
+                  </div>
+                  <div>
+                    <dt>执行方式</dt>
+                    <dd>Durable Job</dd>
+                  </div>
+                </dl>
+              </fieldset>
+
+              <div class="notice notice-error" id="new-run-error" role="alert" hidden></div>
+              <div class="form-actions">
+                <button class="button button-secondary" type="button" data-go-jobs>
+                  取消
+                </button>
+                <button class="button button-primary" type="submit" id="submit-run">
+                  加入评测队列
+                </button>
+              </div>
+            </form>
+
+            <aside class="scope-note" aria-labelledby="scope-heading">
+              <h2 id="scope-heading">这次评测会证明什么</h2>
+              <ul>
+                <li>Memory 与 RAG 污染是否被隔离或过滤</li>
+                <li>跨租户、跨用户状态是否泄露</li>
+                <li>恢复流程是否重新校验策略并保持幂等</li>
+                <li>测试夹具是否按运行作用域完成清理</li>
+              </ul>
+              <p>这是平台自检，不代表任何外部产品已经通过评测。</p>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="detail-view" aria-labelledby="detail-heading" hidden>
+          <button class="back-button" type="button" data-go-jobs>← 返回任务列表</button>
+
+          <header class="view-header detail-header">
+            <div>
+              <p class="eyebrow">Run Report</p>
+              <h1 id="detail-heading" tabindex="-1">运行详情</h1>
+              <p><code id="run-id">—</code></p>
+            </div>
+            <div class="view-actions" id="export-actions" hidden>
+              <button class="button button-primary" type="button" data-export="json">
+                导出 JSON
+              </button>
+              <button class="button button-secondary" type="button" data-export="md">
+                导出 Markdown
+              </button>
+            </div>
+          </header>
+
+          <div class="notice notice-error" id="detail-error" role="alert" hidden>
+            <p id="detail-error-message"></p>
+            <button class="button button-secondary" type="button" id="retry-detail">
+              重新加载
+            </button>
+          </div>
+          <div class="state-panel" id="detail-loading" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <p>正在构建运行事实视图…</p>
+          </div>
+
+          <div id="detail-content" hidden>
+            <section class="run-overview" aria-labelledby="overview-heading">
+              <div class="section-heading">
+                <div>
+                  <h2 id="overview-heading">运行概览</h2>
+                  <p id="run-target">—</p>
+                </div>
+                <span class="status-badge" id="run-status">—</span>
+              </div>
+              <dl class="metrics" id="run-metrics"></dl>
+            </section>
+
+            <section aria-labelledby="findings-heading">
+              <div class="section-heading">
+                <div>
+                  <h2 id="findings-heading">Findings</h2>
+                  <p>每条结论必须指向已持久化的 Evidence Event。</p>
+                </div>
+                <span class="count" id="findings-count">0</span>
+              </div>
+              <div class="section-empty" id="findings-empty" hidden>
+                当前报告没有违规 Finding。请同时检查未完成、错误与不可评测结果。
+              </div>
+              <ol class="finding-list" id="findings-list"></ol>
+            </section>
+
+            <section aria-labelledby="evidence-heading">
+              <div class="section-heading">
+                <div>
+                  <h2 id="evidence-heading">Evidence</h2>
+                  <p>按事件序列展示事实；展开可查看完整结构化证据。</p>
+                </div>
+                <span class="count" id="evidence-count">0</span>
+              </div>
+              <div class="section-empty" id="evidence-empty" hidden>
+                此运行尚未产生 Evidence Event。
+              </div>
+              <ol class="evidence-list" id="evidence-list"></ol>
+            </section>
+
+            <section aria-labelledby="approvals-heading">
+              <div class="section-heading">
+                <div>
+                  <h2 id="approvals-heading">人工审批</h2>
+                  <p>决议会恢复原 Run；理由和操作者会写入审计事实。</p>
+                </div>
+                <span class="count" id="approvals-count">0</span>
+              </div>
+              <div class="section-empty" id="approvals-empty" hidden>
+                没有待处理审批。
+              </div>
+              <ol class="approval-list" id="approvals-list"></ol>
+            </section>
+
+            <section aria-labelledby="replay-heading">
+              <div class="section-heading replay-heading-row">
+                <div>
+                  <h2 id="replay-heading">Replay</h2>
+                  <p id="replay-help">使用冻结的同一绑定重跑，并比较 Finding 差异。</p>
+                </div>
+                <button class="button button-secondary" type="button" id="start-replay">
+                  同绑定 Replay
+                </button>
+              </div>
+              <div class="notice notice-error" id="replay-error" role="alert" hidden></div>
+              <div class="section-empty" id="replays-empty" hidden>
+                还没有 Replay 记录。
+              </div>
+              <ol class="replay-list" id="replays-list"></ol>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="sr-only" id="poll-announcer" aria-live="polite" aria-atomic="true"></div>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="./console/assets/console.js?v=__APP_VERSION__" defer></script>
+  </body>
+</html>

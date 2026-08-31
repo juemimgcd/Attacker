@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import ipaddress
 import json
-from asyncio import CancelledError
+from asyncio import CancelledError, Lock
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
+from weakref import WeakValueDictionary
 
 from langgraph.types import Command
 from loguru import logger
 
+from app.equipment.security import SecretBroker, validate_target_url
 from app.infrastructure.model_adapter import PlannerModelAdapter, create_planner_adapter
 from app.repositories.adaptive_repository import AdaptiveRepository
 from app.schemas.graybox_schema import (
@@ -41,6 +45,15 @@ if TYPE_CHECKING:
     from app.services.equipment_service import EquipmentService
 
 
+RESUME_CLAIM_LEASE_SECONDS = 120
+RESUME_CLAIM_RENEW_INTERVAL_SECONDS = 30.0
+RESUME_CLAIM_RENEW_TIMEOUT_SECONDS = 10.0
+
+
+class ResumeClaimLostError(RuntimeError):
+    """The graph must stop because its cross-process resume claim cannot be renewed."""
+
+
 @dataclass
 class AdaptiveRuntime:
     """仅驻留内存的 Target 与 Planner 运行时对象；Secret 不进入 checkpoint。"""
@@ -51,6 +64,7 @@ class AdaptiveRuntime:
     planner: PlannerModelAdapter
     started_at: datetime
     secret_values: set[str]
+    target_runtime: Callable[[], AbstractAsyncContextManager[TargetConfig]]
 
 
 class AdaptiveRuntimeRegistry:
@@ -110,11 +124,14 @@ class AdaptiveRunService:
         repository: AdaptiveRepository,
         checkpointer: Any,
         equipment_service: EquipmentService | None = None,
+        secret_broker: SecretBroker | None = None,
     ) -> None:
         self.repository = repository
         self.equipment_service = equipment_service
+        self.secret_broker = secret_broker
         self.loader = GrayBoxDatasetLoader()
         self.registry = AdaptiveRuntimeRegistry()
+        self._resume_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
         self.graph = AttackGraph(
             repository=repository,
             runtime_registry=self.registry,
@@ -130,10 +147,24 @@ class AdaptiveRunService:
         request: GrayBoxRunRequest,
         *,
         on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
     ) -> dict[str, Any]:
         """创建 Run、冻结绑定和候选宇宙，然后启动同一 thread 的图执行。"""
 
-        self._validate_target(request.target)
+        runtime_target = await self._prepare_target(request.target)
+        return await self._start_materialized(
+            request.model_copy(update={"target": runtime_target}),
+            on_run_created=on_run_created,
+            requested_run_id=requested_run_id,
+        )
+
+    async def _start_materialized(
+        self,
+        request: GrayBoxRunRequest,
+        *,
+        on_run_created: RunCreatedHook | None,
+        requested_run_id: str | None,
+    ) -> dict[str, Any]:
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
         snapshot = self._redacted_target_snapshot(request.target)
         run_id, target_id, thread_id, policy = await self.repository.create_run(
@@ -147,17 +178,44 @@ class AdaptiveRunService:
             evaluator_snapshot=self._evaluator_snapshot(),
             candidate_universe_checksum=self._candidate_universe_checksum(dataset.cases),
             equipment_snapshot=self._equipment_snapshot(dataset.cases),
+            requested_run_id=requested_run_id,
         )
         try:
-            await notify_run_created(on_run_created, run_id)
-            return await self._start_created_run(
-                request=request,
-                dataset=dataset,
-                run_id=run_id,
-                target_id=target_id,
-                thread_id=thread_id,
-                policy=policy,
-            )
+            async with self._resume_locks.setdefault(run_id, Lock()):
+                await notify_run_created(on_run_created, run_id)
+                claim_kind = "start"
+                checkpoint_id = f"initial:{thread_id}"
+                owner_token = await self.repository.acquire_resume_claim(
+                    run_id=run_id,
+                    claim_kind=claim_kind,
+                    checkpoint_id=checkpoint_id,
+                    lease_seconds=RESUME_CLAIM_LEASE_SECONDS,
+                )
+                try:
+                    return await self._invoke_with_resume_claim(
+                        run_id=run_id,
+                        claim_kind=claim_kind,
+                        checkpoint_id=checkpoint_id,
+                        owner_token=owner_token,
+                        operation=lambda: self._start_created_run(
+                            request=request,
+                            dataset=dataset,
+                            run_id=run_id,
+                            target_id=target_id,
+                            thread_id=thread_id,
+                            policy=policy,
+                        ),
+                    )
+                finally:
+                    await self._release_resume_claim(
+                        run_id=run_id,
+                        claim_kind=claim_kind,
+                        checkpoint_id=checkpoint_id,
+                        owner_token=owner_token,
+                    )
+        except ResumeClaimLostError:
+            self.registry.discard(run_id)
+            raise
         except CancelledError as exc:
             self.registry.discard(run_id)
             await _persist_interrupted_run(
@@ -207,6 +265,10 @@ class AdaptiveRunService:
                 planner=create_planner_adapter(request.planner),
                 started_at=datetime.now(UTC),
                 secret_values=self._secret_values(request.target),
+                target_runtime=lambda: self._target_runtime(
+                    request.target,
+                    frozen=request.target.provider_instance_id is not None,
+                ),
             ),
         )
         state: AttackGraphState = {
@@ -294,6 +356,10 @@ class AdaptiveRunService:
             stage="graybox",
             target_binding_ref=canonical_target_ref(target),
             test_principal_ref=principal_ref,
+            provider_instance_id=target.provider_instance_id,
+            provider_package_checksum=target.provider_package_checksum,
+            provider_config_revision=target.provider_config_revision,
+            provider_secret_binding_revision=target.provider_secret_binding_revision,
         )
 
     async def resume(
@@ -307,67 +373,132 @@ class AdaptiveRunService:
         target: TargetConfig | None = None,
         planner: PlannerConfig | None = None,
     ) -> dict[str, Any]:
-        """处理审批并恢复；运行时凭据必须重新提供且与冻结绑定一致。"""
+        """处理审批并恢复；手工凭据需重供，Provider 凭据按冻结 revision 短租。"""
 
         run = await self.repository.get_run(run_id)
         if run.status not in {"waiting_approval", "running"}:
             raise ValueError("run is not waiting for approval")
         if run.thread_id is None:
             raise ValueError("run does not have a resumable thread")
-        await self._require_checkpoint_node(
+        checkpoint_id = await self._require_checkpoint_node(
             thread_id=run.thread_id,
             node_name="human_review",
-        )
-        recovered = False
-        if not self.registry.contains(run_id):
-            await self._rehydrate_runtime(
-                run_id=run_id,
-                target_override=target,
-                planner_override=planner,
-            )
-            recovered = True
-        approval = await self.repository.resolve_approval(
-            run_id=run_id,
             approval_id=approval_id,
-            approved=approved,
-            resolved_by=resolved_by,
-            reason=reason,
         )
-        try:
-            result = await self.graph.graph.ainvoke(
-                Command(
-                    resume={
-                        "approval_id": approval_id,
-                        "status": approval["status"],
-                        "recovered": recovered,
-                    }
-                ),
-                config={
-                    "configurable": {"thread_id": run.thread_id},
-                    "recursion_limit": 1_000,
-                },
+        async with self._resume_locks.setdefault(run_id, Lock()):
+            run = await self.repository.get_run(run_id)
+            if run.status not in {"waiting_approval", "running"}:
+                raise ValueError("run is not waiting for approval")
+            if run.thread_id is None:
+                raise ValueError("run does not have a resumable thread")
+            current_checkpoint_id = await self._require_checkpoint_node(
+                thread_id=run.thread_id,
+                node_name="human_review",
+                approval_id=approval_id,
             )
-        except CancelledError as exc:
-            self.registry.discard(run_id)
-            await _persist_interrupted_run(
-                self.repository,
+            if current_checkpoint_id != checkpoint_id:
+                raise ValueError("run checkpoint advanced while the resume request was waiting")
+            claim_kind = "approval"
+            owner_token = await self.repository.acquire_resume_claim(
                 run_id=run_id,
-                status="cancelled",
-                operation_id="approval_resume",
-                exc=exc,
+                claim_kind=claim_kind,
+                checkpoint_id=checkpoint_id,
+                lease_seconds=RESUME_CLAIM_LEASE_SECONDS,
             )
-            raise
-        except Exception as exc:
-            self.registry.discard(run_id)
-            await _persist_interrupted_run(
-                self.repository,
-                run_id=run_id,
-                status="failed",
-                operation_id="approval_resume",
-                exc=exc,
-            )
-            raise
-        return await self._status(run_id, result)
+            try:
+                run = await self.repository.get_run(run_id)
+                if run.status not in {"waiting_approval", "running"}:
+                    raise ValueError("run is not waiting for approval")
+                if run.thread_id is None:
+                    raise ValueError("run does not have a resumable thread")
+                claimed_checkpoint_id = await self._require_checkpoint_node(
+                    thread_id=run.thread_id,
+                    node_name="human_review",
+                    approval_id=approval_id,
+                )
+                if claimed_checkpoint_id != checkpoint_id:
+                    raise ValueError("run checkpoint advanced before the resume claim was acquired")
+                await self._renew_resume_claim(
+                    run_id=run_id,
+                    claim_kind=claim_kind,
+                    checkpoint_id=checkpoint_id,
+                    owner_token=owner_token,
+                )
+                recovered = False
+                if not self.registry.contains(run_id):
+                    runtime_context = self._rehydrate_runtime(
+                        run_id=run_id,
+                        target_override=target,
+                        planner_override=planner,
+                    )
+                    recovered = True
+                else:
+                    runtime_context = nullcontext()
+                async with runtime_context:
+                    await self._renew_resume_claim(
+                        run_id=run_id,
+                        claim_kind=claim_kind,
+                        checkpoint_id=checkpoint_id,
+                        owner_token=owner_token,
+                    )
+                    approval = await self.repository.resolve_approval(
+                        run_id=run_id,
+                        approval_id=approval_id,
+                        approved=approved,
+                        resolved_by=resolved_by,
+                        reason=reason,
+                    )
+                    try:
+                        result = await self._invoke_with_resume_claim(
+                            run_id=run_id,
+                            claim_kind=claim_kind,
+                            checkpoint_id=checkpoint_id,
+                            owner_token=owner_token,
+                            operation=lambda: self.graph.graph.ainvoke(
+                                Command(
+                                    resume={
+                                        "approval_id": approval_id,
+                                        "status": approval["status"],
+                                        "recovered": recovered,
+                                    }
+                                ),
+                                config={
+                                    "configurable": {"thread_id": run.thread_id},
+                                    "recursion_limit": 1_000,
+                                },
+                            ),
+                        )
+                    except ResumeClaimLostError:
+                        self.registry.discard(run_id)
+                        raise
+                    except CancelledError as exc:
+                        self.registry.discard(run_id)
+                        await _persist_interrupted_run(
+                            self.repository,
+                            run_id=run_id,
+                            status="cancelled",
+                            operation_id="approval_resume",
+                            exc=exc,
+                        )
+                        raise
+                    except Exception as exc:
+                        self.registry.discard(run_id)
+                        await _persist_interrupted_run(
+                            self.repository,
+                            run_id=run_id,
+                            status="failed",
+                            operation_id="approval_resume",
+                            exc=exc,
+                        )
+                        raise
+                    return await self._status(run_id, result)
+            finally:
+                await self._release_resume_claim(
+                    run_id=run_id,
+                    claim_kind=claim_kind,
+                    checkpoint_id=checkpoint_id,
+                    owner_token=owner_token,
+                )
 
     async def resume_paused(
         self,
@@ -381,47 +512,103 @@ class AdaptiveRunService:
             raise ValueError("run is not paused")
         if run.thread_id is None:
             raise ValueError("run does not have a resumable thread")
-        await self._require_checkpoint_node(
+        checkpoint_id = await self._require_checkpoint_node(
             thread_id=run.thread_id,
             node_name="planner_pause",
         )
-        recovered = False
-        if not self.registry.contains(run_id) or target is not None or planner is not None:
-            await self._rehydrate_runtime(
+        async with self._resume_locks.setdefault(run_id, Lock()):
+            run = await self.repository.get_run(run_id)
+            if run.status not in {"paused", "running"}:
+                raise ValueError("run is not paused")
+            if run.thread_id is None:
+                raise ValueError("run does not have a resumable thread")
+            current_checkpoint_id = await self._require_checkpoint_node(
+                thread_id=run.thread_id,
+                node_name="planner_pause",
+            )
+            if current_checkpoint_id != checkpoint_id:
+                raise ValueError("run checkpoint advanced while the resume request was waiting")
+            claim_kind = "planner"
+            owner_token = await self.repository.acquire_resume_claim(
                 run_id=run_id,
-                target_override=target,
-                planner_override=planner,
+                claim_kind=claim_kind,
+                checkpoint_id=checkpoint_id,
+                lease_seconds=RESUME_CLAIM_LEASE_SECONDS,
             )
-            recovered = True
-        try:
-            result = await self.graph.graph.ainvoke(
-                Command(resume={"recovered": recovered}),
-                config={
-                    "configurable": {"thread_id": run.thread_id},
-                    "recursion_limit": 1_000,
-                },
-            )
-        except CancelledError as exc:
-            self.registry.discard(run_id)
-            await _persist_interrupted_run(
-                self.repository,
-                run_id=run_id,
-                status="cancelled",
-                operation_id="planner_resume",
-                exc=exc,
-            )
-            raise
-        except Exception as exc:
-            self.registry.discard(run_id)
-            await _persist_interrupted_run(
-                self.repository,
-                run_id=run_id,
-                status="failed",
-                operation_id="planner_resume",
-                exc=exc,
-            )
-            raise
-        return await self._status(run_id, result)
+            try:
+                run = await self.repository.get_run(run_id)
+                if run.status not in {"paused", "running"}:
+                    raise ValueError("run is not paused")
+                if run.thread_id is None:
+                    raise ValueError("run does not have a resumable thread")
+                claimed_checkpoint_id = await self._require_checkpoint_node(
+                    thread_id=run.thread_id,
+                    node_name="planner_pause",
+                )
+                if claimed_checkpoint_id != checkpoint_id:
+                    raise ValueError("run checkpoint advanced before the resume claim was acquired")
+                await self._renew_resume_claim(
+                    run_id=run_id,
+                    claim_kind=claim_kind,
+                    checkpoint_id=checkpoint_id,
+                    owner_token=owner_token,
+                )
+                recovered = False
+                if not self.registry.contains(run_id) or target is not None or planner is not None:
+                    runtime_context = self._rehydrate_runtime(
+                        run_id=run_id,
+                        target_override=target,
+                        planner_override=planner,
+                    )
+                    recovered = True
+                else:
+                    runtime_context = nullcontext()
+                async with runtime_context:
+                    try:
+                        result = await self._invoke_with_resume_claim(
+                            run_id=run_id,
+                            claim_kind=claim_kind,
+                            checkpoint_id=checkpoint_id,
+                            owner_token=owner_token,
+                            operation=lambda: self.graph.graph.ainvoke(
+                                Command(resume={"recovered": recovered}),
+                                config={
+                                    "configurable": {"thread_id": run.thread_id},
+                                    "recursion_limit": 1_000,
+                                },
+                            ),
+                        )
+                    except ResumeClaimLostError:
+                        self.registry.discard(run_id)
+                        raise
+                    except CancelledError as exc:
+                        self.registry.discard(run_id)
+                        await _persist_interrupted_run(
+                            self.repository,
+                            run_id=run_id,
+                            status="cancelled",
+                            operation_id="planner_resume",
+                            exc=exc,
+                        )
+                        raise
+                    except Exception as exc:
+                        self.registry.discard(run_id)
+                        await _persist_interrupted_run(
+                            self.repository,
+                            run_id=run_id,
+                            status="failed",
+                            operation_id="planner_resume",
+                            exc=exc,
+                        )
+                        raise
+                    return await self._status(run_id, result)
+            finally:
+                await self._release_resume_claim(
+                    run_id=run_id,
+                    claim_kind=claim_kind,
+                    checkpoint_id=checkpoint_id,
+                    owner_token=owner_token,
+                )
 
     async def request_control(
         self,
@@ -461,40 +648,166 @@ class AdaptiveRunService:
         *,
         thread_id: str,
         node_name: str,
-    ) -> None:
+        approval_id: str | None = None,
+    ) -> str:
         snapshot = await self.graph.graph.aget_state({"configurable": {"thread_id": thread_id}})
         if node_name not in snapshot.next:
             raise ValueError(f"run checkpoint is not waiting at {node_name}")
+        if approval_id is not None and snapshot.values.get("approval_id") != approval_id:
+            raise ValueError("approval does not match the current run checkpoint")
+        checkpoint_id = snapshot.config.get("configurable", {}).get("checkpoint_id")
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
+            raise ValueError("run checkpoint does not expose a stable identity")
+        return checkpoint_id
 
+    async def _invoke_with_resume_claim(
+        self,
+        *,
+        run_id: str,
+        claim_kind: str,
+        checkpoint_id: str,
+        owner_token: str,
+        operation: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Renew the DB claim while graph I/O runs and cancel immediately if ownership is lost."""
+
+        await self._renew_resume_claim(
+            run_id=run_id,
+            claim_kind=claim_kind,
+            checkpoint_id=checkpoint_id,
+            owner_token=owner_token,
+        )
+
+        operation_task = asyncio.ensure_future(operation())
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {operation_task},
+                    timeout=RESUME_CLAIM_RENEW_INTERVAL_SECONDS,
+                )
+                if operation_task in done:
+                    await self._renew_resume_claim(
+                        run_id=run_id,
+                        claim_kind=claim_kind,
+                        checkpoint_id=checkpoint_id,
+                        owner_token=owner_token,
+                    )
+                    return await operation_task
+                try:
+                    await self._renew_resume_claim(
+                        run_id=run_id,
+                        claim_kind=claim_kind,
+                        checkpoint_id=checkpoint_id,
+                        owner_token=owner_token,
+                    )
+                except CancelledError:
+                    raise
+                except ResumeClaimLostError as exc:
+                    operation_task.cancel()
+                    await asyncio.gather(operation_task, return_exceptions=True)
+                    raise ResumeClaimLostError(
+                        "adaptive resume claim was lost while the graph was running"
+                    ) from exc
+        finally:
+            if not operation_task.done():
+                operation_task.cancel()
+                await asyncio.gather(operation_task, return_exceptions=True)
+
+    async def _renew_resume_claim(
+        self,
+        *,
+        run_id: str,
+        claim_kind: str,
+        checkpoint_id: str,
+        owner_token: str,
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                self.repository.renew_resume_claim(
+                    run_id=run_id,
+                    claim_kind=claim_kind,
+                    checkpoint_id=checkpoint_id,
+                    owner_token=owner_token,
+                    lease_seconds=RESUME_CLAIM_LEASE_SECONDS,
+                ),
+                timeout=RESUME_CLAIM_RENEW_TIMEOUT_SECONDS,
+            )
+        except CancelledError:
+            raise
+        except Exception as exc:
+            raise ResumeClaimLostError("adaptive resume claim could not be renewed") from exc
+
+    async def _release_resume_claim(
+        self,
+        *,
+        run_id: str,
+        claim_kind: str,
+        checkpoint_id: str,
+        owner_token: str,
+    ) -> None:
+        try:
+            await self.repository.release_resume_claim(
+                run_id=run_id,
+                claim_kind=claim_kind,
+                checkpoint_id=checkpoint_id,
+                owner_token=owner_token,
+            )
+        except Exception as exc:  # noqa: BLE001 - expiry safely recovers a failed release
+            logger.error(
+                "failed to release adaptive resume claim",
+                run_id=run_id,
+                claim_kind=claim_kind,
+                error_type=type(exc).__name__,
+            )
+
+    @asynccontextmanager
     async def _rehydrate_runtime(
         self,
         *,
         run_id: str,
         target_override: TargetConfig | None,
         planner_override: PlannerConfig | None,
-    ) -> None:
-        """从 SQL 快照重建非 Secret 配置，并验证调用方重新提供的凭据。"""
+    ) -> AsyncIterator[None]:
+        """从 SQL 快照重建运行时，并在图调用期间短租 Provider Secret。"""
 
         snapshot = await self.repository.load_runtime_snapshot(run_id)
         stored_target = dict(snapshot["target"])
+        stored_provider_id = stored_target.get("provider_instance_id")
+        revision_fields = (
+            "provider_package_checksum",
+            "provider_config_revision",
+            "provider_secret_binding_revision",
+        )
+        if stored_provider_id is not None and not all(
+            stored_target.get(field) for field in revision_fields
+        ):
+            raise ValueError("stored Target Provider Instance revision binding is incomplete")
+        stored_auth = stored_target.get("auth")
         if target_override is None:
-            if self._contains_redaction(stored_target):
+            target_payload = dict(stored_target)
+            if stored_provider_id is not None and isinstance(stored_auth, dict):
+                target_payload["auth"] = {**stored_auth, "token": None}
+            if self._contains_redaction(target_payload):
                 raise ValueError(
                     "target credentials were redacted; resupply target configuration to resume"
                 )
-            target = TargetConfig.model_validate(stored_target)
+            target = TargetConfig.model_validate(target_payload)
         else:
-            if target_override.name != stored_target["name"] or str(
-                target_override.endpoint
-            ) != str(stored_target["endpoint"]):
-                raise ValueError("resupplied target must match the original name and endpoint")
-            self._validate_target(target_override)
-            target = target_override
+            target = target_override.model_copy(deep=True)
+            if target.provider_instance_id != stored_provider_id:
+                raise ValueError("resupplied target must match the original non-secret behavior")
+            for field in revision_fields:
+                stored_value = stored_target.get(field)
+                override_value = getattr(target, field)
+                if override_value is not None and override_value != stored_value:
+                    raise ValueError(
+                        "resupplied target must match the original non-secret behavior"
+                    )
+                setattr(target, field, stored_value)
 
-        stored_planner = snapshot.get("planner") or {
-            "backend": "deterministic",
-            "model": "planner",
-            "timeout_seconds": 30.0,
+        stored_planner = {
+            **self._planner_snapshot(PlannerConfig()),
+            **(snapshot.get("planner") or {}),
         }
         if planner_override is None:
             if stored_planner.get("api_key_required"):
@@ -503,59 +816,71 @@ class AdaptiveRunService:
                 )
             planner_config = PlannerConfig.model_validate(stored_planner)
         else:
-            for field in (
-                "backend",
-                "provider_id",
-                "model",
-                "endpoint",
-                "prompt_template_version",
-            ):
+            planner_override_snapshot = self._planner_snapshot(planner_override)
+            for field, override_value in planner_override_snapshot.items():
                 stored_value = stored_planner.get(field)
-                override_value = planner_override.model_dump(mode="json").get(field)
-                if stored_value is not None and stored_value != override_value:
+                if stored_value != override_value:
                     raise ValueError(f"resupplied planner {field} must match the original run")
             planner_config = planner_override
 
-        raw_cases = snapshot["dataset"].get("cases", [])
-        cases = [GrayBoxCase.model_validate(raw_case["inputs"]) for raw_case in raw_cases]
-        started_at = snapshot["started_at"]
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=UTC)
-        self.registry.add(
-            run_id,
-            AdaptiveRuntime(
-                target=target,
-                cases={case.id: case for case in cases},
-                policy=AttackPolicy.model_validate(snapshot["policy"]),
-                planner=create_planner_adapter(planner_config),
-                started_at=started_at,
-                secret_values=self._secret_values(target),
-            ),
-        )
-        await self.repository.append_event(
-            run_id=run_id,
-            operation_id=f"{run_id}:runtime_rehydrated",
-            event_type="runtime_rehydrated",
-            evidence={
-                "thread_id": snapshot["thread_id"],
-                "target_id": snapshot["target_id"],
-                "credentials_persisted": False,
-            },
-        )
+        try:
+            runtime_target = await self._prepare_target(
+                target,
+                frozen=stored_provider_id is not None,
+            )
+            if canonical_target_binding(runtime_target) != canonical_target_binding(stored_target):
+                raise ValueError("resupplied target must match the original non-secret behavior")
+
+            raw_cases = snapshot["dataset"].get("cases", [])
+            cases = [GrayBoxCase.model_validate(raw_case["inputs"]) for raw_case in raw_cases]
+            started_at = snapshot["started_at"]
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
+            self.registry.add(
+                run_id,
+                AdaptiveRuntime(
+                    target=runtime_target,
+                    cases={case.id: case for case in cases},
+                    policy=AttackPolicy.model_validate(snapshot["policy"]),
+                    planner=create_planner_adapter(planner_config),
+                    started_at=started_at,
+                    secret_values=self._secret_values(runtime_target),
+                    target_runtime=lambda: self._target_runtime(
+                        runtime_target,
+                        frozen=stored_provider_id is not None,
+                    ),
+                ),
+            )
+            await self.repository.append_event(
+                run_id=run_id,
+                operation_id=f"{run_id}:runtime_rehydrated",
+                event_type="runtime_rehydrated",
+                evidence={
+                    "thread_id": snapshot["thread_id"],
+                    "target_id": snapshot["target_id"],
+                    "credentials_persisted": False,
+                },
+            )
+            yield
+        finally:
+            self.registry.discard(run_id)
 
     async def _status(self, run_id: str, graph_result: dict[str, Any]) -> dict[str, Any]:
-        run = await self.repository.get_run(run_id)
-        approvals = await self.repository.list_approvals(run_id)
-        return {
-            "run_id": run_id,
-            "thread_id": run.thread_id,
-            "status": run.status,
-            "terminal_reason": run.terminal_reason,
-            "pending_approvals": [
-                approval for approval in approvals if approval["status"] == "pending"
-            ],
-            "interrupted": bool(graph_result.get("__interrupt__")),
-        }
+        try:
+            run = await self.repository.get_run(run_id)
+            approvals = await self.repository.list_approvals(run_id)
+            return {
+                "run_id": run_id,
+                "thread_id": run.thread_id,
+                "status": run.status,
+                "terminal_reason": run.terminal_reason,
+                "pending_approvals": [
+                    approval for approval in approvals if approval["status"] == "pending"
+                ],
+                "interrupted": bool(graph_result.get("__interrupt__")),
+            }
+        finally:
+            self.registry.discard(run_id)
 
     @staticmethod
     def _secret_values(target: TargetConfig) -> set[str]:
@@ -633,24 +958,50 @@ class AdaptiveRunService:
             return any(cls._contains_redaction(item) for item in value)
         return value == "[REDACTED]"
 
-    @staticmethod
-    def _validate_target(target: TargetConfig) -> None:
-        if target.allow_public_target:
-            return
-        host = target.endpoint.host
-        if host is None:
-            raise ValueError("target endpoint must include a host")
-        if host == "localhost":
-            return
-        try:
-            address = ipaddress.ip_address(host)
-            if address.is_private or address.is_loopback:
-                return
-        except ValueError:
-            pass
-        raise ValueError(
-            "public or unresolved targets require allow_public_target=true and explicit authorization"
+    async def _validate_target(self, target: TargetConfig) -> dict[str, Any] | None:
+        if target.provider_instance_id is not None:
+            if self.equipment_service is None:
+                raise RuntimeError("Provider Instance Target validation is unavailable")
+            return await self.equipment_service.validate_target(target)
+        validate_target_url(
+            str(target.endpoint),
+            allow_public_target=target.allow_public_target,
+            allowed_hosts=[],
         )
+        return None
+
+    @asynccontextmanager
+    async def _target_runtime(
+        self,
+        target: TargetConfig,
+        *,
+        frozen: bool = False,
+    ) -> AsyncIterator[TargetConfig]:
+        if target.provider_instance_id is None:
+            await self._validate_target(target)
+            yield target.model_copy(deep=True)
+            return
+        if self.equipment_service is not None:
+            async with self.equipment_service.materialize_target(
+                target,
+                frozen=frozen,
+            ) as runtime_target:
+                yield runtime_target
+            return
+        raise RuntimeError("Provider Instance Target materialization is unavailable")
+
+    async def _prepare_target(
+        self,
+        target: TargetConfig,
+        *,
+        frozen: bool = False,
+    ) -> TargetConfig:
+        if target.provider_instance_id is None:
+            await self._validate_target(target)
+            return target.model_copy(deep=True)
+        if self.equipment_service is None:
+            raise RuntimeError("Provider Instance Target materialization is unavailable")
+        return await self.equipment_service.prepare_target(target, frozen=frozen)
 
 
 class DeterministicGrayBoxRunService:
@@ -674,6 +1025,7 @@ class DeterministicGrayBoxRunService:
         request: DeterministicGrayBoxRunRequest,
         *,
         on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
     ) -> dict[str, Any]:
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
         return await self.run_dataset(
@@ -685,6 +1037,7 @@ class DeterministicGrayBoxRunService:
             test_principal_refs=request.test_principal_refs,
             preauthorize_approvals=request.preauthorize_approvals,
             on_run_created=on_run_created,
+            requested_run_id=requested_run_id,
         )
 
     async def run_dataset(
@@ -700,8 +1053,41 @@ class DeterministicGrayBoxRunService:
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
         preauthorize_approvals: bool = False,
         on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
     ) -> dict[str, Any]:
-        AdaptiveRunService._validate_target(target)
+        runtime_target = await self._prepare_target(
+            target,
+            frozen=equipment_source_run_id is not None,
+        )
+        return await self._run_materialized_dataset(
+            target=runtime_target,
+            dataset=dataset,
+            policy=policy,
+            mode=mode,
+            baseline_run_id=baseline_run_id,
+            test_principal_refs=test_principal_refs,
+            equipment_source_run_id=equipment_source_run_id,
+            equipment_overrides=equipment_overrides,
+            preauthorize_approvals=preauthorize_approvals,
+            on_run_created=on_run_created,
+            requested_run_id=requested_run_id,
+        )
+
+    async def _run_materialized_dataset(
+        self,
+        *,
+        target: TargetConfig,
+        dataset: LoadedGrayBoxDataset,
+        policy: AttackPolicy,
+        mode: str,
+        baseline_run_id: str | None = None,
+        test_principal_refs: list[str] | None = None,
+        equipment_source_run_id: str | None = None,
+        equipment_overrides: dict[str, dict[str, Any]] | None = None,
+        preauthorize_approvals: bool = False,
+        on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
+    ) -> dict[str, Any]:
         run_id, target_id, _, policy = await self.repository.create_run(
             target_snapshot=AdaptiveRunService._redacted_target_snapshot(target),
             dataset=dataset,
@@ -714,6 +1100,7 @@ class DeterministicGrayBoxRunService:
                 AdaptiveRunService._candidate_universe_checksum(dataset.cases)
             ),
             equipment_snapshot=AdaptiveRunService._equipment_snapshot(dataset.cases),
+            requested_run_id=requested_run_id,
         )
         try:
             await notify_run_created(on_run_created, run_id)
@@ -747,6 +1134,47 @@ class DeterministicGrayBoxRunService:
             )
             raise
 
+    @asynccontextmanager
+    async def _target_runtime(
+        self,
+        target: TargetConfig,
+        *,
+        frozen: bool = False,
+    ) -> AsyncIterator[TargetConfig]:
+        if target.provider_instance_id is None:
+            validate_target_url(
+                str(target.endpoint),
+                allow_public_target=target.allow_public_target,
+                allowed_hosts=[],
+            )
+            yield target.model_copy(deep=True)
+            return
+        if self.equipment_service is not None:
+            async with self.equipment_service.materialize_target(
+                target,
+                frozen=frozen,
+            ) as runtime_target:
+                yield runtime_target
+            return
+        raise RuntimeError("Provider Instance Target materialization is unavailable")
+
+    async def _prepare_target(
+        self,
+        target: TargetConfig,
+        *,
+        frozen: bool = False,
+    ) -> TargetConfig:
+        if target.provider_instance_id is not None:
+            if self.equipment_service is None:
+                raise RuntimeError("Provider Instance Target materialization is unavailable")
+            return await self.equipment_service.prepare_target(target, frozen=frozen)
+        validate_target_url(
+            str(target.endpoint),
+            allow_public_target=target.allow_public_target,
+            allowed_hosts=[],
+        )
+        return target.model_copy(deep=True)
+
     async def _run_created_dataset(
         self,
         *,
@@ -774,6 +1202,10 @@ class DeterministicGrayBoxRunService:
                     target_binding_ref=canonical_target_ref(target),
                     test_principal_ref=principal_refs[0],
                     overrides=equipment_overrides,
+                    provider_instance_id=target.provider_instance_id,
+                    provider_package_checksum=target.provider_package_checksum,
+                    provider_config_revision=target.provider_config_revision,
+                    provider_secret_binding_revision=target.provider_secret_binding_revision,
                 )
         started_at = datetime.now(UTC)
         secret_values = AdaptiveRunService._secret_values(target)
@@ -845,17 +1277,22 @@ class DeterministicGrayBoxRunService:
                     policy=gate,
                 )
                 continue
-            await self.case_pipeline.run_case(
-                run_id=run_id,
-                case=case,
-                target=target,
-                operation_id=operation_id,
-                sequence=sequence,
-                approval_id=approval_id,
-                secret_values=secret_values,
-                policy=PolicyGateResult.model_validate(gate),
-                policy_event_ids=[policy_event_id],
-            )
+            async with self._target_runtime(
+                target,
+                frozen=target.provider_instance_id is not None,
+            ) as call_target:
+                call_secret_values = AdaptiveRunService._secret_values(call_target)
+                await self.case_pipeline.run_case(
+                    run_id=run_id,
+                    case=case,
+                    target=call_target,
+                    operation_id=operation_id,
+                    sequence=sequence,
+                    approval_id=approval_id,
+                    secret_values=secret_values | call_secret_values,
+                    policy=PolicyGateResult.model_validate(gate),
+                    policy_event_ids=[policy_event_id],
+                )
             target_calls += 1
         await self.repository.finalize_run(
             run_id=run_id,

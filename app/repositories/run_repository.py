@@ -1,10 +1,11 @@
 """确定性 Run 的 SQL 事实仓库，原子保存 Step、Event、Evaluation 与 Finding。"""
 
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -47,8 +48,9 @@ class RunRepository:
         dataset: LoadedDataset,
         budget: RunBudget,
         mode: str = "deterministic",
+        requested_run_id: str | None = None,
     ) -> str:
-        run_id = str(uuid4())
+        run_id = requested_run_id if requested_run_id is not None else str(uuid4())
         async with self.session_factory.begin() as session:
             target = TargetRecord(
                 id=str(uuid4()),
@@ -154,7 +156,7 @@ class RunRepository:
                 operation_id=f"{operation_id}:evaluation",
                 event_type=(
                     "evaluation_skipped"
-                    if result.outcome == EvaluationOutcome.not_evaluable
+                    if result.outcome == EvaluationOutcome.not_evaluable and not result.calls
                     else "evaluation_completed"
                 ),
                 evidence={
@@ -337,26 +339,27 @@ class RunRepository:
         self,
         run_id: str,
         *,
-        counts: dict[str, int],
         target_call_count: int,
     ) -> None:
         async with self.session_factory.begin() as session:
             run = await session.get(EvaluationRunRecord, run_id)
             if run is None:
                 raise LookupError(f"run {run_id} not found")
-            run.status = "completed"
-            run.completed_cases = sum(
-                counts.get(outcome, 0)
-                for outcome in ("violation", "refused", "safe", "error", "budget_aborted")
+            persisted_counts = await self._persisted_outcome_counts(session, run_id)
+            target_call_count = max(
+                target_call_count,
+                await self._persisted_target_call_count(session, run_id),
             )
+            run.status = "completed"
+            run.completed_cases = await self._completed_case_count(session, run_id)
             run.target_call_count = target_call_count
-            run.violation_count = counts.get("violation", 0)
-            run.refused_count = counts.get("refused", 0)
-            run.safe_count = counts.get("safe", 0)
-            run.error_count = counts.get("error", 0)
-            run.budget_aborted_count = counts.get("budget_aborted", 0)
-            run.false_positive_count = counts.get("false_positive", 0)
-            run.defense_overblock_count = counts.get("defense_overblock", 0)
+            run.violation_count = persisted_counts.get("violation", 0)
+            run.refused_count = persisted_counts.get("refused", 0)
+            run.safe_count = persisted_counts.get("safe", 0)
+            run.error_count = persisted_counts.get("error", 0)
+            run.budget_aborted_count = persisted_counts.get("budget_aborted", 0)
+            run.false_positive_count = persisted_counts.get("false_positive", 0)
+            run.defense_overblock_count = persisted_counts.get("defense_overblock", 0)
             run.completed_at = datetime.now(UTC)
 
             await self.events.append_in_session(
@@ -365,7 +368,7 @@ class RunRepository:
                 operation_id=f"{run_id}:run_completed",
                 event_type="run_completed",
                 evidence={
-                    "counts": counts,
+                    "counts": persisted_counts,
                     "target_call_count": target_call_count,
                 },
             )
@@ -375,7 +378,6 @@ class RunRepository:
         run_id: str,
         *,
         status: Literal["failed", "cancelled"],
-        counts: dict[str, int],
         target_call_count: int,
         reason_code: str,
         last_operation_id: str,
@@ -391,19 +393,21 @@ class RunRepository:
             if run.status in {"completed", "failed", "cancelled"}:
                 return
 
-            run.status = status
-            run.completed_cases = sum(
-                counts.get(outcome, 0)
-                for outcome in ("violation", "refused", "safe", "error", "budget_aborted")
+            persisted_counts = await self._persisted_outcome_counts(session, run_id)
+            target_call_count = max(
+                target_call_count,
+                await self._persisted_target_call_count(session, run_id),
             )
+            run.status = status
+            run.completed_cases = await self._completed_case_count(session, run_id)
             run.target_call_count = target_call_count
-            run.violation_count = counts.get("violation", 0)
-            run.refused_count = counts.get("refused", 0)
-            run.safe_count = counts.get("safe", 0)
-            run.error_count = counts.get("error", 0)
-            run.budget_aborted_count = counts.get("budget_aborted", 0)
-            run.false_positive_count = counts.get("false_positive", 0)
-            run.defense_overblock_count = counts.get("defense_overblock", 0)
+            run.violation_count = persisted_counts.get("violation", 0)
+            run.refused_count = persisted_counts.get("refused", 0)
+            run.safe_count = persisted_counts.get("safe", 0)
+            run.error_count = persisted_counts.get("error", 0)
+            run.budget_aborted_count = persisted_counts.get("budget_aborted", 0)
+            run.false_positive_count = persisted_counts.get("false_positive", 0)
+            run.defense_overblock_count = persisted_counts.get("defense_overblock", 0)
             run.terminal_reason = reason_code
             run.completed_at = datetime.now(UTC)
 
@@ -413,7 +417,7 @@ class RunRepository:
                 operation_id=f"{run_id}:run_{status}",
                 event_type=f"run_{status}",
                 evidence={
-                    "counts": counts,
+                    "counts": persisted_counts,
                     "target_call_count": target_call_count,
                     "reason_code": reason_code,
                     "last_operation_id": last_operation_id,
@@ -421,6 +425,53 @@ class RunRepository:
                     "partial_calls": partial_calls,
                 },
             )
+
+    @staticmethod
+    async def _persisted_outcome_counts(
+        session: AsyncSession,
+        run_id: str,
+    ) -> dict[str, int]:
+        steps = (
+            await session.scalars(select(RunStepRecord).where(RunStepRecord.run_id == run_id))
+        ).all()
+        outcomes = Counter(step.outcome for step in steps)
+        outcomes["false_positive"] = sum(
+            step.outcome == "violation"
+            and isinstance(step.result_json.get("case"), dict)
+            and step.result_json["case"].get("kind") == "control"
+            for step in steps
+        )
+        outcomes["defense_overblock"] = sum(
+            step.outcome == "refused"
+            and isinstance(step.result_json.get("case"), dict)
+            and step.result_json["case"].get("kind") == "control"
+            for step in steps
+        )
+        return dict(outcomes)
+
+    @staticmethod
+    async def _persisted_target_call_count(session: AsyncSession, run_id: str) -> int:
+        return int(
+            await session.scalar(
+                select(func.count(EventRecord.id)).where(
+                    EventRecord.run_id == run_id,
+                    EventRecord.event_type == "target_called",
+                )
+            )
+            or 0
+        )
+
+    @staticmethod
+    async def _completed_case_count(session: AsyncSession, run_id: str) -> int:
+        return int(
+            await session.scalar(
+                select(func.count(EventRecord.id)).where(
+                    EventRecord.run_id == run_id,
+                    EventRecord.event_type == "evaluation_completed",
+                )
+            )
+            or 0
+        )
 
     async def get_report_rows(self, run_id: str) -> dict[str, Any]:
         async with self.session_factory() as session:
@@ -624,7 +675,8 @@ class RunRepository:
         return {
             column.name: (value.isoformat() if isinstance(value, datetime) else value)
             for column in EvaluationRunRecord.__table__.columns
-            if (value := getattr(run, column.name)) is not None
+            if not column.name.startswith("resume_claim_")
+            and (value := getattr(run, column.name)) is not None
         }
 
     @staticmethod

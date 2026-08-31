@@ -13,6 +13,9 @@ Use `app.equipment.sdk` for the narrow Provider/Skill protocols. Manifests are v
 
 ## Local workflow
 
+Core 内置装备从安装包只读加载；`EQUIPMENT__ROOT` 指向当前部署可写的本地扩展目录。
+`scaffold` 和 `import` 只写入该本地目录，不会修改 site-packages 中的内置副本。
+
 ```powershell
 attacker equipment validate equipment/providers/my-provider --type provider
 attacker equipment reload

@@ -30,7 +30,8 @@ AI Agent 的风险不只存在于最终回答中，还可能发生在工具调�
 - **Deterministic by default**：固定数据集、策略和 Evaluator，可复现地执行回归评测；
 - **Bounded autonomy**：自适应 Planner 只能在批准的 Case、Tool、Target 和预算内行动；
 - **Replay for regression**：对修复前后的运行做 `fixed`、`new`、`persistent`、`regressed` 差异分析；
-- **Secrets stay ephemeral**：Target 凭据不会写入事件、报告或 checkpoint，恢复时必须重新提供。
+- **Secrets stay ephemeral**：Target 凭据不会写入事件、报告或 checkpoint；手工凭据恢复时需重供，
+  Provider Instance 凭据会按冻结 revision 重新短租。
 
 ## 功能概览
 
@@ -123,21 +124,45 @@ uv sync --locked --python 3.12
 ### 2. 初始化数据库
 
 ```bash
-uv run alembic upgrade head
+uv run attacker migrate
 ```
 
-### 3. 启动服务
+### 3. 跑通黄金路径
+
+这一条命令会在内置隔离适配器中依次运行脆弱基线、使用显式冻结绑定执行加固 Replay，
+最后生成包含 `fixed` / `new` / `persistent` / `regressed` 差异的 Markdown 报告；不连接外部 Target：
+
+```bash
+uv run attacker demo
+```
+
+命令输出会给出 source Run、Replay Run、差异分类和报告的绝对路径。它是安装、Catalog、
+状态评测、证据持久化、Replay 与报告链路的最小端到端验收。默认报告使用 Run ID 写入已忽略的
+`data/` 目录，重复运行不会覆盖旧报告；生产环境会拒绝运行该演示命令。
+
+### 4. 启动控制台
 
 ```bash
 uv run uvicorn main:app --reload
 ```
 
+另开一个终端启动 Durable Job Worker：
+
+```bash
+uv run attacker worker
+```
+
 服务启动后可访问：
 
+- 控制台：<http://127.0.0.1:8000/console>
 - OpenAPI：<http://127.0.0.1:8000/docs>
 - 健康检查：<http://127.0.0.1:8000/health>
 
-### 4. 运行内置状态评测
+控制台只使用同源现有 API，不引入单独前端服务或构建链。它提供 Job/Run 状态、内置状态评测、
+Finding 到 Evidence 的追踪、审批、同绑定 Replay 和 JSON/Markdown 导出。若配置了 API Key，
+可在控制台右上角输入；密钥只保存在当前标签页的 `sessionStorage`。
+
+### 5. 直接调用内置状态评测
 
 下面的请求使用内置隔离 profile，不需要连接外部 Target：
 
@@ -179,7 +204,7 @@ Copy-Item .env.example .env
 | `DATABASE__URL` | `sqlite+aiosqlite:///data/attacker.sqlite3` | 业务与审计事实存储 |
 | `CHECKPOINT__DATABASE_PATH` | `data/langgraph_checkpoints.sqlite3` | LangGraph 控制流 checkpoint |
 | `SECURITY__API_KEY` | 空 | 设置后使用 `X-API-Key` 保护业务接口 |
-| `EQUIPMENT__ROOT` | `equipment` | 本地装备目录 |
+| `EQUIPMENT__ROOT` | `equipment` | 本地可写装备扩展目录；内置装备从安装包只读加载 |
 | `EQUIPMENT__ALLOW_UNTRUSTED` | `false` | 是否允许不受信任装备；默认关闭 |
 | `EQUIPMENT__REQUIRE_CHECKSUM` | `true` | 是否强制验证装备内容 checksum |
 
@@ -293,7 +318,11 @@ POST /runs/{run_id}/resume
 POST /runs/{run_id}/control
 ```
 
-进程重启后恢复审批或暂停运行时，需要重新提供 Target 与必要的 Planner 运行时配置。恢复配置必须与 Run 快照匹配，原始凭据不会从数据库或 checkpoint 中恢复。
+每次恢复审批或暂停运行时，手工提供的 Target Secret 与必要的 Planner 凭据都需要重新提供；
+使用 `provider_instance_id` 的 Target 会按冻结的 package/config/Secret binding revision 重新短租
+凭据，调用方不需要知道其明文。
+恢复配置必须与 Run 快照匹配；运行时在每次图调用返回后即销毁，原始凭据不会留在进程注册表、
+数据库或 checkpoint 中。
 
 ### 报告与 Replay
 
@@ -321,6 +350,9 @@ Replay 差异语义：
 | `persistent` | 源 Run 与 Replay 中都存在的 Finding |
 | `regressed` | Replay 中新出现的安全对照 Finding |
 
+报告会区分冻结的 `declared_only` Equipment 与存在完成 Harness 物理尝试的 `executed`
+Equipment；Manifest/Checksum 快照只能证明声明和绑定，不能冒充执行证据。
+
 ## 装备扩展
 
 Attacker Core 拥有 Capability Contract、Policy Gate、预算、审批、Evidence、Finding、快照、Replay 与清理边界。Provider、Evaluator Skill 和 Case Pack 只能通过受控装备契约扩展这些能力，不能创建授权、绕过 Policy 或决定工作流路由。
@@ -347,7 +379,13 @@ uv run attacker skill dry-run state-poisoning-evaluator --payload '{"documents":
 ## 安全模型
 
 - Target 必须显式配置；系统不会扫描未知资产，也不会从目标响应中发现新 endpoint；
-- 公网 Target 默认拒绝，必须显式设置 `allow_public_target=true`；
+- 公网 Target 默认拒绝；调用方必须同时设置 `allow_public_target=true` 和
+  `provider_instance_id`；该已启用 Instance 必须实现 `agent.invoke.v1`，Target endpoint 必须
+  精确匹配其 `base_url + invoke_path`，且服务端 allowlist 必须包含 endpoint host；
+- 出站请求在 allowlist DNS 解析后锁定已验证的数字地址，同时保留原 Host/SNI；Metadata、
+  link-local、multicast 与 unspecified 地址始终拒绝，不能由公网授权开关放行；
+- DNS、候选地址连接和有界响应读取共享单次调用 deadline；响应体在进入内存前按 Run 或
+  Provider 上限流式截断；
 - 高风险步骤未获批准时无法执行，批准后仍会再次经过 Policy Gate；
 - Planner 不能越过 Target、Case、Tool、预算与风险等级 allowlist；
 - Target 与 Planner 凭据在快照、事件、报告和 checkpoint 中均会脱敏；
@@ -379,7 +417,10 @@ curl -X POST http://127.0.0.1:8000/jobs \
   -d '{"request_id":"stateful-20260730-001","kind":"stateful","payload":{"profile":"hardened"}}'
 ```
 
-Durable Job 不接受 password、token、API key 等原始 Secret 字段；敏感执行必须通过 Provider Instance Secret 引用绑定。
+Durable Job 不接受 password、token、API key 或 URL 凭据等原始 Secret；带
+`provider_instance_id` 的 Target 会在 Worker 分发时按 Instance 的 Secret 引用取得一次短租约，
+只把明文注入本次内存请求，不写回 Job、事件或报告；审批或暂停恢复时会复用冻结的 exact
+revision 重新短租，而不是要求调用方提交隐藏 Secret。
 
 以下能力尚未交付：
 
@@ -401,6 +442,7 @@ Durable Job 不接受 password、token、API key 等原始 Secret 字段；敏�
 │   ├── infrastructure/      # 数据库、Checkpoint、Secret 与模型适配
 │   ├── repositories/        # SQL 事实存储与持久化 Job
 │   ├── services/            # 应用服务、Policy、Evaluator 与共享执行 Pipeline
+│   ├── static/              # 无构建步骤的同源控制台
 │   └── workflows/           # LangGraph 自适应工作流
 ├── contracts/               # 版本化 Capability Contract
 ├── equipment/               # 内置 Provider、Skill 与 Case Pack
@@ -431,9 +473,7 @@ GitHub Actions 会在 push 和 pull request 上执行同一组检查。现有测
 - [架构设计](docs/architecture.md)：运行模式、状态图、Policy、Evidence 与恢复边界；
 - [装备开发指南](docs/equipment-development.md)：Provider、Skill、Case Pack 与 Capability Contract；
 - [生产运维手册](docs/operations/production-runbook.md)：部署、升级、回滚、SLO、告警与灾备；
-- [V1 验收范围](target/summary.md)：三阶段交付边界与验收标准；
-- [技术栈](TECH_STACK.md)：主要组件与技术选择；
-- [项目提案](PROJECT_PROPOSAL.md)：项目背景与目标。
+- [安全策略](SECURITY.md)：支持范围、漏洞报告方式与安全研究边界。
 
 ## 参与贡献
 

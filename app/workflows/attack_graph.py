@@ -783,15 +783,20 @@ class AttackGraph:
         runtime = self.runtime_registry.get(state["run_id"])
         case = runtime.cases[str(state["current_case_id"])]
         operation_id = str(state["current_operation_id"])
-        execution = await self.case_pipeline.execute_target(
-            run_id=state["run_id"],
-            case=case,
-            target=runtime.target,
-            operation_id=operation_id,
-            sequence=state["graph_step_count"],
-            approval_id=state.get("approval_id"),
-            secret_values=runtime.secret_values,
-        )
+        async with runtime.target_runtime() as call_target:
+            call_secret_values = set(runtime.secret_values)
+            call_secret_values.update(value for value in call_target.headers.values() if value)
+            if call_target.auth.token:
+                call_secret_values.add(call_target.auth.token)
+            execution = await self.case_pipeline.execute_target(
+                run_id=state["run_id"],
+                case=case,
+                target=call_target,
+                operation_id=operation_id,
+                sequence=state["graph_step_count"],
+                approval_id=state.get("approval_id"),
+                secret_values=call_secret_values,
+            )
         return {
             "current_step_id": execution.step_id,
             "target_call_count": state["target_call_count"] + 1,

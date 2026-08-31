@@ -14,6 +14,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
+from app import __version__
 from app.equipment.json_schema import validate_json_schema_document
 from app.schemas.equipment_schema import (
     CapabilityContractManifest,
@@ -26,7 +27,6 @@ from app.schemas.equipment_schema import (
 )
 from conf.settings import EquipmentSettings
 
-ATTACKER_VERSION = "0.1.0"
 SignatureStatus = Literal[
     "not_present",
     "not_required",
@@ -70,10 +70,10 @@ CORE_BUILTIN_PACKAGES = {
 }
 CORE_BUILTIN_CHECKSUMS = {
     (PackageType.provider, "enterprise-ops-provider"): (
-        "1232b7ea48cc2a0f77e3215adb9924748f212c46a44e35e874ad28fb67727414"
+        "17c4fcb92861ed9f21e6d425431c7a280865a87f3a60b8487a6010424a12f9f3"
     ),
     (PackageType.provider, "http-agent-provider"): (
-        "73f29665f213b371d975c1054c96767dca7e61162e02147ec01749ab94958b32"
+        "7b98ef9d7e12385b932d8ea039ec86ff8e420eaedfc2f77962f303fdc7e2a5d6"
     ),
     (PackageType.provider, "isolated-state-provider"): (
         "3dd9c91aa105a219bebb4d718903432ee93278e5c0e8e2244f8cfe5af4bd1a69"
@@ -152,6 +152,7 @@ MANIFEST_NAMES = {
     PackageType.casepack: "casepack.yaml",
     PackageType.contract: "contract.yaml",
 }
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
 class SignatureRevokedError(ValueError):
@@ -162,21 +163,20 @@ class EquipmentCatalog:
     """扫描 Contract/Provider/Skill/Case Pack，并计算不可变内容身份。"""
 
     def __init__(self, settings: EquipmentSettings) -> None:
-        self.settings = settings
+        self.settings = settings.model_copy(deep=True)
 
     def discover(self) -> list[DiscoveredPackage]:
         """先建立有效 Contract 集，再拒绝引用未知能力的可执行包。"""
 
-        contracts = self._scan_root(Path(self.settings.contracts_root), PackageType.contract)
+        contracts = self._scan_roots(PackageType.contract)
         known_contracts = {
             package.package_id for package in contracts if package.validation_status == "valid"
         }
-        equipment_root = Path(self.settings.root)
         packages = [
             *contracts,
-            *self._scan_root(equipment_root / "providers", PackageType.provider),
-            *self._scan_root(equipment_root / "skills", PackageType.skill),
-            *self._scan_root(equipment_root / "casepacks", PackageType.casepack),
+            *self._scan_roots(PackageType.provider),
+            *self._scan_roots(PackageType.skill),
+            *self._scan_roots(PackageType.casepack),
         ]
         for package in packages:
             if package.validation_status != "valid":
@@ -193,11 +193,24 @@ class EquipmentCatalog:
         )
 
     def validate_path(self, path: Path, package_type: PackageType) -> DiscoveredPackage:
-        resolved = path.resolve()
-        root = self._root_for(package_type).resolve()
-        if not resolved.is_relative_to(root):
+        resolved = self._resolve_path(path, package_type)
+        if not any(resolved.is_relative_to(root) for root in self._roots_for(package_type)):
             return self._invalid(path, package_type, ["package path escapes configured root"])
-        return self._load_package(path, package_type)
+        return self._load_package(resolved, package_type)
+
+    def package_path(self, package_type: PackageType, package_id: str) -> Path:
+        """解析已配置包，Core 内置 ID 始终优先使用只读随包副本。"""
+
+        roots = self._roots_for(package_type)
+        if package_id in CORE_BUILTIN_PACKAGES[package_type]:
+            roots = tuple(
+                sorted(roots, key=lambda root: root != self._builtin_root_for(package_type))
+            )
+        for root in roots:
+            candidate = root / package_id
+            if candidate.is_dir():
+                return candidate
+        return self._root_for(package_type) / package_id
 
     def inspect_package(self, path: Path, package_type: PackageType) -> DiscoveredPackage:
         return self._load_package(path, package_type)
@@ -219,6 +232,13 @@ class EquipmentCatalog:
             elif path.is_dir():
                 packages.append(self._load_package(path, package_type))
         return packages
+
+    def _scan_roots(self, package_type: PackageType) -> list[DiscoveredPackage]:
+        packages: dict[tuple[str, str], DiscoveredPackage] = {}
+        for root in self._roots_for(package_type):
+            for package in self._scan_root(root, package_type):
+                packages[(package.package_id, package.version)] = package
+        return list(packages.values())
 
     def _load_package(self, path: Path, package_type: PackageType) -> DiscoveredPackage:
         """将所有校验失败收敛为 invalid package，避免部分加载后再执行。"""
@@ -441,7 +461,7 @@ class EquipmentCatalog:
 
     @staticmethod
     def _validate_compatibility(min_version: str, max_version: str) -> None:
-        current = _version_tuple(ATTACKER_VERSION)
+        current = _version_tuple(__version__)
         if current < _version_tuple(min_version):
             raise ValueError(f"requires Attacker >= {min_version}")
         if max_version.endswith(".x"):
@@ -538,13 +558,48 @@ class EquipmentCatalog:
 
     def _root_for(self, package_type: PackageType) -> Path:
         if package_type == PackageType.contract:
-            return Path(self.settings.contracts_root)
+            return Path(self.settings.contracts_root).resolve()
         suffix = {
             PackageType.provider: "providers",
             PackageType.skill: "skills",
             PackageType.casepack: "casepacks",
         }[package_type]
-        return Path(self.settings.root) / suffix
+        return (Path(self.settings.root) / suffix).resolve()
+
+    @staticmethod
+    def _builtin_root_for(package_type: PackageType) -> Path:
+        if package_type == PackageType.contract:
+            return (_PACKAGE_ROOT / "contracts").resolve()
+        suffix = {
+            PackageType.provider: "providers",
+            PackageType.skill: "skills",
+            PackageType.casepack: "casepacks",
+        }[package_type]
+        return (_PACKAGE_ROOT / "equipment" / suffix).resolve()
+
+    def _roots_for(self, package_type: PackageType) -> tuple[Path, ...]:
+        configured = self._root_for(package_type)
+        bundled = self._builtin_root_for(package_type)
+        return (configured,) if configured == bundled else (configured, bundled)
+
+    def _resolve_path(self, path: Path, package_type: PackageType) -> Path:
+        resolved = path.resolve()
+        if resolved.exists():
+            return resolved
+        configured = self._root_for(package_type)
+        if not self._uses_default_root(package_type) or not resolved.is_relative_to(configured):
+            return resolved
+        bundled = self._builtin_root_for(package_type) / resolved.relative_to(configured)
+        return bundled.resolve() if bundled.exists() else resolved
+
+    def _uses_default_root(self, package_type: PackageType) -> bool:
+        configured = (
+            Path(self.settings.contracts_root)
+            if package_type == PackageType.contract
+            else Path(self.settings.root)
+        )
+        default = Path("contracts") if package_type == PackageType.contract else Path("equipment")
+        return configured == default
 
     def _source_facts(
         self,
@@ -563,7 +618,7 @@ class EquipmentCatalog:
             return cast(SourceType, candidate_type), str(
                 source_metadata.get("source_ref") or source_ref
             )
-        expected = (self._root_for(package_type) / package_id).resolve()
+        expected = (self._builtin_root_for(package_type) / package_id).resolve()
         if package_id in CORE_BUILTIN_PACKAGES[package_type] and resolved == expected:
             return "builtin", source_ref
         return "local_directory", source_ref

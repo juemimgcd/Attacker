@@ -135,7 +135,7 @@ async def test_harness_replays_once_and_persists_only_redacted_provider_result(
     package = await repository.get_package(
         PackageType.provider,
         "enterprise-ops-provider",
-        "1.0.0",
+        "1.0.1",
     )
     contract = await repository.get_package(
         PackageType.contract,

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -41,6 +41,7 @@ class EquipmentRepository:
     async def register_packages(self, packages: list[DiscoveredPackage]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         async with self.session_factory.begin() as session:
+            await self._lock_package_registration(session, packages)
             for package in packages:
                 existing = await session.scalar(
                     select(EquipmentPackageRecord).where(
@@ -120,6 +121,29 @@ class EquipmentRepository:
                     },
                 )
         return results
+
+    @staticmethod
+    async def _lock_package_registration(
+        session: AsyncSession,
+        packages: list[DiscoveredPackage],
+    ) -> None:
+        """Serialize immutable package identities across reload workers."""
+
+        bind = session.get_bind()
+        if bind.dialect.name == "postgresql":
+            identities = sorted(
+                {
+                    f"{package.package_type.value}:{package.package_id}:{package.version}"
+                    for package in packages
+                }
+            )
+            for identity in identities:
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"attacker:equipment-package:{identity}"},
+                )
+        elif bind.dialect.name == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
 
     async def list_packages(
         self,
@@ -211,9 +235,18 @@ class EquipmentRepository:
         payload: ProviderInstanceCreate,
         package: dict[str, Any],
     ) -> dict[str, Any]:
-        config_revision = _checksum_json(payload.config)
+        normalized_allowed_hosts = sorted(
+            {host.rstrip(".").casefold() for host in payload.allowed_hosts}
+        )
+        config_revision = _checksum_json(
+            {
+                "config": payload.config,
+                "allowed_hosts": normalized_allowed_hosts,
+            }
+        )
         secret_revision = _checksum_json(payload.secret_refs)
         async with self.session_factory.begin() as session:
+            await self._lock_provider_instance(session, payload.instance_id)
             existing = await session.scalar(
                 select(ProviderInstanceRecord).where(
                     ProviderInstanceRecord.instance_id == payload.instance_id,
@@ -237,6 +270,8 @@ class EquipmentRepository:
             )
             for row in previous:
                 row.enabled = False
+            if previous:
+                await session.flush()
             record = ProviderInstanceRecord(
                 id=str(uuid4()),
                 instance_id=payload.instance_id,
@@ -249,7 +284,7 @@ class EquipmentRepository:
                 config_json=payload.config,
                 secret_binding_revision=secret_revision,
                 secret_refs_json=payload.secret_refs,
-                allowed_hosts_json=payload.allowed_hosts,
+                allowed_hosts_json=normalized_allowed_hosts,
                 enabled=payload.enabled,
                 health_status="unknown",
             )
@@ -266,6 +301,19 @@ class EquipmentRepository:
                 },
             )
             return self.instance_dict(record)
+
+    @staticmethod
+    async def _lock_provider_instance(session: AsyncSession, instance_id: str) -> None:
+        """Serialize one Instance's revision pointer on PostgreSQL and SQLite."""
+
+        bind = session.get_bind()
+        if bind.dialect.name == "postgresql":
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                {"lock_key": f"attacker:provider-instance:{instance_id}"},
+            )
+        elif bind.dialect.name == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
 
     async def list_provider_instances(
         self,
@@ -560,6 +608,17 @@ class EquipmentRepository:
             if lease_records:
                 result["resource_leases"] = [self.lease_dict(lease) for lease in lease_records]
             return result
+
+    async def list_executions(self, run_id: str) -> list[dict[str, Any]]:
+        async with self.session_factory() as session:
+            records = (
+                await session.scalars(
+                    select(EquipmentExecutionRecord)
+                    .where(EquipmentExecutionRecord.run_id == run_id)
+                    .order_by(EquipmentExecutionRecord.started_at, EquipmentExecutionRecord.id)
+                )
+            ).all()
+        return [self.execution_dict(record) for record in records]
 
     async def list_active_leases(self, run_id: str | None) -> list[dict[str, Any]]:
         async with self.session_factory() as session:

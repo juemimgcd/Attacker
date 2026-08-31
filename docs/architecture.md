@@ -1,7 +1,6 @@
 # Attacker Architecture
 
-> 本文描述截至 2026-08-09 的已实现架构。历史阶段计划保留在
-> `docs/superpowers/plans/`，不作为当前运行时事实来源。
+> 本文描述当前已实现架构；代码、迁移和运行时验证是事实来源。
 
 ## 1. 系统目标与边界
 
@@ -19,7 +18,7 @@ Planner 不是授权主体，checkpoint 不是审计事实源，Job 状态也不
 ## 2. 当前组件关系
 
 ```text
-FastAPI routes / CLI
+FastAPI routes / Console / CLI
         |
         v
 Application services
@@ -135,7 +134,7 @@ run/tenant/user/session 隔离。正常结束、异常和协程取消都会尝�
 ### 4.5 Durable Job
 
 ```text
-enqueue -> lease -> running -> create Run -> bind job.run_id
+enqueue (allocate Job.id) -> lease -> running -> create Run(id=Job.id) -> bind job.run_id
     |                                  |
     | cancel_requested                 v
     +------------------------> cancel dispatch task
@@ -144,12 +143,25 @@ enqueue -> lease -> running -> create Run -> bind job.run_id
 ```
 
 `JobRepository` 负责 request 幂等、租约 owner/token/expiry、重试和恢复；
-`JobDispatcher` 只把已校验 payload 路由到 Run Service。Run 创建钩子会立即写入
-`run_jobs.run_id`。Worker 在轮询取消信号的同时续租，并通过 `asyncio` 协作式取消中断
-正在等待的 Target 调用。
+`JobDispatcher` 只把已校验 payload 路由到 Run Service。Job 分发会把预分配的 `Job.id` 作为
+`Run.id`，Run 创建钩子随即写入 `run_jobs.run_id` 并在外部执行前重新检查取消状态。Worker
+在轮询取消信号的同时续租，并通过 `asyncio` 协作式取消中断正在等待的 Target 调用。
+
+只有租约过期前从未进入 `running` 且未创建 Run 的 Job 才能自动重试；一旦进入 `running`，
+即使绑定尚未写回，也不能证明旧 Worker 没有提交 Run。恢复、重新领取或人工重试时还会按相同 ID
+回查并补齐遗漏绑定；
+Run 一旦存在，租约过期或执行失败会进入
+`job_run_recovery_required`，不能再次分发同一 payload；操作者必须查看已绑定 Run，并选择
+Replay 或使用新的 request 创建新任务，避免重复外部副作用。
 
 取消的硬边界：Connector 必须在可取消的 async await 点执行 I/O。无法协作取消的本地
 阻塞代码仍需要进程隔离或 Harness 超时，不能仅依赖协程取消。
+
+### 4.6 Console 与黄金路径
+
+`/console` 是由 FastAPI 同源提供的静态操作台，直接复用受保护的 Job、Run、Approval、Replay
+和 Report API，不拥有独立事实或鉴权模型。`attacker demo` 使用内置隔离数据运行 vulnerable
+基线与 hardened Replay，并生成 Markdown 差异报告；它不连接外部 Target。
 
 ## 5. 事实、幂等与并发
 
@@ -214,18 +226,39 @@ Finding 必须引用已持久化 Evidence。Trace 不完整时灰盒结果显式
 不能根据最终文本猜测内部工具越权。Planner 与可选 Model Judge 使用不同 Adapter、快照和
 用量统计。
 
+Equipment 快照只证明某个版本和 checksum 被声明并冻结。报告仅在存在匹配且已结束、
+`physical_attempts > 0` 的 Harness execution 时标记为 `executed`；其余一律标记为
+`declared_only`，不能把绑定事实冒充执行事实。
+
 ## 8. Secret 与执行安全
 
 - Target Secret 只保存在请求期/运行时内存或受控 Secret Broker lease 中；
-- Durable Job payload 拒绝 password、token、API key 等明文字段；
+- Durable Job payload 拒绝 password、token、API key 和 URL 凭据等明文字段；Worker 只在分发
+  带 `provider_instance_id` 的 Target 时按 Instance Secret 引用取得短租约；
 - Request、Response、Trace、日志和报告在持久化前脱敏；
 - checkpoint 不保存 Header、Token 或完整未信任输出；
-- 默认目标是本地、测试或沙箱；公共/不可解析目标需要显式授权开关；
+- Adaptive 运行时只在一次图调用期间保留，调用完成、暂停或进入审批后立即销毁；恢复时重新校验
+  同绑定非 Secret 行为，手工凭据由调用方重供，Provider 凭据则按冻结的 exact revision 短租；
+- 默认目标是本地、测试或沙箱；公网目标还需要已启用 Provider Instance 的服务端 host
+  allowlist、`agent.invoke.v1` Capability 和与 Instance 配置精确匹配的 endpoint，客户端
+  `allow_public_target` 不能单独授权；连接使用本次已验证的数字地址并保留原 Host/SNI，避免
+  校验后再次解析；DNS、所有候选地址和有界响应读取共享单次调用 deadline；
 - Planner 没有 Shell、文件系统、浏览器或任意 HTTP 能力；
 - Equipment 不能绕过 Core Policy、审批、预算、Evidence 和清理边界。
 
 OIDC/JWT、用户体系、RBAC 和审批人组织权限仍不属于当前已交付范围；部署方必须在入口层
 提供这些控制，不能把 API key 等同于完整身份治理。
+
+### 8.1 威胁模型
+
+| 资产或边界 | 主要威胁 | 已实现控制 | 剩余责任 |
+|---|---|---|---|
+| Target 与凭据 | 未授权公网调用、凭据持久化 | 私网默认、显式公网授权、Secret Broker、持久化前脱敏 | 部署方提供目标授权与密钥轮换 |
+| Planner 与高风险动作 | 自主扩大范围、绕过审批 | 固定候选、Policy Gate、预算、人工审批后重新校验 | 部署方配置最小 allowlist |
+| Equipment | 被篡改或不受信任代码执行 | checksum、Manifest/Contract 校验、信任级别、默认禁用不受信任包 | 强隔离执行需 Linux 容器后端 |
+| Evidence 与 Finding | 无证据结论、历史被覆盖 | 追加式 Event、稳定 operation ID、Finding 证据引用、SQL 事实源 | 数据库访问控制与备份 |
+| Job 与 Replay | 重试重复执行、范围漂移 | request 幂等、租约、Run 绑定、冻结输入与装备快照 | 外部 Target 仍须支持幂等语义 |
+| API 控制面 | 越权读取或操作其他运行 | 可选 API key、生产配置门禁 | 多租户部署前必须增加 OIDC/RBAC 与入口隔离 |
 
 ## 9. 启动与关闭
 
@@ -253,6 +286,7 @@ OIDC/JWT、用户体系、RBAC 和审批人组织权限仍不属于当前已交�
 | ADR-005 | EventStore 原子分配 Run sequence | 消除 `MAX + 1` 并发竞争 |
 | ADR-006 | Job 显式绑定 Run 并协作取消 | Job 生命周期必须能定位并终止真实执行 |
 | ADR-007 | API 只依赖应用服务 | HTTP 层不拥有事务和持久化规则 |
+| ADR-008 | Equipment 声明与执行证据分离 | 冻结 Manifest 不能证明物理调用发生 |
 
 新增能力应先判断属于 Application、Workflow、Pipeline、Repository 还是 Infrastructure，
 避免在 Router 或 Graph Node 中堆叠 SQL、HTTP 模板和 Evaluator 规则。
@@ -277,5 +311,4 @@ uv run python -m compileall -q app conf alembic
 
 - [Equipment Development](equipment-development.md)：Provider、Skill、Case Pack 和 Contract；
 - [Production Runbook](operations/production-runbook.md)：生产部署、迁移、排空和灾备；
-- `target/summary.md`：V1 验收范围；
-- `TECH_STACK.md`：技术栈与版本边界。
+- [`SECURITY.md`](../SECURITY.md)：漏洞报告方式、支持范围与安全研究边界。

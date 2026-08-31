@@ -4,7 +4,7 @@ scenarios:
     kwargs: {}
     expected:
       id: enterprise-ops-provider
-      version: 1.0.0
+      version: 1.0.1
   - name: rejects-insecure-base-url
     method: validate_config
     kwargs:

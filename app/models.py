@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -67,6 +68,10 @@ class EvaluationRunRecord(Base):
     thread_id: Mapped[str | None] = mapped_column(String(100), unique=True)
     mode: Mapped[str] = mapped_column(String(32), default="deterministic")
     status: Mapped[str] = mapped_column(String(32), default="running")
+    resume_claim_kind: Mapped[str | None] = mapped_column(String(32))
+    resume_claim_checkpoint_id: Mapped[str | None] = mapped_column(String(200))
+    resume_claim_owner_token: Mapped[str | None] = mapped_column(String(64))
+    resume_claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     event_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     total_cases: Mapped[int] = mapped_column(Integer, default=0)
     completed_cases: Mapped[int] = mapped_column(Integer, default=0)
@@ -280,6 +285,13 @@ class ProviderInstanceRecord(Base):
             "config_revision",
             "secret_binding_revision",
             name="uq_provider_instance_revision",
+        ),
+        Index(
+            "uq_provider_instances_enabled_instance",
+            "instance_id",
+            unique=True,
+            postgresql_where=text("enabled IS TRUE"),
+            sqlite_where=text("enabled = 1"),
         ),
     )
 

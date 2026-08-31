@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PackageType(StrEnum):
@@ -193,6 +194,20 @@ class ProviderInstanceCreate(BaseModel):
     secret_refs: dict[str, str] = Field(default_factory=dict)
     allowed_hosts: list[str] = Field(default_factory=list)
     enabled: bool = False
+
+    @model_validator(mode="after")
+    def reject_ambiguous_secret_names(self) -> ProviderInstanceCreate:
+        invalid_names = [
+            name
+            for name in self.secret_refs
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+        ]
+        if invalid_names:
+            raise ValueError("secret_refs names must be ASCII environment-safe identifiers")
+        normalized_names = [name.casefold() for name in self.secret_refs]
+        if len(normalized_names) != len(set(normalized_names)):
+            raise ValueError("secret_refs names must be unique ignoring case")
+        return self
 
 
 class ProviderInstanceView(ProviderInstanceCreate):

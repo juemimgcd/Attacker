@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 from asyncio import CancelledError
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
 
+from app.equipment.security import is_sensitive_field, validate_target_url
 from app.repositories.run_repository import RunRepository
 from app.schemas.attack_sample_schema import (
     AttackSample,
@@ -25,6 +26,7 @@ from app.schemas.attack_sample_schema import (
 from app.schemas.judge_schema import (
     AttackRunResult,
     EvaluationIssue,
+    EvaluationStage,
     EvaluationVerdict,
     TargetResponse,
 )
@@ -42,9 +44,12 @@ from app.services.attack_executor import AttackExecutor
 from app.services.evaluator_service import EvaluatorService
 from app.services.prompt_governance import redact_sensitive_text
 from app.services.run_lifecycle import RunCreatedHook, notify_run_created
-from app.services.sample_loader import BlackBoxDatasetLoader
+from app.services.sample_loader import BlackBoxDatasetLoader, resolve_dataset_path
 from app.services.target_binding import canonical_target_binding, canonical_target_ref
-from app.services.target_connector.http_connector import HTTPTargetConnector
+from app.services.target_connector.http_connector import (
+    HTTPTargetConnector,
+    target_response_limit,
+)
 
 if TYPE_CHECKING:
     from app.services.equipment_service import EquipmentService
@@ -84,12 +89,9 @@ class DeterministicRunService:
         request: DeterministicRunRequest,
         *,
         on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
     ) -> dict[str, Any]:
-        self._validate_target(request)
-        dataset_path = Path(request.dataset_path).resolve()
-        samples_root = Path("samples").resolve()
-        if not dataset_path.is_relative_to(samples_root):
-            raise ValueError("dataset_path must resolve inside the samples directory")
+        dataset_path = resolve_dataset_path(request.dataset_path, "black-box")
         dataset = await self.dataset_loader.load(dataset_path, request.case_ids)
         return await self.run_dataset(
             target=request.target,
@@ -98,6 +100,7 @@ class DeterministicRunService:
             mode="deterministic",
             fixture_evidence_refs=request.fixture_evidence_refs,
             on_run_created=on_run_created,
+            requested_run_id=requested_run_id,
         )
 
     async def run_single(
@@ -111,7 +114,6 @@ class DeterministicRunService:
             target=target,
             budget=RunBudget(max_cases=1, max_target_calls=1),
         )
-        self._validate_target(request)
         return await self.run_dataset(
             target=target,
             dataset=dataset,
@@ -125,11 +127,22 @@ class DeterministicRunService:
         target: TargetConfig,
         sample: AttackSample,
     ) -> dict[str, Any]:
+        runtime_target = await self._prepare_target(target)
+        return await self._run_layered_single_materialized(
+            target=runtime_target,
+            sample=sample,
+        )
+
+    async def _run_layered_single_materialized(
+        self,
+        *,
+        target: TargetConfig,
+        sample: AttackSample,
+    ) -> dict[str, Any]:
         dataset = self._single_case_dataset(sample)
         budget = RunBudget(max_cases=1, max_target_calls=1)
-        request = DeterministicRunRequest(target=target, budget=budget)
-        self._validate_target(request)
         secret_values = self._secret_values(target)
+        active_secret_values = secret_values
         redacted_keys = set(_CORE_REDACTED_KEYS)
         target_snapshot = self._redact_target_snapshot(
             target,
@@ -147,7 +160,6 @@ class DeterministicRunService:
             budget=budget,
             mode="deterministic",
         )
-        counts = self._empty_counts()
         target_call_count = 0
         partial_calls: list[TargetCallEvidence] = []
         current_operation_id = f"{run_id}:freeze_equipment"
@@ -159,11 +171,15 @@ class DeterministicRunService:
             nonlocal target_call_count
             partial_calls.append(
                 TargetCallEvidence(
-                    request_body=self._redact(request_body, redacted_keys, secret_values),
+                    request_body=self._redact(
+                        request_body,
+                        redacted_keys,
+                        active_secret_values,
+                    ),
                     response=self._redact_target_response(
                         response,
                         redacted_keys,
-                        secret_values,
+                        active_secret_values,
                     ),
                 )
             )
@@ -172,16 +188,21 @@ class DeterministicRunService:
         try:
             await self._freeze_equipment(run_id, target)
             current_operation_id = f"{run_id}:{sample.id}:execute"
-            raw_result = await self.attack_executor.run_once(
-                target=target,
-                sample=sample,
-                on_target_call=observe_target_call,
-            )
-            result = self._redact_attack_result(
-                raw_result,
-                redacted_keys,
-                secret_values,
-            )
+            async with self._target_runtime(
+                target,
+                frozen=target.provider_instance_id is not None,
+            ) as call_target:
+                active_secret_values = self._secret_values(call_target)
+                raw_result = await self.attack_executor.run_once(
+                    target=call_target,
+                    sample=sample,
+                    on_target_call=observe_target_call,
+                )
+                result = self._redact_attack_result(
+                    raw_result,
+                    redacted_keys,
+                    active_secret_values,
+                )
             outcome = self._layered_outcome(result)
             current_operation_id = f"{run_id}:{sample.id}:persist"
             await self.repository.record_layered_result(
@@ -191,19 +212,16 @@ class DeterministicRunService:
                 result=result,
                 outcome=outcome,
             )
-            counts[outcome.value] = 1
             partial_calls = []
             current_operation_id = f"{run_id}:finalize"
             await self.repository.finalize_run(
                 run_id,
-                counts=counts,
                 target_call_count=target_call_count,
             )
         except CancelledError as exc:
             await self._mark_run_interrupted(
                 run_id,
                 status="cancelled",
-                counts=counts,
                 target_call_count=target_call_count,
                 operation_id=current_operation_id,
                 exc=exc,
@@ -215,7 +233,6 @@ class DeterministicRunService:
             await self._mark_run_interrupted(
                 run_id,
                 status="failed",
-                counts=counts,
                 target_call_count=target_call_count,
                 operation_id=current_operation_id,
                 exc=exc,
@@ -272,6 +289,36 @@ class DeterministicRunService:
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
         fixture_evidence_refs: dict[str, str] | None = None,
         on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        runtime_target = await self._prepare_target(
+            target,
+            frozen=equipment_source_run_id is not None,
+        )
+        return await self._run_materialized_dataset(
+            target=runtime_target,
+            dataset=dataset,
+            budget=budget,
+            mode=mode,
+            equipment_source_run_id=equipment_source_run_id,
+            equipment_overrides=equipment_overrides,
+            fixture_evidence_refs=fixture_evidence_refs,
+            on_run_created=on_run_created,
+            requested_run_id=requested_run_id,
+        )
+
+    async def _run_materialized_dataset(
+        self,
+        *,
+        target: TargetConfig,
+        dataset: LoadedDataset,
+        budget: RunBudget,
+        mode: str,
+        equipment_source_run_id: str | None = None,
+        equipment_overrides: dict[str, dict[str, Any]] | None = None,
+        fixture_evidence_refs: dict[str, str] | None = None,
+        on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
     ) -> dict[str, Any]:
         """执行冻结数据集，并在每个 Case 后持久化可恢复审计事实。"""
 
@@ -280,7 +327,6 @@ class DeterministicRunService:
             budget=budget,
             fixture_evidence_refs=fixture_evidence_refs or {},
         )
-        self._validate_target(request)
         fixture_case_ids = {
             case.id for case in dataset.cases if case.delivery_mode == "target_fixture"
         }
@@ -301,10 +347,10 @@ class DeterministicRunService:
             dataset=dataset,
             budget=request.budget,
             mode=mode,
+            requested_run_id=requested_run_id,
         )
         started = perf_counter()
         target_call_count = 0
-        counts = self._empty_counts()
         partial_case_id: str | None = None
         partial_calls: list[TargetCallEvidence] = []
         current_operation_id = f"{run_id}:freeze_equipment"
@@ -329,11 +375,6 @@ class DeterministicRunService:
                 partial_calls = []
                 existing = await self.repository.get_case_result(operation_id)
                 if existing is not None:
-                    self._increment_counts(
-                        counts,
-                        case,
-                        EvaluationOutcome(existing["outcome"]),
-                    )
                     target_call_count += len(existing.get("calls", []))
                     continue
 
@@ -369,21 +410,18 @@ class DeterministicRunService:
                     step_sequence=step_sequence,
                     result=result,
                 )
-                self._increment_counts(counts, case, result.outcome)
                 partial_case_id = None
                 partial_calls = []
 
             current_operation_id = f"{run_id}:finalize"
             await self.repository.finalize_run(
                 run_id,
-                counts=counts,
                 target_call_count=target_call_count,
             )
         except CancelledError as exc:
             await self._mark_run_interrupted(
                 run_id,
                 status="cancelled",
-                counts=counts,
                 target_call_count=target_call_count,
                 operation_id=current_operation_id,
                 exc=exc,
@@ -395,7 +433,6 @@ class DeterministicRunService:
             await self._mark_run_interrupted(
                 run_id,
                 status="failed",
-                counts=counts,
                 target_call_count=target_call_count,
                 operation_id=current_operation_id,
                 exc=exc,
@@ -427,27 +464,72 @@ class DeterministicRunService:
             target_binding_ref=canonical_target_ref(target),
             test_principal_ref="core:blackbox",
             overrides=overrides,
+            provider_instance_id=target.provider_instance_id,
+            provider_package_checksum=target.provider_package_checksum,
+            provider_config_revision=target.provider_config_revision,
+            provider_secret_binding_revision=target.provider_secret_binding_revision,
         )
 
-    @staticmethod
-    def _validate_target(request: DeterministicRunRequest) -> None:
-        target = request.target
-        if target.allow_public_target:
+    async def validate_target(self, target: TargetConfig) -> None:
+        if target.provider_instance_id is not None and self.equipment_service is not None:
+            await self.equipment_service.validate_target(target)
             return
-        host = target.endpoint.host
-        if host is None:
-            raise ValueError("target endpoint must include a host")
-        if host == "localhost":
-            return
-        try:
-            address = ipaddress.ip_address(host)
-            if address.is_private or address.is_loopback:
-                return
-        except ValueError:
-            pass
-        raise ValueError(
-            "public or unresolved targets require allow_public_target=true and explicit authorization"
+        validate_target_url(
+            str(target.endpoint),
+            allow_public_target=target.allow_public_target,
+            allowed_hosts=[],
         )
+
+    async def dry_run_once(
+        self,
+        *,
+        target: TargetConfig,
+        sample: AttackSample,
+    ) -> AttackRunResult:
+        async with self._target_runtime(target) as runtime_target:
+            secret_values = self._secret_values(runtime_target)
+            result = await self.attack_executor.run_once(
+                target=runtime_target,
+                sample=sample,
+            )
+            return self._redact_attack_result(
+                result,
+                set(_CORE_REDACTED_KEYS),
+                secret_values,
+            )
+
+    async def _prepare_target(
+        self,
+        target: TargetConfig,
+        *,
+        frozen: bool = False,
+    ) -> TargetConfig:
+        if target.provider_instance_id is None:
+            await self.validate_target(target)
+            return target.model_copy(deep=True)
+        if self.equipment_service is not None:
+            return await self.equipment_service.prepare_target(target, frozen=frozen)
+        raise RuntimeError("Provider Instance Target materialization is unavailable")
+
+    @asynccontextmanager
+    async def _target_runtime(
+        self,
+        target: TargetConfig,
+        *,
+        frozen: bool = False,
+    ) -> AsyncIterator[TargetConfig]:
+        if target.provider_instance_id is None:
+            await self.validate_target(target)
+            yield target.model_copy(deep=True)
+            return
+        if self.equipment_service is not None:
+            async with self.equipment_service.materialize_target(
+                target,
+                frozen=frozen,
+            ) as runtime_target:
+                yield runtime_target
+            return
+        raise RuntimeError("Provider Instance Target materialization is unavailable")
 
     async def _execute_case(
         self,
@@ -464,6 +546,10 @@ class DeterministicRunService:
         raw_responses: list[TargetResponse] = []
         redact_fields = set(case.redact_fields) | _CORE_REDACTED_KEYS
         secret_values = self._secret_values(request.target)
+        response_limit = min(
+            request.budget.max_response_bytes,
+            case.evaluator.max_response_bytes or request.budget.max_response_bytes,
+        )
 
         for _ in range(case.repeat_count):
             messages: list[dict[str, str]] = []
@@ -486,28 +572,35 @@ class DeterministicRunService:
                     )
 
                 messages.append({"role": "user", "content": prompt})
-                request_body, response = await self.connector.call(
-                    target=request.target,
-                    prompt=prompt,
-                    messages=messages,
-                )
-                raw_responses.append(response)
-                call_evidence = TargetCallEvidence(
-                    request_body=self._redact(
-                        request_body,
-                        redact_fields,
-                        secret_values,
-                    ),
-                    response=self._redact_target_response(
+                async with self._target_runtime(
+                    request.target,
+                    frozen=request.target.provider_instance_id is not None,
+                ) as call_target:
+                    call_secret_values = self._secret_values(call_target)
+                    with target_response_limit(response_limit):
+                        request_body, response = await self.connector.call(
+                            target=call_target,
+                            prompt=prompt,
+                            messages=messages,
+                        )
+                    sanitized_response = self._redact_target_response(
                         response,
                         redact_fields,
-                        secret_values,
-                    ),
-                )
+                        call_secret_values,
+                    )
+                    call_evidence = TargetCallEvidence(
+                        request_body=self._redact(
+                            request_body,
+                            redact_fields,
+                            call_secret_values,
+                        ),
+                        response=sanitized_response,
+                    )
+                raw_responses.append(sanitized_response)
                 calls.append(call_evidence)
                 if on_target_call is not None:
                     on_target_call(call_evidence)
-                messages.append({"role": "assistant", "content": response.text})
+                messages.append({"role": "assistant", "content": sanitized_response.text})
 
         evaluation = self.evaluator.evaluate(
             case,
@@ -616,18 +709,6 @@ class DeterministicRunService:
         )
 
     @staticmethod
-    def _increment_counts(
-        counts: dict[str, int],
-        case: BlackBoxCase,
-        outcome: EvaluationOutcome,
-    ) -> None:
-        counts[outcome.value] += 1
-        if case.kind == CaseKind.control and outcome == EvaluationOutcome.violation:
-            counts["false_positive"] += 1
-        if case.kind == CaseKind.control and outcome == EvaluationOutcome.refused:
-            counts["defense_overblock"] += 1
-
-    @staticmethod
     def _layered_outcome(result: AttackRunResult) -> EvaluationOutcome:
         if result.judge_result.verdict == EvaluationVerdict.violation:
             return EvaluationOutcome.violation
@@ -635,27 +716,20 @@ class DeterministicRunService:
             return EvaluationOutcome.safe
         if EvaluationIssue.refusal in result.judge_result.issues:
             return EvaluationOutcome.refused
+        if result.judge_result.verdict == EvaluationVerdict.inconclusive:
+            if any(
+                evaluation.stage == EvaluationStage.transport
+                for evaluation in result.judge_result.evaluator_results
+            ):
+                return EvaluationOutcome.error
+            return EvaluationOutcome.not_evaluable
         return EvaluationOutcome.error
-
-    @staticmethod
-    def _empty_counts() -> dict[str, int]:
-        return {
-            "violation": 0,
-            "refused": 0,
-            "safe": 0,
-            "error": 0,
-            "budget_aborted": 0,
-            "not_evaluable": 0,
-            "false_positive": 0,
-            "defense_overblock": 0,
-        }
 
     async def _mark_run_interrupted(
         self,
         run_id: str,
         *,
         status: Literal["failed", "cancelled"],
-        counts: dict[str, int],
         target_call_count: int,
         operation_id: str,
         exc: BaseException,
@@ -667,7 +741,6 @@ class DeterministicRunService:
             await self.repository.mark_run_interrupted(
                 run_id,
                 status=status,
-                counts=counts,
                 target_call_count=target_call_count,
                 reason_code=reason_code,
                 last_operation_id=operation_id,
@@ -693,7 +766,7 @@ class DeterministicRunService:
             return {
                 key: (
                     "[REDACTED]"
-                    if cls._is_redacted_key(key, redacted_keys)
+                    if cls._is_redacted_key(key, item, redacted_keys)
                     else cls._redact(item, redacted_keys, secret_values)
                 )
                 for key, item in value.items()
@@ -846,12 +919,8 @@ class DeterministicRunService:
         )
 
     @staticmethod
-    def _is_redacted_key(key: str, redacted_keys: set[str]) -> bool:
-        normalized = key.lower().replace("-", "_")
-        return any(
-            normalized == candidate or normalized.endswith(f"_{candidate}")
-            for candidate in redacted_keys
-        )
+    def _is_redacted_key(key: str, value: Any, redacted_keys: set[str]) -> bool:
+        return is_sensitive_field(key, value, redacted_keys)
 
     @classmethod
     def _secret_values(cls, target: TargetConfig) -> set[str]:
@@ -861,6 +930,7 @@ class DeterministicRunService:
             for key, value in target.headers.items()
             if cls._is_redacted_key(
                 key,
+                value,
                 _CORE_REDACTED_KEYS,
             )
         )

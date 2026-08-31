@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 from app.equipment.sdk import provider_secret
-from app.equipment.security import validate_outbound_url
+from app.equipment.security import (
+    buffered_identity_response,
+    read_bounded_response,
+    send_pinned_request,
+    validate_outbound_url,
+)
 from app.schemas.equipment_schema import EvidenceDraft, ProviderContext, ProviderResult
+
+MAX_RESPONSE_BYTES = 1_048_576
 
 
 class HttpAgentProvider:
     """在短期 Secret 作用域内调用目标，并返回有界、可脱敏的结构化 Evidence。"""
 
     async def describe(self) -> dict:
-        return {"id": "http-agent-provider", "version": "1.0.0"}
+        return {"id": "http-agent-provider", "version": "1.0.1"}
 
     async def validate_config(self, config: dict) -> dict:
         return {"valid": bool(config.get("base_url"))}
@@ -33,21 +42,55 @@ class HttpAgentProvider:
         context = ProviderContext.model_validate(context)
         base_url = str(context.config["base_url"]).rstrip("/")
         path_key = "invoke_path" if capability == "agent.invoke.v1" else "trace_path"
+        protocol_error = (
+            "target_protocol_error" if capability == "agent.invoke.v1" else "trace_protocol_error"
+        )
+        timeout_error = (
+            "target_timeout" if capability == "agent.invoke.v1" else "trace_protocol_error"
+        )
         path = str(context.config.get(path_key, "/"))
         url = f"{base_url}/{path.lstrip('/')}"
-        validate_outbound_url(url, context.approved_host_set)
         headers = {}
         if secret_name := context.config.get("auth_secret_name"):
             headers["authorization"] = f"Bearer {provider_secret(str(secret_name))}"
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            response = await client.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=context.budget.timeout_seconds,
+        try:
+            addresses = validate_outbound_url(url, context.approved_host_set)
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                request = client.build_request(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=context.budget.timeout_seconds,
+                )
+                async with asyncio.timeout(context.budget.timeout_seconds):
+                    response = await send_pinned_request(
+                        client,
+                        request,
+                        addresses=addresses,
+                        stream=True,
+                    )
+                    content = await read_bounded_response(response, MAX_RESPONSE_BYTES)
+            buffered = buffered_identity_response(response, content)
+            buffered.raise_for_status()
+            output = buffered.json()
+            if not isinstance(output, dict):
+                raise TypeError("HTTP Agent response must be a JSON object")
+        except (TimeoutError, httpx.TimeoutException):
+            return ProviderResult(
+                status="timeout",
+                error_code=timeout_error,
+                error_message="HTTP Agent request timed out",
             )
-        response.raise_for_status()
-        output = response.json()
+        except (httpx.HTTPError, TypeError, ValueError):
+            return ProviderResult(
+                status="error",
+                error_code=protocol_error,
+                error_message="HTTP Agent response did not satisfy the protocol",
+            )
         return ProviderResult(
             status="success",
             output=output,

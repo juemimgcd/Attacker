@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
+from app.equipment.security import is_sensitive_field, is_sensitive_key
 from app.schemas.target_schema import TargetConfig
 from app.services.prompt_governance import redact_sensitive_text
 
@@ -35,6 +36,17 @@ def canonical_target_binding(
 
     # Keep pre-contract snapshots comparable with the default refusal policy.
     snapshot.setdefault("refusal_status_codes", [403])
+
+    # Provider-bound credentials are owned by the exact Instance revision. Their canonical
+    # shape must not depend on whether an API caller supplied a token (which is rejected) or
+    # whether a runtime lease has already materialized one.
+    if snapshot.get("provider_instance_id") is not None:
+        snapshot["auth"] = {
+            "type": "instance_managed",
+            "token": "[INSTANCE-MANAGED]",
+            "header_name": "[INSTANCE-MANAGED]",
+            "token_prefix": "[INSTANCE-MANAGED]",
+        }
 
     secret_values = {
         value for value in snapshot.get("headers", {}).values() if isinstance(value, str) and value
@@ -70,7 +82,7 @@ def _redact(value: Any, secret_values: set[str]) -> Any:
                 None
                 if item is None
                 else "[REDACTED]"
-                if _is_redacted_key(str(key))
+                if _is_redacted_key(str(key), item)
                 else _redact(item, secret_values)
             )
             for key, item in value.items()
@@ -96,7 +108,7 @@ def _redact_endpoint(endpoint: str, secret_values: set[str]) -> str:
                 key,
                 (
                     "[REDACTED]"
-                    if _is_redacted_key(key)
+                    if is_sensitive_key(key, _REDACTED_KEYS, url_query=True)
                     else redact_sensitive_text(value, secret_values)
                 ),
             )
@@ -121,9 +133,5 @@ def _redact_endpoint(endpoint: str, secret_values: set[str]) -> str:
     )
 
 
-def _is_redacted_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    return any(
-        normalized == candidate or normalized.endswith(f"_{candidate}")
-        for candidate in _REDACTED_KEYS
-    )
+def _is_redacted_key(key: str, value: Any) -> bool:
+    return is_sensitive_field(key, value, _REDACTED_KEYS)

@@ -23,9 +23,12 @@ _PROVIDER_SECRETS: ContextVar[dict[str, str] | None] = ContextVar(
 
 
 def provider_secret(name: str) -> str:
-    scoped = _PROVIDER_SECRETS.get() or {}
-    if name in scoped:
-        return scoped[name]
+    scoped = _PROVIDER_SECRETS.get()
+    normalized_name = name.casefold()
+    if scoped is not None:
+        if normalized_name in scoped:
+            return scoped[normalized_name]
+        raise LookupError(f"secret {name} is not available in this Provider call")
     environment_name = f"ATTACKER_SECRET_{name.upper()}"
     if environment_name in os.environ:
         return os.environ[environment_name]
@@ -35,15 +38,21 @@ def provider_secret(name: str) -> str:
 @contextmanager
 def provider_secret_scope(environment: Mapping[str, str]) -> Iterator[None]:
     prefix = "ATTACKER_SECRET_"
-    values = {
-        name.removeprefix(prefix).lower(): value
-        for name, value in environment.items()
-        if name.startswith(prefix)
-    }
+    values: dict[str, str] = {}
+    for name, value in environment.items():
+        if not name.startswith(prefix):
+            continue
+        normalized_name = name.removeprefix(prefix).casefold()
+        if normalized_name in values:
+            raise ValueError("Provider secret environment names must be unique ignoring case")
+        values[normalized_name] = value
     token = _PROVIDER_SECRETS.set(values)
     try:
         yield
     finally:
+        for name in values:
+            values[name] = ""
+        values.clear()
         _PROVIDER_SECRETS.reset(token)
 
 

@@ -1,111 +1,187 @@
-name: Auto tag and release
+name: Release
 
 on:
-  pull_request_target:
-    types:
-      - closed
-    branches:
-      - master
   workflow_dispatch:
 
 permissions:
-  contents: write
+  checks: read
+  contents: read
 
 jobs:
-  release:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.release.outputs.target_sha }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
-      - name: Checkout the released commit
-        uses: actions/checkout@v4
+      - name: Checkout master
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          persist-credentials: false
+          ref: master
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version-file: pyproject.toml
+          python-version: "3.12"
 
-      - name: Create or reuse the next patch tag
-        id: tag
-        shell: bash
-        env:
-          INITIAL_VERSION: "0.1.0"
-          TARGET_SHA: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
-        run: |
-          set -euo pipefail
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          for attempt in {1..10}; do
-            git fetch --force --tags origin
-
-            existing_tag="$(
-              git tag --points-at "${TARGET_SHA}" \
-                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-                | sort -V \
-                | tail -n 1 \
-                || true
-            )"
-            if [[ -n "${existing_tag}" ]]; then
-              echo "tag=${existing_tag}" >> "${GITHUB_OUTPUT}"
-              exit 0
-            fi
-
-            next_tag="$(
-              python - <<'PY'
-          import os
-          import re
-          import subprocess
-
-          pattern = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-          versions = []
-          for tag in subprocess.check_output(
-              ["git", "tag", "--list"], text=True
-          ).splitlines():
-              match = pattern.fullmatch(tag)
-              if match:
-                  versions.append(tuple(map(int, match.groups())))
-
-          if versions:
-              major, minor, patch = max(versions)
-              patch += 1
-          else:
-              initial = os.environ["INITIAL_VERSION"]
-              match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", initial)
-              if not match:
-                  raise SystemExit(f"Invalid INITIAL_VERSION: {initial}")
-              major, minor, patch = map(int, match.groups())
-
-          print(f"v{major}.{minor}.{patch}")
-          PY
-            )"
-
-            git tag -a "${next_tag}" "${TARGET_SHA}" -m "Release ${next_tag}"
-            if git push origin "refs/tags/${next_tag}"; then
-              echo "tag=${next_tag}" >> "${GITHUB_OUTPUT}"
-              exit 0
-            fi
-
-            git tag --delete "${next_tag}"
-            sleep "${attempt}"
-          done
-
-          echo "Could not allocate a unique release tag after 10 attempts." >&2
-          exit 1
-
-      - name: Create GitHub Release
+      - name: Require green delivery checks
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
 
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Release ${RELEASE_TAG} already exists."
+          target_sha="$(git rev-parse HEAD)"
+          for check in quality audit-and-sbom container equipment-contract; do
+            conclusion="$(
+              gh api -X GET \
+                "repos/${GITHUB_REPOSITORY}/commits/${target_sha}/check-runs" \
+                -f check_name="${check}" \
+                --jq '.check_runs | sort_by(.completed_at) | last | .conclusion // ""'
+            )"
+            if [[ "${conclusion}" != "success" ]]; then
+              echo "Required check ${check} is ${conclusion:-missing}; refusing release." >&2
+              exit 1
+            fi
+          done
+
+      - name: Resolve release identity
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(python3 - <<'PY'
+          import tomllib
+
+          with open("pyproject.toml", "rb") as project_file:
+              print(tomllib.load(project_file)["project"]["version"])
+          PY
+          )"
+          tag="v${version}"
+          git check-ref-format "refs/tags/${tag}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "target_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Build release artifacts
+        run: uv build --no-sources
+
+      - name: Validate installed wheel from an empty directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wheel="$(find "${GITHUB_WORKSPACE}/dist" -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "${wheel}"
+          smoke_dir="$(mktemp -d)"
+          cd "${smoke_dir}"
+          uv run --isolated --python 3.12 --with "${wheel}" attacker migrate
+          uv run --isolated --python 3.12 --with "${wheel}" attacker demo
+          uv run --isolated --python 3.12 --with "${wheel}" python - <<'PY'
+          from fastapi.testclient import TestClient
+
+          from main import app
+
+          expected = {
+              "/console": "text/html",
+              "/console/assets/console.css": "text/css",
+              "/console/assets/console.js": "application/javascript",
+          }
+          with TestClient(app) as client:
+              responses = {path: client.get(path) for path in expected}
+          for path, content_type in expected.items():
+              response = responses[path]
+              if response.status_code != 200:
+                  raise SystemExit(f"{path} returned {response.status_code}")
+              if not response.headers.get("content-type", "").startswith(content_type):
+                  raise SystemExit(f"{path} returned an unexpected content type")
+              if response.headers.get("x-content-type-options") != "nosniff":
+                  raise SystemExit(f"{path} is missing nosniff")
+          if "default-src 'self'" not in responses["/console"].headers.get(
+              "content-security-policy", ""
+          ):
+              raise SystemExit("/console is missing its Content-Security-Policy")
+          PY
+
+      - name: Record artifact checksums
+        run: cd dist && sha256sum ./* > SHA256SUMS
+
+      - name: Preserve verified release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: attacker-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.build.outputs.target_sha }}
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: attacker-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist
+      - name: Verify artifact transfer
+        run: cd dist && sha256sum --check SHA256SUMS
+
+      - name: Create version tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          TARGET_SHA: ${{ needs.build.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+
+          existing_sha="$(git rev-list -n 1 "${RELEASE_TAG}" 2>/dev/null || true)"
+          if [[ -n "${existing_sha}" && "${existing_sha}" != "${TARGET_SHA}" ]]; then
+            echo "${RELEASE_TAG} already points to ${existing_sha}; refusing to retag it." >&2
+            exit 1
+          fi
+          if [[ -z "${existing_sha}" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${RELEASE_TAG}" "${TARGET_SHA}" -m "Release ${RELEASE_TAG}"
+            git push origin "refs/tags/${RELEASE_TAG}"
+          fi
+
+      - name: Publish immutable GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" dist/* --verify-tag --generate-notes
             exit 0
           fi
 
-          if ! gh release create "${RELEASE_TAG}" \
-            --verify-tag \
-            --generate-notes; then
-            gh release view "${RELEASE_TAG}" >/dev/null
-          fi
+          existing_dir="$(mktemp -d)"
+          existing_names="$(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name')"
+          for asset in dist/*; do
+            name="$(basename "${asset}")"
+            if grep -Fxq "${name}" <<<"${existing_names}"; then
+              gh release download "${RELEASE_TAG}" --pattern "${name}" --dir "${existing_dir}"
+              if ! cmp -s "${asset}" "${existing_dir}/${name}"; then
+                echo "Release asset ${name} already exists with different content." >&2
+                exit 1
+              fi
+            fi
+          done
+          for asset in dist/*; do
+            name="$(basename "${asset}")"
+            if ! grep -Fxq "${name}" <<<"${existing_names}"; then
+              gh release upload "${RELEASE_TAG}" "${asset}"
+            fi
+          done

@@ -1,6 +1,6 @@
 FROM python:3.12.13-slim-bookworm AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.11 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.2@sha256:069a51314a7bb6031777a9273205fe1b0b19e914ef418207d1338b268df641dd /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy

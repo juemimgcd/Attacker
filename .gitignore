@@ -11,8 +11,8 @@ logs/
 data/
 
 .worktrees/
+.idea/
 
 deploy/secrets/
 deploy/provider-secrets/
 deploy/alert-secrets/
-
