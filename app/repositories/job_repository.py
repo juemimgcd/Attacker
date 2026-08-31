@@ -14,7 +14,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models import RunJobRecord, WorkerHeartbeatRecord
+from app.models import EvaluationRunRecord, RunJobRecord, WorkerHeartbeatRecord
 from app.schemas.job_schema import JobStatus, RunJobCreate
 
 TERMINAL_STATUSES = {
@@ -22,6 +22,10 @@ TERMINAL_STATUSES = {
     JobStatus.failed.value,
     JobStatus.cancelled.value,
 }
+_RUN_RECOVERY_SUMMARY = (
+    "Run creation started or a Run exists for this Job; automatic redispatch is disabled to "
+    "prevent duplicate external side effects"
+)
 
 
 def _now() -> datetime:
@@ -120,11 +124,19 @@ class JobRepository:
                 )
             ).all()
             for record in records:
+                was_running = record.status == JobStatus.running.value
+                await self._backfill_run_binding(session, record)
                 record.lease_owner = None
                 record.lease_token = None
                 record.lease_expires_at = None
                 record.updated_at = now
-                if record.cancel_requested:
+                if was_running or record.run_id is not None:
+                    record.status = JobStatus.failed.value
+                    record.error_code = "job_run_recovery_required"
+                    record.error_summary = _RUN_RECOVERY_SUMMARY
+                    record.completed_at = now
+                    failed += 1
+                elif record.cancel_requested:
                     record.status = JobStatus.cancelled.value
                     record.completed_at = now
                 elif record.attempts >= record.max_attempts:
@@ -153,6 +165,7 @@ class JobRepository:
                     RunJobRecord.available_at <= now,
                     RunJobRecord.cancel_requested.is_(False),
                     RunJobRecord.attempts < RunJobRecord.max_attempts,
+                    RunJobRecord.run_id.is_(None),
                 )
                 .order_by(
                     RunJobRecord.priority.desc(),
@@ -163,45 +176,62 @@ class JobRepository:
             )
             if session.get_bind().dialect.name == "postgresql":
                 statement = statement.with_for_update(skip_locked=True)
-            record = await session.scalar(statement)
-            if record is None:
-                return None
+            while True:
+                record = await session.scalar(statement)
+                if record is None:
+                    return None
+                if await self._backfill_run_binding(session, record):
+                    record.status = JobStatus.failed.value
+                    record.error_code = "job_run_recovery_required"
+                    record.error_summary = _RUN_RECOVERY_SUMMARY
+                    record.completed_at = now
+                    record.updated_at = now
+                    await session.flush()
+                    continue
 
-            previous_status = record.status
-            lease_token = secrets.token_hex(32)
-            claimed = cast(
-                CursorResult[Any],
-                await session.execute(
-                    update(RunJobRecord)
-                    .where(
-                        RunJobRecord.id == record.id,
-                        RunJobRecord.status == previous_status,
-                        RunJobRecord.cancel_requested.is_(False),
-                    )
-                    .values(
-                        status=JobStatus.leased.value,
-                        lease_owner=worker_id,
-                        lease_token=lease_token,
-                        lease_expires_at=now + timedelta(seconds=lease_seconds),
-                        attempts=RunJobRecord.attempts + 1,
-                        updated_at=now,
-                    )
-                ),
+                previous_status = record.status
+                lease_token = secrets.token_hex(32)
+                claimed = cast(
+                    CursorResult[Any],
+                    await session.execute(
+                        update(RunJobRecord)
+                        .where(
+                            RunJobRecord.id == record.id,
+                            RunJobRecord.status == previous_status,
+                            RunJobRecord.cancel_requested.is_(False),
+                            RunJobRecord.run_id.is_(None),
+                        )
+                        .values(
+                            status=JobStatus.leased.value,
+                            lease_owner=worker_id,
+                            lease_token=lease_token,
+                            lease_expires_at=now + timedelta(seconds=lease_seconds),
+                            attempts=RunJobRecord.attempts + 1,
+                            updated_at=now,
+                        )
+                    ),
+                )
+                if claimed.rowcount != 1:
+                    return None
+                await session.flush()
+                await session.refresh(record)
+                return self.as_dict(record, include_lease_token=True)
+
+    async def mark_running(self, job_id: str, *, worker_id: str, lease_token: str) -> bool:
+        try:
+            await self._lease_update(
+                job_id,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                values={"status": JobStatus.running.value, "updated_at": _now()},
+                allowed_statuses={JobStatus.leased.value},
+                require_not_cancelled=True,
             )
-            if claimed.rowcount != 1:
-                return None
-            await session.flush()
-            await session.refresh(record)
-            return self.as_dict(record, include_lease_token=True)
-
-    async def mark_running(self, job_id: str, *, worker_id: str, lease_token: str) -> None:
-        await self._lease_update(
-            job_id,
-            worker_id=worker_id,
-            lease_token=lease_token,
-            values={"status": JobStatus.running.value, "updated_at": _now()},
-            allowed_statuses={JobStatus.leased.value},
-        )
+        except RuntimeError:
+            if await self.is_cancel_requested(job_id):
+                return False
+            raise
+        return True
 
     async def heartbeat(
         self,
@@ -230,16 +260,19 @@ class JobRepository:
         run_id: str,
         worker_id: str,
         lease_token: str,
-    ) -> None:
+    ) -> bool:
         """在 Run 创建后立即保存绑定，供取消、查询和故障恢复定位执行实例。"""
 
-        await self._lease_update(
-            job_id,
-            worker_id=worker_id,
-            lease_token=lease_token,
-            values={"run_id": run_id, "updated_at": _now()},
-            allowed_statuses={JobStatus.running.value},
-        )
+        async with self.session_factory.begin() as session:
+            record = await session.get(RunJobRecord, job_id, with_for_update=True)
+            record = self._assert_lease(record, job_id, worker_id, lease_token)
+            if record.status != JobStatus.running.value:
+                raise RuntimeError(f"job {job_id} is not running")
+            if record.run_id is not None and record.run_id != run_id:
+                raise ValueError("job is already bound to a different Run")
+            record.run_id = run_id
+            record.updated_at = _now()
+            return record.cancel_requested
 
     async def complete(
         self,
@@ -250,23 +283,27 @@ class JobRepository:
         result: dict[str, Any],
     ) -> dict[str, Any]:
         now = _now()
-        await self._lease_update(
-            job_id,
-            worker_id=worker_id,
-            lease_token=lease_token,
-            values={
-                "status": JobStatus.succeeded.value,
-                "result_json": result,
-                "lease_owner": None,
-                "lease_token": None,
-                "lease_expires_at": None,
-                "error_code": None,
-                "error_summary": None,
-                "updated_at": now,
-                "completed_at": now,
-            },
-            allowed_statuses={JobStatus.leased.value, JobStatus.running.value},
-        )
+        async with self.session_factory.begin() as session:
+            record = await session.get(RunJobRecord, job_id, with_for_update=True)
+            record = self._assert_lease(record, job_id, worker_id, lease_token)
+            if record.cancel_requested:
+                record.status = JobStatus.cancelled.value
+                record.result_json = None
+                record.error_code = "job_cancelled"
+                record.error_summary = "cancellation was requested before job completion"
+            else:
+                result_run_id = result.get("run_id")
+                if record.run_id is None or result_run_id != record.run_id:
+                    raise ValueError("job result does not match its bound Run")
+                record.status = JobStatus.succeeded.value
+                record.result_json = result
+                record.error_code = None
+                record.error_summary = None
+            record.lease_owner = None
+            record.lease_token = None
+            record.lease_expires_at = None
+            record.updated_at = now
+            record.completed_at = now
         return await self.get(job_id)
 
     async def fail(
@@ -281,6 +318,7 @@ class JobRepository:
         async with self.session_factory.begin() as session:
             record = await session.get(RunJobRecord, job_id, with_for_update=True)
             record = self._assert_lease(record, job_id, worker_id, lease_token)
+            await self._backfill_run_binding(session, record)
             now = _now()
             record.lease_owner = None
             record.lease_token = None
@@ -290,6 +328,11 @@ class JobRepository:
             record.updated_at = now
             if record.cancel_requested:
                 record.status = JobStatus.cancelled.value
+                record.completed_at = now
+            elif record.run_id is not None:
+                record.status = JobStatus.failed.value
+                record.error_code = "job_run_recovery_required"
+                record.error_summary = _RUN_RECOVERY_SUMMARY
                 record.completed_at = now
             elif record.attempts < record.max_attempts:
                 record.status = JobStatus.retry_wait.value
@@ -317,26 +360,35 @@ class JobRepository:
             return self.as_dict(record)
 
     async def retry(self, job_id: str) -> dict[str, Any]:
+        response: dict[str, Any] | None = None
         async with self.session_factory.begin() as session:
             record = await session.get(RunJobRecord, job_id, with_for_update=True)
             if record is None:
                 raise LookupError(f"job {job_id} not found")
             if record.status not in {JobStatus.failed.value, JobStatus.cancelled.value}:
                 raise ValueError("only failed or cancelled jobs can be retried")
-            now = _now()
-            record.status = JobStatus.queued.value
-            record.available_at = now
-            record.lease_owner = None
-            record.lease_token = None
-            record.lease_expires_at = None
-            record.cancel_requested = False
-            record.run_id = None
-            record.error_code = None
-            record.error_summary = None
-            record.completed_at = None
-            record.attempts = 0
-            record.updated_at = now
-            return self.as_dict(record)
+            if (
+                record.error_code != "job_run_recovery_required"
+                and not await self._backfill_run_binding(session, record)
+            ):
+                now = _now()
+                record.status = JobStatus.queued.value
+                record.available_at = now
+                record.lease_owner = None
+                record.lease_token = None
+                record.lease_expires_at = None
+                record.cancel_requested = False
+                record.error_code = None
+                record.error_summary = None
+                record.completed_at = None
+                record.attempts = 0
+                record.updated_at = now
+                response = self.as_dict(record)
+        if response is None:
+            raise ValueError(
+                "a recovery-required job cannot be redispatched; use replay or a new request"
+            )
+        return response
 
     async def is_cancel_requested(self, job_id: str) -> bool:
         async with self.session_factory() as session:
@@ -437,24 +489,24 @@ class JobRepository:
         lease_token: str,
         values: dict[str, Any],
         allowed_statuses: set[str],
+        require_not_cancelled: bool = False,
     ) -> None:
         async with self.session_factory.begin() as session:
+            conditions = [
+                RunJobRecord.id == job_id,
+                RunJobRecord.lease_owner == worker_id,
+                RunJobRecord.lease_token == lease_token,
+                RunJobRecord.status.in_(allowed_statuses),
+                or_(
+                    RunJobRecord.lease_expires_at.is_(None),
+                    RunJobRecord.lease_expires_at > _now(),
+                ),
+            ]
+            if require_not_cancelled:
+                conditions.append(RunJobRecord.cancel_requested.is_(False))
             updated = cast(
                 CursorResult[Any],
-                await session.execute(
-                    update(RunJobRecord)
-                    .where(
-                        RunJobRecord.id == job_id,
-                        RunJobRecord.lease_owner == worker_id,
-                        RunJobRecord.lease_token == lease_token,
-                        RunJobRecord.status.in_(allowed_statuses),
-                        or_(
-                            RunJobRecord.lease_expires_at.is_(None),
-                            RunJobRecord.lease_expires_at > _now(),
-                        ),
-                    )
-                    .values(**values)
-                ),
+                await session.execute(update(RunJobRecord).where(*conditions).values(**values)),
             )
             if updated.rowcount != 1:
                 raise RuntimeError(f"job {job_id} lease is missing, expired, or owned elsewhere")
@@ -463,6 +515,17 @@ class JobRepository:
     def _assert_same_request(record: RunJobRecord, kind: str, fingerprint: str) -> None:
         if record.kind != kind or record.payload_fingerprint != fingerprint:
             raise ValueError("request_id was reused with a different job payload")
+
+    @staticmethod
+    async def _backfill_run_binding(
+        session: AsyncSession,
+        record: RunJobRecord,
+    ) -> bool:
+        if record.run_id is None:
+            run = await session.get(EvaluationRunRecord, record.id)
+            if run is not None:
+                record.run_id = run.id
+        return record.run_id is not None
 
     @staticmethod
     def _assert_lease(

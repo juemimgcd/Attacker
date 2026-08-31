@@ -1,7 +1,7 @@
 schema_version: provider.v1
 id: enterprise-ops-provider
 name: Enterprise Operations Provider
-version: 1.0.0
+version: 1.0.1
 description: Reads normalized enterprise resource and alert facts and executes explicitly approved changes.
 attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
 entrypoint: adapter.py:EnterpriseOpsProvider

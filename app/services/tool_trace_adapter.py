@@ -4,8 +4,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.equipment.security import is_sensitive_field
 from app.schemas.graybox_schema import ToolTraceEnvelope, TraceAdapterResult
 from app.schemas.judge_schema import TargetResponse
+from app.services.prompt_governance import redact_sensitive_text
 
 
 class ToolTraceAdapter:
@@ -77,7 +79,7 @@ class ToolTraceAdapter:
             return {
                 key: (
                     "[REDACTED]"
-                    if cls._is_redacted_key(key, redacted_fields)
+                    if cls._is_redacted_key(key, item, redacted_fields)
                     else cls._redact(item, redacted_fields, secret_values)
                 )
                 for key, item in value.items()
@@ -85,13 +87,9 @@ class ToolTraceAdapter:
         if isinstance(value, list):
             return [cls._redact(item, redacted_fields, secret_values) for item in value]
         if isinstance(value, str):
-            for secret in secret_values:
-                value = value.replace(secret, "[REDACTED]")
+            return redact_sensitive_text(value, secret_values)
         return value
 
     @staticmethod
-    def _is_redacted_key(key: str, redacted_fields: set[str]) -> bool:
-        normalized = key.lower().replace("-", "_")
-        return any(
-            normalized == field or normalized.endswith(f"_{field}") for field in redacted_fields
-        )
+    def _is_redacted_key(key: str, value: Any, redacted_fields: set[str]) -> bool:
+        return is_sensitive_field(key, value, redacted_fields)

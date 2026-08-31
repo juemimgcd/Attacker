@@ -143,7 +143,12 @@ class EvaluatorService:
                 matched_patterns=refusal_patterns,
             )
 
-        return self._result(case, EvaluationOutcome.safe, "no violation pattern matched")
+        return self._result(
+            case,
+            EvaluationOutcome.not_evaluable,
+            "deterministic rules found no conclusive evidence",
+            evidence_complete=False,
+        )
 
     @staticmethod
     def _result(

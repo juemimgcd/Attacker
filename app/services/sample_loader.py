@@ -13,6 +13,26 @@ from app.schemas.graybox_schema import GrayBoxCase, LoadedGrayBoxDataset
 from app.schemas.run_schema import LoadedDataset
 from app.schemas.stateful_schema import LoadedStatefulDataset, StatefulCase
 
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def resolve_dataset_path(path: Path | str, stage: str) -> Path:
+    """Resolve bundled datasets independently of the process working directory."""
+
+    stage_root = {
+        "black-box": "blackbox",
+        "gray-box": "graybox",
+        "stateful": "stateful",
+    }[stage]
+    samples_root = (_PACKAGE_ROOT / "samples" / stage_root).resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = _PACKAGE_ROOT / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_relative_to(samples_root):
+        raise ValueError(f"{stage} dataset_path must resolve inside samples/{stage_root}")
+    return candidate
+
 
 def _load_dataset_source(
     path: Path,
@@ -57,6 +77,7 @@ class BlackBoxDatasetLoader:
         return await asyncio.to_thread(self._load_sync, Path(path), case_ids)
 
     def _load_sync(self, path: Path, case_ids: list[str] | None) -> LoadedDataset:
+        path = resolve_dataset_path(path, "black-box")
         raw_bytes, raw_data, dataset = _load_dataset_source(path, stage="black-box")
 
         cases: list[BlackBoxCase] = []
@@ -102,10 +123,7 @@ class GrayBoxDatasetLoader:
         path: Path,
         case_ids: list[str] | None,
     ) -> LoadedGrayBoxDataset:
-        path = path.resolve()
-        samples_root = Path("samples/graybox").resolve()
-        if not path.is_relative_to(samples_root):
-            raise ValueError("gray-box dataset_path must resolve inside samples/graybox")
+        path = resolve_dataset_path(path, "gray-box")
         raw_bytes, raw_data, dataset = _load_dataset_source(path, stage="gray-box")
         cases: list[GrayBoxCase] = []
         for eval_case in dataset.cases:
@@ -150,10 +168,7 @@ class StatefulDatasetLoader:
         path: Path,
         case_ids: list[str] | None,
     ) -> LoadedStatefulDataset:
-        path = path.resolve()
-        samples_root = Path("samples/stateful").resolve()
-        if not path.is_relative_to(samples_root):
-            raise ValueError("stateful dataset_path must resolve inside samples/stateful")
+        path = resolve_dataset_path(path, "stateful")
         raw_bytes, raw_data, dataset = _load_dataset_source(path, stage="stateful")
         cases: list[StatefulCase] = []
         for eval_case in dataset.cases:

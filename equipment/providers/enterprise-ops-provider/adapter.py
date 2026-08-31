@@ -1,25 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote
 
 import httpx
 
 from app.equipment.sdk import provider_secret
-from app.equipment.security import validate_outbound_url
+from app.equipment.security import (
+    HTTPResponsePolicyError,
+    HTTPResponseTooLargeError,
+    buffered_identity_response,
+    read_bounded_response,
+    send_pinned_request,
+    validate_outbound_url,
+)
 from app.schemas.equipment_schema import EvidenceDraft, ProviderContext, ProviderResult
 
 MAX_RESPONSE_BYTES = 524_288
-
-
-class EnterpriseResponseTooLargeError(ValueError):
-    pass
 
 
 class EnterpriseOpsProvider:
     async def describe(self) -> dict:
         return {
             "id": "enterprise-ops-provider",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "capability_layers": ["datasource", "controlled_change"],
         }
 
@@ -159,13 +163,19 @@ class EnterpriseOpsProvider:
                 error_code="enterprise_protocol_error",
                 error_message="unsupported enterprise capability",
             )
-        except EnterpriseResponseTooLargeError:
+        except HTTPResponseTooLargeError:
             return ProviderResult(
                 status="error",
                 error_code="enterprise_response_too_large",
                 error_message="enterprise operations response exceeded the configured limit",
             )
-        except (httpx.HTTPError, TypeError, ValueError):
+        except HTTPResponsePolicyError:
+            return ProviderResult(
+                status="error",
+                error_code="enterprise_protocol_error",
+                error_message="enterprise operations response did not satisfy the protocol",
+            )
+        except (TimeoutError, httpx.HTTPError, TypeError, ValueError):
             return ProviderResult(
                 status="error",
                 error_code="enterprise_upstream_error",
@@ -184,32 +194,28 @@ class EnterpriseOpsProvider:
         json_payload: dict | None = None,
         idempotency_key: str | None = None,
     ) -> httpx.Response:
-        validate_outbound_url(url, context.approved_host_set)
+        addresses = validate_outbound_url(url, context.approved_host_set)
         secret_name = str(context.config["auth_secret_name"])
         headers = {"authorization": f"Bearer {provider_secret(secret_name)}"}
         if idempotency_key is not None:
             headers["idempotency-key"] = idempotency_key
-        async with (
-            httpx.AsyncClient(follow_redirects=False) as client,
-            client.stream(
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
+            request = client.build_request(
                 method,
                 url,
                 headers=headers,
                 json=json_payload,
                 timeout=context.budget.timeout_seconds,
-            ) as response,
-        ):
-            body = bytearray()
-            async for chunk in response.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > MAX_RESPONSE_BYTES:
-                    raise EnterpriseResponseTooLargeError
-            return httpx.Response(
-                status_code=response.status_code,
-                headers=response.headers,
-                content=bytes(body),
-                request=response.request,
             )
+            async with asyncio.timeout(context.budget.timeout_seconds):
+                response = await send_pinned_request(
+                    client,
+                    request,
+                    addresses=addresses,
+                    stream=True,
+                )
+                content = await read_bounded_response(response, MAX_RESPONSE_BYTES)
+            return buffered_identity_response(response, content)
 
     def _url(self, context: ProviderContext, key: str, values: dict[str, str]) -> str:
         base_url = str(context.config["base_url"]).rstrip("/")

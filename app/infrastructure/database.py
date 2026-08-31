@@ -8,6 +8,7 @@ from time import monotonic
 from typing import Any
 
 from sqlalchemy import event, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -18,6 +19,17 @@ from sqlalchemy.ext.asyncio import (
 
 from app.models import Base
 from conf.settings import DatabaseSettings
+
+
+def ensure_sqlite_parent(url: str) -> None:
+    database_url = make_url(url)
+    database_path = database_url.database
+    if (
+        database_url.get_backend_name() == "sqlite"
+        and database_path
+        and database_path != ":memory:"
+    ):
+        Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 class Database:
@@ -75,7 +87,7 @@ class Database:
         )
 
     async def initialize(self) -> None:
-        self._ensure_sqlite_parent()
+        ensure_sqlite_parent(self.url)
         if self.auto_create_schema:
             async with self.engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
@@ -138,14 +150,6 @@ class Database:
 
     async def dispose(self) -> None:
         await self.engine.dispose()
-
-    def _ensure_sqlite_parent(self) -> None:
-        prefix = "sqlite+aiosqlite:///"
-        if not self.url.startswith(prefix):
-            return
-        database_path = self.url.removeprefix(prefix)
-        if database_path != ":memory:":
-            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def _enable_sqlite_foreign_keys(dbapi_connection: object, _: object) -> None:

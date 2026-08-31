@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.equipment.security import redact_private_key_pem
 from app.schemas.prompt_schema import (
     GovernedObservation,
     PromptBuildRequest,
@@ -35,7 +36,7 @@ _PHONE_PATTERN = re.compile(r"(?<!\w)\+?\d[\d ()-]{7,}\d(?!\w)")
 def redact_sensitive_text(value: str, secret_values: set[str] | None = None) -> str:
     """清理常见凭据/PII 形态和当前运行已知 Secret。"""
 
-    redacted = value
+    redacted = redact_private_key_pem(value)
     for secret in sorted(secret_values or (), key=len, reverse=True):
         if secret:
             redacted = redacted.replace(secret, "[REDACTED]")

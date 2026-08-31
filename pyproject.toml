@@ -1,6 +1,9 @@
 [project]
 name = "attacker"
-version = "0.1.0"
+version = "0.2.0"
+description = "A policy-bounded platform for reproducible AI agent security evaluation"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiosqlite>=0.22.0",
@@ -12,8 +15,8 @@ dependencies = [
     "httpx>=0.28.1",
     "idna>=3.15",
     "langgraph>=1.2,<1.3",
-    "langgraph-checkpoint-postgres>=3.0,<4",
-    "langgraph-checkpoint-sqlite>=3.1,<4",
+    "langgraph-checkpoint-postgres>=3.1.1,<4",
+    "langgraph-checkpoint-sqlite>=3.1.1,<4",
     "loguru>=0.7.3",
     "opentelemetry-exporter-otlp-proto-http>=1.39.0",
     "opentelemetry-sdk>=1.39.0",
@@ -32,18 +35,26 @@ dependencies = [
 attacker = "app.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "conf"]
 
 [tool.hatch.build.targets.wheel.force-include]
+"main.py" = "main.py"
 "contracts" = "contracts"
 "equipment" = "equipment"
+"samples" = "samples"
+"alembic" = "app/migrations"
+"alembic.ini" = "app/alembic.ini"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.pytest-tmp", "/data", "/logs"]
 
 [tool.uv]
 package = true
+required-version = "==0.12.2"
 
 [dependency-groups]
 dev = [

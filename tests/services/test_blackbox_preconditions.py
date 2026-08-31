@@ -226,7 +226,7 @@ async def test_fixture_preparation_evidence_allows_execution_and_is_persisted(
     )
 
     assert connector.calls == 1
-    assert rows["steps"][0]["outcome"] == "safe"
+    assert rows["steps"][0]["outcome"] == "not_evaluable"
     assert rows["steps"][0]["result"]["precondition_evidence"] == {
         "fixture_preparation": "fixture-log://setup/123"
     }

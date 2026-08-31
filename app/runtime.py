@@ -97,6 +97,7 @@ async def create_runtime(
                 equipment_repository,
                 EquipmentCatalog(config.equipment),
                 equipment_metrics,
+                secret_broker=resolved_secret_broker,
             )
             harness_service = HarnessService(
                 equipment_repository,
@@ -124,6 +125,7 @@ async def create_runtime(
                 repository=adaptive_repository,
                 checkpointer=checkpointer,
                 equipment_service=equipment_service,
+                secret_broker=resolved_secret_broker,
             )
             deterministic_graybox_service = DeterministicGrayBoxRunService(
                 adaptive_repository,

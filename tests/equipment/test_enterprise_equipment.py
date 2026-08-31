@@ -9,6 +9,14 @@ import yaml
 ROOT = Path(__file__).parents[2]
 
 
+class _AsyncBytes(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+    async def __aiter__(self):
+        yield self.content
+
+
 def _manifest(relative: str) -> dict:
     return yaml.safe_load((ROOT / relative).read_text(encoding="utf-8"))
 
@@ -226,7 +234,7 @@ async def test_enterprise_provider_rejects_oversized_upstream_response(monkeypat
         }
     ).encode()
     transport = httpx.MockTransport(
-        lambda request: httpx.Response(200, content=oversized, request=request)
+        lambda request: httpx.Response(200, stream=_AsyncBytes(oversized), request=request)
     )
     real_client = httpx.AsyncClient
     method_globals = handler._request.__func__.__globals__
@@ -234,7 +242,7 @@ async def test_enterprise_provider_rejects_oversized_upstream_response(monkeypat
     def client_factory(**kwargs):
         return real_client(transport=transport, **kwargs)
 
-    monkeypatch.setitem(method_globals, "validate_outbound_url", lambda url, hosts: hosts[0])
+    monkeypatch.setitem(method_globals, "validate_outbound_url", lambda url, hosts: ("8.8.8.8",))
     monkeypatch.setitem(method_globals, "provider_secret", lambda name: "scoped-token")
     monkeypatch.setattr(method_globals["httpx"], "AsyncClient", client_factory)
 
@@ -260,7 +268,7 @@ async def test_enterprise_change_passes_core_operation_id_upstream(monkeypatch) 
         requests.append(request)
         return httpx.Response(
             200,
-            json={"status": "submitted"},
+            stream=_AsyncBytes(b'{"status":"submitted"}'),
             headers={"x-operation-id": "upstream-operation-001"},
             request=request,
         )
@@ -272,7 +280,7 @@ async def test_enterprise_change_passes_core_operation_id_upstream(monkeypatch) 
     def client_factory(**kwargs):
         return real_client(transport=transport, **kwargs)
 
-    monkeypatch.setitem(method_globals, "validate_outbound_url", lambda url, hosts: hosts[0])
+    monkeypatch.setitem(method_globals, "validate_outbound_url", lambda url, hosts: ("8.8.8.8",))
     monkeypatch.setitem(method_globals, "provider_secret", lambda name: "scoped-token")
     monkeypatch.setattr(method_globals["httpx"], "AsyncClient", client_factory)
 

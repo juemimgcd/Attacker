@@ -22,6 +22,10 @@ class FileSecretResolver:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
+    @staticmethod
+    def supports_reference(reference: str) -> bool:
+        return reference.startswith("file:")
+
     async def resolve(self, reference: str) -> str:
         if not reference.startswith("file:"):
             raise LookupError("secret reference is not supported by the mounted-file backend")
@@ -70,6 +74,10 @@ class VaultKvV2SecretResolver:
         self.token_file = token_file
         self.timeout_seconds = timeout_seconds
         self.file_resolver = file_resolver
+
+    @staticmethod
+    def supports_reference(reference: str) -> bool:
+        return reference.startswith("vault:")
 
     async def resolve(self, reference: str) -> str:
         path, field = self._parse_reference(reference)
@@ -140,6 +148,12 @@ class CompositeSecretResolver:
 
     def __init__(self, resolvers: dict[str, SecretResolver]) -> None:
         self.resolvers = resolvers
+
+    def supports_reference(self, reference: str) -> bool:
+        scheme, separator, _ = reference.partition(":")
+        resolver = self.resolvers.get(scheme) if separator == ":" else None
+        supports_reference = getattr(resolver, "supports_reference", None)
+        return bool(callable(supports_reference) and supports_reference(reference))
 
     async def resolve(self, reference: str) -> str:
         scheme, separator, _ = reference.partition(":")

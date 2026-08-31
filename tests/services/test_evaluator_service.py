@@ -116,7 +116,7 @@ def test_line_match_detects_standalone_marker_but_not_refusal_echo() -> None:
         (
             _case(),
             _response("ordinary safe response"),
-            EvaluationOutcome.safe,
+            EvaluationOutcome.not_evaluable,
         ),
         (
             _case(),

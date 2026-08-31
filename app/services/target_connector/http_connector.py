@@ -1,13 +1,43 @@
 """有界调用外部 HTTP Target，并把传输失败转换为结构化 TargetResponse。"""
 
+import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from time import perf_counter
 from typing import Any
 
 import httpx
 
+from app.equipment.security import (
+    HTTPResponsePolicyError,
+    HTTPResponseTooLargeError,
+    buffered_identity_response,
+    read_bounded_response,
+    send_pinned_request,
+)
 from app.schemas.judge_schema import TargetErrorType, TargetResponse
 from app.schemas.target_schema import TargetConfig
+
+DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
+_MAX_RESPONSE_BYTES = ContextVar(
+    "http_target_max_response_bytes",
+    default=DEFAULT_MAX_RESPONSE_BYTES,
+)
+
+
+@contextmanager
+def target_response_limit(max_response_bytes: int) -> Iterator[None]:
+    """Apply a per-run response limit without changing connector substitute signatures."""
+
+    if max_response_bytes <= 0:
+        raise ValueError("max_response_bytes must be positive")
+    token = _MAX_RESPONSE_BYTES.set(max_response_bytes)
+    try:
+        yield
+    finally:
+        _MAX_RESPONSE_BYTES.reset(token)
 
 
 class HTTPTargetConnector:
@@ -66,29 +96,53 @@ class HTTPTargetConnector:
             async with httpx.AsyncClient(
                 timeout=target.timeout_seconds,
                 follow_redirects=False,
+                trust_env=False,
             ) as client:
-                response = await client.post(
-                    str(target.endpoint),
-                    headers=headers,
-                    json=request_body,
+                request = client.build_request(
+                    "POST", str(target.endpoint), headers=headers, json=request_body
                 )
+                async with asyncio.timeout(target.timeout_seconds):
+                    response = await send_pinned_request(
+                        client,
+                        request,
+                        local_only=not target.allow_public_target,
+                        public_only=target.allow_public_target,
+                        stream=True,
+                    )
+                    content = await read_bounded_response(response, _MAX_RESPONSE_BYTES.get())
+                buffered = buffered_identity_response(response, content)
                 latency_ms = int((perf_counter() - start) * 1000)
                 try:
-                    body = response.json()
+                    body = buffered.json()
                 except ValueError:
                     body = None
                 return request_body, TargetResponse(
                     status_code=response.status_code,
                     body=body,
-                    text=response.text,
+                    text=buffered.text,
                     latency_ms=latency_ms,
-                    response_bytes=len(response.content),
+                    response_bytes=len(content),
                 )
-        except httpx.TimeoutException as exc:
+        except HTTPResponseTooLargeError as exc:
+            latency_ms = int((perf_counter() - start) * 1000)
+            return request_body, TargetResponse(
+                latency_ms=latency_ms,
+                response_bytes=exc.limit + 1,
+                error=str(exc),
+                error_type=TargetErrorType.connection_error,
+            )
+        except HTTPResponsePolicyError as exc:
             latency_ms = int((perf_counter() - start) * 1000)
             return request_body, TargetResponse(
                 latency_ms=latency_ms,
                 error=str(exc),
+                error_type=TargetErrorType.connection_error,
+            )
+        except (TimeoutError, httpx.TimeoutException) as exc:
+            latency_ms = int((perf_counter() - start) * 1000)
+            return request_body, TargetResponse(
+                latency_ms=latency_ms,
+                error=str(exc) or "target request timed out",
                 error_type=TargetErrorType.timeout,
             )
         except httpx.RequestError as exc:

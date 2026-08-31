@@ -6,13 +6,20 @@ import re
 from datetime import datetime
 from enum import Enum
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SENSITIVE_JOB_KEY = re.compile(
-    r"(authorization|credential|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token)",
-    re.IGNORECASE,
+from app.equipment.security import (
+    contains_private_key_pem,
+    is_sensitive_field,
+    is_sensitive_header_key,
+    is_sensitive_key,
+    normalize_sensitive_key,
 )
+
+NON_SECRET_JOB_CHECKSUM_KEYS = {"provider_secret_binding_revision"}
+NON_SECRET_JOB_METADATA_KEYS = {"token_prefix"}
 
 
 class JobKind(str, Enum):
@@ -45,19 +52,78 @@ class RunJobCreate(BaseModel):
     def reject_persisted_secrets(self) -> RunJobCreate:
         """递归拒绝常见 Secret 字段，避免凭据随重试任务长期落库。"""
 
-        def walk(value: Any, path: str) -> None:
+        def reject_url_secrets(value: str, path: str) -> None:
+            try:
+                parsed = urlsplit(value)
+            except ValueError:
+                return
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return
+            if parsed.username is not None or parsed.password is not None:
+                raise ValueError(
+                    f"durable job payload cannot persist URL credentials at {path}; "
+                    "use a Provider Instance secret reference"
+                )
+            for component_name, component in (
+                ("query", parsed.query),
+                ("fragment", parsed.fragment),
+            ):
+                sensitive_key = next(
+                    (
+                        key
+                        for key, nested in parse_qsl(component, keep_blank_values=True)
+                        if nested and is_sensitive_key(key, url_query=True)
+                    ),
+                    None,
+                )
+                if sensitive_key is not None:
+                    raise ValueError(
+                        f"durable job payload cannot persist secret URL {component_name} "
+                        f"parameter {sensitive_key} at {path}; use a Provider Instance "
+                        "secret reference"
+                    )
+
+        def walk(value: Any, path: str, *, in_headers: bool = False) -> None:
             if isinstance(value, dict):
                 for key, nested in value.items():
                     current = f"{path}.{key}" if path else str(key)
-                    if SENSITIVE_JOB_KEY.search(str(key)) and nested not in (None, "", {}):
+                    normalized_key = normalize_sensitive_key(key)
+                    checksum_metadata = (
+                        normalized_key in NON_SECRET_JOB_CHECKSUM_KEYS
+                        and isinstance(nested, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", nested) is not None
+                    )
+                    ordinary_metadata = normalized_key in NON_SECRET_JOB_METADATA_KEYS
+                    sensitive_field = (
+                        is_sensitive_header_key(key)
+                        if in_headers
+                        else is_sensitive_field(key, nested)
+                    )
+                    if (
+                        not checksum_metadata
+                        and not ordinary_metadata
+                        and sensitive_field
+                        and nested not in (None, "", {})
+                    ):
                         raise ValueError(
                             f"durable job payload cannot persist secret field {current}; "
                             "use a Provider Instance secret reference"
                         )
-                    walk(nested, current)
+                    walk(
+                        nested,
+                        current,
+                        in_headers=normalized_key == "headers",
+                    )
             elif isinstance(value, list):
                 for index, nested in enumerate(value):
-                    walk(nested, f"{path}[{index}]")
+                    walk(nested, f"{path}[{index}]", in_headers=in_headers)
+            elif isinstance(value, str):
+                if contains_private_key_pem(value):
+                    raise ValueError(
+                        f"durable job payload cannot persist private-key PEM material at {path}; "
+                        "use a Provider Instance secret reference"
+                    )
+                reject_url_secrets(value, path)
 
         walk(self.payload, "")
         return self

@@ -295,7 +295,7 @@ def _validate_scenario_request(
     if package_type == PackageType.provider and method == "invoke":
         capability = str(kwargs.get("capability", ""))
         contract = catalog.validate_path(
-            Path(catalog.settings.contracts_root) / capability,
+            catalog.package_path(PackageType.contract, capability),
             PackageType.contract,
         )
         if contract.validation_status != "valid":
@@ -329,7 +329,7 @@ def _validate_scenario_result(
         result = ProviderResult.model_validate(raw_result)
         capability = str(kwargs["capability"])
         contract = catalog.validate_path(
-            Path(catalog.settings.contracts_root) / capability,
+            catalog.package_path(PackageType.contract, capability),
             PackageType.contract,
         )
         manifest = CapabilityContractManifest.model_validate(contract.manifest)

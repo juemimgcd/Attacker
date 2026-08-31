@@ -53,6 +53,7 @@ class StatefulRunService:
         *,
         mode: str = "deterministic_stateful",
         on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
     ) -> dict[str, Any]:
         dataset = await self.loader.load(request.dataset_path, request.case_ids)
         return await self.run_dataset(
@@ -61,6 +62,7 @@ class StatefulRunService:
             target_name=request.target_name,
             mode=mode,
             on_run_created=on_run_created,
+            requested_run_id=requested_run_id,
         )
 
     async def run_dataset(
@@ -73,6 +75,7 @@ class StatefulRunService:
         equipment_source_run_id: str | None = None,
         equipment_overrides: dict[str, dict[str, Any]] | None = None,
         on_run_created: RunCreatedHook | None = None,
+        requested_run_id: str | None = None,
     ) -> dict[str, Any]:
         """按顺序执行状态 Case，并确保运行结束后仍尝试清理全部夹具。"""
 
@@ -81,6 +84,7 @@ class StatefulRunService:
             profile=profile,
             target_name=target_name,
             mode=mode,
+            requested_run_id=requested_run_id,
         )
         try:
             await notify_run_created(on_run_created, run_id)

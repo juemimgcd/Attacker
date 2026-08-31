@@ -54,11 +54,36 @@ class ReportService:
             "planner_tokens": run.get("planner_token_count", 0),
             "policy_denials": run.get("policy_denied_count", 0),
             "approval_requests": len(rows["approvals"]),
-            "finding_evidence_link_rate": (linked_findings / len(findings) if findings else 1.0),
+            "finding_evidence_link_rate": (linked_findings / len(findings) if findings else None),
         }
         rows["react_summary"] = self._react_metrics(rows)
         if self.equipment_repository is not None:
-            rows["equipment_snapshots"] = await self.equipment_repository.list_snapshots(run_id)
+            snapshots = await self.equipment_repository.list_snapshots(run_id)
+            executions = await self.equipment_repository.list_executions(run_id)
+            rows["equipment_snapshots"] = [
+                {**snapshot, **self._equipment_provenance(snapshot, executions)}
+                for snapshot in snapshots
+            ]
+            rows["equipment_executions"] = [
+                {
+                    key: execution.get(key)
+                    for key in (
+                        "operation_id",
+                        "package_id",
+                        "package_version",
+                        "package_checksum",
+                        "provider_instance_id",
+                        "config_revision",
+                        "secret_binding_revision",
+                        "capability",
+                        "capability_contract_checksum",
+                        "status",
+                        "physical_attempts",
+                        "error_code",
+                    )
+                }
+                for execution in executions
+            ]
         rows["summary"]["step_outcomes"] = dict(step_outcomes)
         if "stateful" in run["mode"]:
             retrieval_documents = [
@@ -147,7 +172,58 @@ class ReportService:
         return rows
 
     @staticmethod
-    def _finding_evidence_link_rate(rows: dict[str, Any]) -> float:
+    def _equipment_provenance(
+        snapshot: dict[str, Any],
+        executions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        def matches(execution: dict[str, Any]) -> bool:
+            if snapshot["package_type"] == "contract":
+                package_matches = execution.get("capability") == snapshot.get(
+                    "capability_contract_id"
+                ) and execution.get("capability_contract_checksum") == snapshot.get(
+                    "capability_contract_checksum"
+                )
+            elif snapshot["package_type"] in {"provider", "skill"}:
+                package_matches = (
+                    execution.get("package_id") == snapshot["package_id"]
+                    and execution.get("package_version") == snapshot["version"]
+                    and execution.get("package_checksum") == snapshot["checksum"]
+                )
+            else:
+                return False
+            if snapshot["package_type"] == "provider":
+                return package_matches and all(
+                    execution.get(field) == snapshot.get(field)
+                    for field in (
+                        "provider_instance_id",
+                        "config_revision",
+                        "secret_binding_revision",
+                    )
+                )
+            return package_matches and (
+                snapshot.get("provider_instance_id") is None
+                or execution.get("provider_instance_id") == snapshot["provider_instance_id"]
+            )
+
+        completed_attempts = [
+            execution
+            for execution in executions
+            if matches(execution)
+            and execution.get("status") != "running"
+            and int(execution.get("physical_attempts") or 0) > 0
+        ]
+        return {
+            "provenance_status": "executed" if completed_attempts else "declared_only",
+            "execution_operation_ids": [
+                str(execution["operation_id"]) for execution in completed_attempts
+            ],
+            "physical_attempts": sum(
+                int(execution["physical_attempts"]) for execution in completed_attempts
+            ),
+        }
+
+    @staticmethod
+    def _finding_evidence_link_rate(rows: dict[str, Any]) -> float | None:
         evidence_ids = {event["id"] for event in rows["events"]}
         findings = rows["findings"]
         linked = sum(
@@ -155,7 +231,7 @@ class ReportService:
             and set(finding["evidence_event_ids"]).issubset(evidence_ids)
             for finding in findings
         )
-        return linked / len(findings) if findings else 1.0
+        return linked / len(findings) if findings else None
 
     @classmethod
     def _react_metrics(cls, rows: dict[str, Any]) -> dict[str, Any]:
@@ -245,7 +321,7 @@ class ReportService:
                 event["event_type"] == "planner_finish_rejected" for event in events
             ),
             "traceable_decision_rate": (
-                traceable_decisions / len(planner_decisions) if planner_decisions else 1.0
+                traceable_decisions / len(planner_decisions) if planner_decisions else None
             ),
             "actual_information_gain": {
                 "coverage_delta": len(covered_tags),
@@ -279,6 +355,8 @@ class ReportService:
         summary = report["summary"]
         target = report["target"]
         dataset = report["dataset"]
+        finding_link_rate = summary["finding_evidence_link_rate"]
+        finding_link_rate_label = "N/A" if finding_link_rate is None else f"{finding_link_rate:.0%}"
         lines = [
             f"# Attacker Evaluation Report: {run_id}",
             "",
@@ -291,7 +369,7 @@ class ReportService:
             f"- Target calls: {summary['target_calls']}",
             f"- Tool calls: {summary['tool_calls']}",
             f"- Planner calls/tokens: {summary['planner_calls']}/{summary['planner_tokens']}",
-            f"- Finding evidence link rate: {summary['finding_evidence_link_rate']:.0%}",
+            f"- Finding evidence link rate: {finding_link_rate_label}",
             "",
             "## Outcomes",
             "",
@@ -318,6 +396,10 @@ class ReportService:
             )
 
         react = report["react_summary"]
+        traceable_decision_rate = react["traceable_decision_rate"]
+        traceable_decision_rate_label = (
+            "N/A" if traceable_decision_rate is None else f"{traceable_decision_rate:.0%}"
+        )
         lines.extend(
             [
                 "",
@@ -327,7 +409,7 @@ class ReportService:
                     f"- Planner decisions/rejections: "
                     f"{react['planner_decisions']}/{react['planner_rejections']}"
                 ),
-                f"- Traceable decision rate: {react['traceable_decision_rate']:.0%}",
+                f"- Traceable decision rate: {traceable_decision_rate_label}",
                 f"- Finish Gate rejections: {react['finish_gate_rejections']}",
                 f"- Covered tags: {len(react['covered_tags'])}",
                 (
@@ -457,10 +539,18 @@ class ReportService:
         if equipment_snapshots:
             lines.extend(
                 [
-                    "## Equipment Bindings",
+                    "## Declared Equipment Bindings",
                     "",
-                    "| Type | Package | Version | Checksum | Instance | Config revision |",
-                    "|---|---|---|---|---|---|",
+                    (
+                        "Frozen declarations are not execution evidence. `executed` requires a "
+                        "matching completed Harness record with a physical attempt."
+                    ),
+                    "",
+                    (
+                        "| Type | Package | Version | Checksum | Instance | Config revision | "
+                        "Secret revision | Provenance | Attempts |"
+                    ),
+                    "|---|---|---|---|---|---|---|---|---:|",
                 ]
             )
             for snapshot in equipment_snapshots:
@@ -468,7 +558,10 @@ class ReportService:
                     f"| {snapshot['package_type']} | `{snapshot['package_id']}` | "
                     f"`{snapshot['version']}` | `{snapshot['checksum']}` | "
                     f"`{snapshot.get('provider_instance_id') or ''}` | "
-                    f"`{snapshot.get('config_revision') or ''}` |"
+                    f"`{snapshot.get('config_revision') or ''}` | "
+                    f"`{snapshot.get('secret_binding_revision') or ''}` | "
+                    f"`{snapshot['provenance_status']}` | "
+                    f"{snapshot['physical_attempts']} |"
                 )
             lines.append("")
         replay = report.get("replay")
