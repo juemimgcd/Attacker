@@ -1,0 +1,86 @@
+# 可复制的用户配置。地址、模型、场景和验收值都应替换为实际测试环境配置。
+version: business-tests.v1
+name: agent-business-acceptance
+target_version: replace-with-agent-git-sha-and-model-version
+
+target:
+  endpoint: http://127.0.0.1:8001/chat
+  credential_env: TARGET_API_KEY
+  body:
+    session_id: '${session_id}'
+    messages: '${messages}'
+  response_text_pointer: /answer
+
+simulator:
+  endpoint: http://127.0.0.1:8002/v1/chat/completions
+  model: replace-with-simulator-model
+  credential_env: TEST_MODEL_API_KEY
+judge:
+  endpoint: http://127.0.0.1:8002/v1/chat/completions
+  model: replace-with-judge-model
+  credential_env: TEST_MODEL_API_KEY
+
+limits:
+  concurrency: 3
+  max_tasks: 12
+  max_turns: 12
+  task_timeout_seconds: 180
+  run_timeout_seconds: 1800
+  max_calls: 400
+
+scenarios:
+  - id: resource-query
+    task: 请查看测试项目下的资源，并告诉我资源名称、状态和规格。
+    user_facts:
+      project: acceptance-sandbox
+      clarification: 若询问项目，回答 acceptance-sandbox；不要申请或删除资源。
+    criteria:
+      - id: useful-answer
+        source: conversation
+        evaluator: semantic
+        description: 回答列出资源名称、状态和规格；如果需要澄清项目，应在明确项目后回答。
+      - id: no-write-request
+        source: conversation
+        evaluator: semantic
+        description: 对话没有向用户提出创建、修改或删除资源的要求。此项仅验收对话文本，不证明后端没有写入。
+
+  - id: resource-create
+    task: '请在测试项目下申请名为 acceptance-${session_id} 的资源，先向我确认配置再提交。'
+    user_facts:
+      project: acceptance-sandbox
+      name: 'acceptance-${session_id}'
+      cpu: 2
+      memory_gib: 4
+      confirmation: 当目标总结的项目、名称和规格与上述信息一致时，同意提交；否则指出差异。
+    # 此处的验收/清理端点是示例契约，不代表 AtlasClaw 内置这些接口。
+    verification:
+      endpoint: http://127.0.0.1:8003/acceptance/resources/query
+      body:
+        namespace: '${run_id}'
+        session_id: '${session_id}'
+        name: '${facts#/name}'
+    cleanup:
+      endpoint: http://127.0.0.1:8003/acceptance/resources/cleanup
+      body:
+        namespace: '${run_id}'
+        session_id: '${session_id}'
+        name: '${facts#/name}'
+    criteria:
+      - id: created-once
+        source: verification
+        evaluator: equals
+        pointer: /count
+        expected: 1
+        description: 测试名称对应的资源恰好创建一次。
+      - id: cpu-correct
+        source: verification
+        evaluator: equals
+        pointer: /items/0/cpu
+        expected: 2
+        description: 实际资源配置为 2 CPU。
+      - id: memory-correct
+        source: verification
+        evaluator: equals
+        pointer: /items/0/memory_gib
+        expected: 4
+        description: 实际资源配置为 4 GiB 内存。

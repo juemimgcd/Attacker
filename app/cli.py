@@ -42,6 +42,9 @@ from conf.settings import WorkerSettings, settings
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="attacker")
     commands = parser.add_subparsers(dest="command", required=True)
+    from app.business_test_cli import add_parser as add_business_parser
+
+    add_business_parser(commands)
     equipment = commands.add_parser("equipment")
     equipment_commands = equipment.add_subparsers(dest="equipment_command", required=True)
     list_command = equipment_commands.add_parser("list")
@@ -99,6 +102,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> Any:
+    if args.command == "business-test":
+        from app.business_test_cli import execute
+
+        return await execute(args)
     if args.command == "config" and args.config_command == "validate-production":
         settings.validate_production()
         return {"status": "valid", "profile": "production"}
@@ -283,6 +290,10 @@ def _run_migrate(revision: str) -> dict[str, str]:
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.command == "business-test":
+        from app.business_test_cli import run_cli
+
+        raise SystemExit(run_cli(args))
     result = asyncio.run(_run(args))
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
 
