@@ -1,0 +1,44 @@
+schema_version: benchmark.v1
+id: agent-task-benchmark
+name: Agent task capability and efficiency
+version: 1.0.0
+description: Configurable task grading and target telemetry through Equipment.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+casepack: {id: agent-task-examples, version: 1.0.0}
+skill: {id: agent-task-evaluator, version: 1.0.0}
+targets:
+  development:
+    bindings: {target: http-agent-dev}
+    parallel_safe: false
+execution:
+  concurrency: 1
+  repetitions: 1
+  timeout_seconds: 120
+  max_steps: 3
+  max_provider_calls: 1
+metrics:
+  - name: duration_ms
+    unit: ms
+    aggregation: mean
+    description: Harness-measured target capability invocation wall time, including transport and broker overhead.
+  - name: input_tokens
+    unit: tokens
+    aggregation: sum
+    description: Target-reported input tokens across all model requests including retries.
+  - name: output_tokens
+    unit: tokens
+    aggregation: sum
+    description: Target-reported output tokens across all model requests including retries.
+  - name: total_tokens
+    unit: tokens
+    aggregation: sum
+    description: Sum of complete target input and output usage; absent if either is unavailable.
+  - name: tool_call_accuracy
+    unit: ratio
+    aggregation: ratio
+    description: Calls matching an expected tool name and exact arguments divided by all observed calls.
+  - name: loop_count
+    unit: rounds
+    aggregation: mean
+    description: Target-reported model decision rounds, including the final answer round and excluding transport retries.
+tags: [benchmark, tasks, efficiency]

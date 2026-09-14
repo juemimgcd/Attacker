@@ -8,6 +8,9 @@ Attacker equipment is an offline, deployment-owned extension mechanism for secur
 - A **Provider Package** implements contracts. A separately persisted **Provider Instance** binds non-sensitive config, secret references, allowed hosts, and immutable config/secret revisions.
 - A **Skill** depends on named contract bindings and receives only `SkillContext`; it does not receive a DB session, global settings, raw Provider config, Provider clients, or a generic Secret reader.
 - A **Case Pack** is data-only.
+- A **Benchmark** composes a `casepack.v2` task dataset, an evaluator Skill, named Provider
+  Instance bindings and metric definitions. See [Equipment benchmarks](equipment-benchmarks.md)
+  for the configuration, execution and reporting contracts.
 
 Use `app.equipment.sdk` for the narrow Provider/Skill protocols. Manifests are validated without importing package Python.
 

@@ -53,11 +53,20 @@ def _parser() -> argparse.ArgumentParser:
     import_command = equipment_commands.add_parser("import")
     import_command.add_argument("archive")
     scaffold = equipment_commands.add_parser("scaffold")
-    scaffold.add_argument("type", choices=["provider", "skill", "casepack"])
+    scaffold.add_argument("type", choices=["provider", "skill", "casepack", "benchmark"])
     scaffold.add_argument("package_id")
     contract_test = equipment_commands.add_parser("contract-test")
     contract_test.add_argument("path")
-    contract_test.add_argument("--type", choices=["provider", "skill", "casepack"], required=True)
+    contract_test.add_argument(
+        "--type", choices=["provider", "skill", "casepack", "benchmark"], required=True
+    )
+    for action in ("enable", "disable"):
+        toggle = equipment_commands.add_parser(action)
+        toggle.add_argument("package_id")
+        toggle.add_argument("--type", choices=[item.value for item in PackageType], required=True)
+    from app.equipment.benchmark_cli import add_parser as add_equipment_benchmark_parser
+
+    add_equipment_benchmark_parser(equipment_commands)
 
     provider = commands.add_parser("provider-instance")
     provider_commands = provider.add_subparsers(dest="provider_command", required=True)
@@ -121,6 +130,14 @@ async def _run(args: argparse.Namespace) -> Any:
         settings.equipment,
     )
     try:
+        if args.command == "equipment" and args.equipment_command == "benchmark":
+            from app.equipment.benchmark_cli import execute as execute_equipment_benchmark
+
+            return await execute_equipment_benchmark(args, service, harness)
+        if args.command == "equipment" and args.equipment_command in {"enable", "disable"}:
+            return await service.set_package_enabled(
+                PackageType(args.type), args.package_id, args.equipment_command == "enable"
+            )
         if args.command == "equipment" and args.equipment_command == "reload":
             return await service.reload()
         if args.command == "equipment" and args.equipment_command == "list":

@@ -1,0 +1,8 @@
+tasks:
+  - id: answer-arithmetic
+    payload:
+      prompt: What is 17 plus 25? Reply with the number only.
+    expected:
+      checks:
+        - {pointer: /response, op: equals, value: "42"}
+    tags: [answer]

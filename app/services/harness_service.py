@@ -646,6 +646,7 @@ class HarnessService:
                         ),
                         config=instance["config"],
                     )
+                    provider_started = perf_counter()
                     provider_execution = await self.invoke_provider(
                         capability=capability,
                         payload=capability_request.payload,
@@ -665,6 +666,7 @@ class HarnessService:
                         output=provider_execution.get("output", {}),
                         operation_id=provider_operation_id,
                         error_code=provider_execution.get("error_code"),
+                        duration_ms=(perf_counter() - provider_started) * 1000,
                     )
             else:
                 raise ValueError("Skill exceeded its step budget")

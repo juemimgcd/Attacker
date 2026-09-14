@@ -14,6 +14,7 @@ class PackageType(StrEnum):
     skill = "skill"
     casepack = "casepack"
     contract = "contract"
+    benchmark = "benchmark"
 
 
 class TrustLevel(StrEnum):
@@ -118,7 +119,7 @@ class SkillManifest(BaseModel):
 class CasePackManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["casepack.v1"]
+    schema_version: Literal["casepack.v1", "casepack.v2"]
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9.-]*$")
     name: str
     version: str
@@ -325,6 +326,7 @@ class CapabilityResult(BaseModel):
     output: dict[str, Any] = Field(default_factory=dict)
     operation_id: str
     error_code: str | None = None
+    duration_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class SkillResult(BaseModel):
