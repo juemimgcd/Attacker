@@ -25,6 +25,10 @@ from app.models import (
 )
 from app.repositories.event_store import EventStore
 from app.schemas.attack_sample_schema import BlackBoxCase
+from app.schemas.equipment_benchmark_schema import (
+    BenchmarkExecution,
+    LoadedEquipmentBenchmarkDataset,
+)
 from app.schemas.judge_schema import AttackRunResult, EvaluationVerdict
 from app.schemas.run_schema import CaseRunResult, EvaluationOutcome, LoadedDataset, RunBudget
 from app.services.finding_fingerprint import finding_fingerprint
@@ -45,8 +49,8 @@ class RunRepository:
         self,
         *,
         target_snapshot: dict[str, Any],
-        dataset: LoadedDataset,
-        budget: RunBudget,
+        dataset: LoadedDataset | LoadedEquipmentBenchmarkDataset,
+        budget: RunBudget | BenchmarkExecution,
         mode: str = "deterministic",
         requested_run_id: str | None = None,
     ) -> str:

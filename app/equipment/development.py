@@ -360,6 +360,7 @@ def _package_root(catalog: EquipmentCatalog, package_type: PackageType) -> Path:
     if package_type == PackageType.contract:
         return Path(catalog.settings.contracts_root)
     suffix = {
+        PackageType.benchmark: "benchmarks",
         PackageType.provider: "providers",
         PackageType.skill: "skills",
         PackageType.casepack: "casepacks",
@@ -369,6 +370,21 @@ def _package_root(catalog: EquipmentCatalog, package_type: PackageType) -> Path:
 
 def _scaffold_files(package_type: PackageType, package_id: str) -> dict[str, str]:
     compatibility = "attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}\n"
+    if package_type == PackageType.benchmark:
+        return {
+            "benchmark.yaml": (
+                f"schema_version: benchmark.v1\nid: {package_id}\nname: {package_id}\n"
+                "version: 1.0.0\ndescription: Custom Agent task benchmark.\n"
+                + compatibility
+                + "casepack: {id: agent-task-examples, version: 1.0.0}\n"
+                "skill: {id: agent-task-evaluator, version: 1.0.0}\n"
+                "targets:\n  default:\n    bindings: {target: http-agent-dev}\n"
+                "execution: {concurrency: 1, repetitions: 1}\n"
+                "metrics:\n"
+                "  - {name: duration_ms, unit: ms, aggregation: mean, "
+                "description: Target invocation wall time.}\n"
+            )
+        }
     object_schema = json.dumps(
         {"type": "object", "properties": {}, "additionalProperties": False},
         indent=2,

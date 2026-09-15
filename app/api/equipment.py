@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.schemas.equipment_benchmark_schema import EquipmentBenchmarkRequest
 from app.schemas.equipment_schema import (
     PackageType,
     ProviderInstanceCreate,
@@ -14,6 +15,61 @@ from app.schemas.equipment_schema import (
 
 router = APIRouter(prefix="/equipment", tags=["equipment"])
 EQUIPMENT_ERRORS = (LookupError, ValueError, PermissionError, RuntimeError, OSError)
+
+
+@router.get("/benchmarks")
+async def list_benchmarks(request: Request) -> list[dict[str, Any]]:
+    return await _list(request, PackageType.benchmark)
+
+
+@router.get("/benchmarks/{benchmark_id}")
+async def get_benchmark(benchmark_id: str, request: Request) -> dict[str, Any]:
+    try:
+        return await request.app.state.equipment_service.get_package(
+            PackageType.benchmark, benchmark_id
+        )
+    except EQUIPMENT_ERRORS as exc:
+        _raise_http(exc)
+
+
+@router.post("/benchmarks/{benchmark_id}/enable")
+async def enable_benchmark(benchmark_id: str, request: Request) -> dict[str, Any]:
+    return await _enable(request, PackageType.benchmark, benchmark_id, enabled=True)
+
+
+@router.post("/benchmarks/{benchmark_id}/disable")
+async def disable_benchmark(benchmark_id: str, request: Request) -> dict[str, Any]:
+    return await _enable(request, PackageType.benchmark, benchmark_id, enabled=False)
+
+
+@router.post("/benchmarks/{benchmark_id}/validate")
+async def validate_benchmark(
+    benchmark_id: str, payload: EquipmentBenchmarkRequest, request: Request
+) -> dict[str, Any]:
+    from app.services.equipment_benchmark_service import EquipmentBenchmarkService
+
+    try:
+        service = EquipmentBenchmarkService(
+            request.app.state.equipment_service, request.app.state.harness_service
+        )
+        plan = await service.prepare(benchmark_id, payload)
+        return {"valid": True, "task_count": len(plan["tasks"]), "external_calls": 0}
+    except EQUIPMENT_ERRORS as exc:
+        _raise_http(exc)
+
+
+@router.post("/benchmarks/{benchmark_id}/run")
+async def run_benchmark(
+    benchmark_id: str, payload: EquipmentBenchmarkRequest, request: Request
+) -> dict[str, Any]:
+    from app.services.equipment_benchmark_service import EquipmentBenchmarkService
+
+    try:
+        return await EquipmentBenchmarkService(
+            request.app.state.equipment_service, request.app.state.harness_service
+        ).run(benchmark_id, payload)
+    except EQUIPMENT_ERRORS as exc:
+        _raise_http(exc)
 
 
 def _raise_http(exc: Exception) -> NoReturn:

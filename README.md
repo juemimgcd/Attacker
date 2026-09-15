@@ -45,7 +45,7 @@ AI Agent 的风险不只存在于最终回答中，还可能发生在工具调�
 | 人工审批 | 高风险步骤可暂停，审批后恢复同一工作流，并在执行前重新校验 Policy |
 | 证据与报告 | 从 SQL 事实源生成 JSON / Markdown 报告，Finding 可追溯到最短 Evidence 路径 |
 | Replay | 使用持久化快照重新评测，分类展示风险修复、新增、持续与回归 |
-| 装备目录 | 从本地目录加载经过 Manifest、JSON Schema、兼容性与 checksum 校验的 Provider、Skill 和 Case Pack |
+| 装备目录 | 从本地目录加载经过 Manifest、JSON Schema、兼容性与 checksum 校验的 Provider、Skill、Case Pack 和 Benchmark |
 
 ### 当前状态
 
@@ -375,6 +375,11 @@ uv run attacker skill dry-run state-poisoning-evaluator --payload '{"documents":
 ```
 
 完整契约、开发流程和安全边界见 [Equipment Development](docs/equipment-development.md)。
+
+自定义 Agent 评测通过 Equipment Benchmark 组合任务集、目标 Provider Instance 和评估
+Skill，支持任务完成率、耗时、token、工具调用准确率、循环次数及自定义指标。
+运行入口为 `attacker equipment benchmark`，示例装备默认不启用；配置方式和统计口径见
+[自定义 Benchmark](docs/equipment-benchmarks.md)。
 
 ## 安全模型
 

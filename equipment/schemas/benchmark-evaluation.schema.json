@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "MetricSample": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "numerator": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Numerator"
+        },
+        "denominator": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Denominator"
+        }
+      },
+      "title": "MetricSample",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "outcome": {
+      "enum": [
+        "passed",
+        "failed",
+        "inconclusive",
+        "invalid"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "evidence": {
+      "additionalProperties": true,
+      "minProperties": 1,
+      "title": "Evidence",
+      "type": "object"
+    },
+    "metrics": {
+      "additionalProperties": {
+        "$ref": "#/$defs/MetricSample"
+      },
+      "title": "Metrics",
+      "type": "object"
+    }
+  },
+  "required": [
+    "outcome",
+    "reason",
+    "evidence"
+  ],
+  "title": "BenchmarkEvaluation",
+  "type": "object"
+}

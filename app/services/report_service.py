@@ -57,6 +57,10 @@ class ReportService:
             "finding_evidence_link_rate": (linked_findings / len(findings) if findings else None),
         }
         rows["react_summary"] = self._react_metrics(rows)
+        if run["mode"] == "equipment_benchmark":
+            from app.equipment.benchmark_metrics import benchmark_summary
+
+            rows["benchmark_summary"] = benchmark_summary(rows)
         if self.equipment_repository is not None:
             snapshots = await self.equipment_repository.list_snapshots(run_id)
             executions = await self.equipment_repository.list_executions(run_id)
@@ -352,6 +356,10 @@ class ReportService:
         """把同一 JSON 事实投影为面向人工审阅的 Markdown。"""
 
         report = await self.build_json(run_id)
+        if report["run"]["mode"] == "equipment_benchmark":
+            from app.equipment.benchmark_metrics import benchmark_markdown
+
+            return benchmark_markdown(report)
         summary = report["summary"]
         target = report["target"]
         dataset = report["dataset"]

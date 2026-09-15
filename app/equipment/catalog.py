@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app import __version__
 from app.equipment.json_schema import validate_json_schema_document
+from app.schemas.equipment_benchmark_schema import BenchmarkTasks, EquipmentBenchmarkManifest
 from app.schemas.equipment_schema import (
     CapabilityContractManifest,
     CasePackManifest,
@@ -37,6 +38,7 @@ SignatureStatus = Literal[
 SourceType = Literal["builtin", "local_directory", "offline_archive"]
 IGNORED_NAMES = {"__pycache__", ".pytest_cache", ".ruff_cache", ".git", "tests"}
 CORE_BUILTIN_PACKAGES = {
+    PackageType.benchmark: set(),
     PackageType.provider: {
         "enterprise-ops-provider",
         "http-agent-provider",
@@ -147,6 +149,7 @@ CANONICAL_TEXT_SUFFIXES = {
     ".yml",
 }
 MANIFEST_NAMES = {
+    PackageType.benchmark: "benchmark.yaml",
     PackageType.provider: "provider.yaml",
     PackageType.skill: "skill.yaml",
     PackageType.casepack: "casepack.yaml",
@@ -177,6 +180,7 @@ class EquipmentCatalog:
             *self._scan_roots(PackageType.provider),
             *self._scan_roots(PackageType.skill),
             *self._scan_roots(PackageType.casepack),
+            *self._scan_roots(PackageType.benchmark),
         ]
         for package in packages:
             if package.validation_status != "valid":
@@ -187,6 +191,31 @@ class EquipmentCatalog:
                 package.validation_status = "invalid"
                 package.enabled = False
                 package.validation_errors.append(f"unknown capability contracts: {unknown}")
+        available = {
+            (item.package_type, item.package_id, item.version): item
+            for item in packages
+            if item.validation_status == "valid"
+        }
+        for package in packages:
+            if (
+                package.package_type != PackageType.benchmark
+                or package.validation_status != "valid"
+            ):
+                continue
+            manifest = EquipmentBenchmarkManifest.model_validate(package.manifest)
+            for kind, reference in (
+                (PackageType.casepack, manifest.casepack),
+                (PackageType.skill, manifest.skill),
+            ):
+                dependency = available.get((kind, reference.id, reference.version))
+                if dependency is None or (
+                    kind == PackageType.casepack
+                    and dependency.manifest.get("schema_version") != "casepack.v2"
+                ):
+                    package.validation_status = "invalid"
+                    package.validation_errors.append(
+                        f"missing or incompatible {kind.value}: {reference.id}@{reference.version}"
+                    )
         return sorted(
             packages,
             key=lambda item: (item.package_type.value, item.package_id, item.version),
@@ -452,6 +481,7 @@ class EquipmentCatalog:
     @staticmethod
     def _parse_manifest(package_type: PackageType, data: dict[str, Any]):
         models = {
+            PackageType.benchmark: EquipmentBenchmarkManifest,
             PackageType.provider: ProviderManifest,
             PackageType.skill: SkillManifest,
             PackageType.casepack: CasePackManifest,
@@ -474,10 +504,16 @@ class EquipmentCatalog:
     @staticmethod
     def _validate_references(
         root: Path,
-        manifest: ProviderManifest | SkillManifest | CasePackManifest | CapabilityContractManifest,
+        manifest: ProviderManifest
+        | SkillManifest
+        | CasePackManifest
+        | CapabilityContractManifest
+        | EquipmentBenchmarkManifest,
         package_type: PackageType,
     ) -> None:
         references: list[str] = []
+        if isinstance(manifest, EquipmentBenchmarkManifest):
+            return
         if package_type == PackageType.provider:
             references.append(manifest.configuration.schema_file)  # type: ignore[union-attr]
         elif package_type == PackageType.skill:
@@ -490,14 +526,20 @@ class EquipmentCatalog:
             target = (root / reference).resolve()
             if not target.is_relative_to(root.resolve()) or not target.is_file():
                 raise ValueError(f"missing or unsafe referenced file: {reference}")
-            if reference.endswith(".json"):
+            if isinstance(manifest, CasePackManifest) and manifest.schema_version == "casepack.v2":
+                BenchmarkTasks.model_validate(yaml.safe_load(target.read_text(encoding="utf-8")))
+            elif reference.endswith(".json"):
                 schema = json.loads(target.read_text(encoding="utf-8"))
                 validate_json_schema_document(schema, name=reference)
 
     def _validate_executable(
         self,
         root: Path,
-        manifest: ProviderManifest | SkillManifest | CasePackManifest | CapabilityContractManifest,
+        manifest: ProviderManifest
+        | SkillManifest
+        | CasePackManifest
+        | CapabilityContractManifest
+        | EquipmentBenchmarkManifest,
         package_type: PackageType,
     ) -> None:
         if package_type not in {PackageType.provider, PackageType.skill}:
@@ -560,6 +602,7 @@ class EquipmentCatalog:
         if package_type == PackageType.contract:
             return Path(self.settings.contracts_root).resolve()
         suffix = {
+            PackageType.benchmark: "benchmarks",
             PackageType.provider: "providers",
             PackageType.skill: "skills",
             PackageType.casepack: "casepacks",
@@ -571,6 +614,7 @@ class EquipmentCatalog:
         if package_type == PackageType.contract:
             return (_PACKAGE_ROOT / "contracts").resolve()
         suffix = {
+            PackageType.benchmark: "benchmarks",
             PackageType.provider: "providers",
             PackageType.skill: "skills",
             PackageType.casepack: "casepacks",

@@ -1,0 +1,9 @@
+schema_version: casepack.v2
+id: agent-task-examples
+name: Agent task examples
+version: 1.0.0
+description: Replace these illustrative tasks and success criteria with your domain tasks.
+attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}
+cases_file: tasks.yaml
+required_capabilities: [agent.invoke.v1]
+tags: [benchmark, example]
