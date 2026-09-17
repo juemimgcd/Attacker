@@ -18,6 +18,7 @@ from app.schemas.adaptive_agent_schema import (
 )
 from app.schemas.attack_sample_schema import CaseKind, RiskLevel
 from app.schemas.attack_state_schema import CoverageStatus, PlannerFallbackMode
+from app.schemas.execution_trace_schema import ExecutionTrace
 from app.schemas.judge_schema import TargetResponse
 from app.schemas.target_schema import TargetConfig
 
@@ -82,6 +83,7 @@ class ToolTraceEnvelope(BaseModel):
     tool_events: list[ToolEvent] = Field(default_factory=list)
     policy_events: list[PolicyEvent] = Field(default_factory=list)
     approval_events: list[ApprovalEvent] = Field(default_factory=list)
+    execution_trace: ExecutionTrace | None = None
 
 
 class TraceAdapterResult(BaseModel):

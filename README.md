@@ -487,6 +487,7 @@ GitHub Actions 会在 push 和 pull request 上执行同一组检查。现有测
 
 ## 文档
 
+- [Agent 执行路径采集](docs/execution-tracing.md)：通过 `attacker trace proxy/show` 观测黑盒 Agent 的模型请求、工具调用参数和回传结果，无需绑定目标函数；Python 函数包装作为可选深度采集；
 - [架构设计](docs/architecture.md)：运行模式、状态图、Policy、Evidence 与恢复边界；
 - [装备开发指南](docs/equipment-development.md)：Provider、Skill、Case Pack 与 Capability Contract；
 - [生产运维手册](docs/operations/production-runbook.md)：部署、升级、回滚、SLO、告警与灾备；
