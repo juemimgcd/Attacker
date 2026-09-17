@@ -45,6 +45,9 @@ def _parser() -> argparse.ArgumentParser:
     from app.business_test_cli import add_parser as add_business_parser
 
     add_business_parser(commands)
+    from app.trace_cli import add_parser as add_trace_parser
+
+    add_trace_parser(commands)
     equipment = commands.add_parser("equipment")
     equipment_commands = equipment.add_subparsers(dest="equipment_command", required=True)
     list_command = equipment_commands.add_parser("list")
@@ -111,6 +114,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> Any:
+    if args.command == "trace":
+        from app.trace_cli import execute as execute_trace
+
+        return await execute_trace(args)
     if args.command == "business-test":
         from app.business_test_cli import execute
 
@@ -311,7 +318,12 @@ def main() -> None:
         from app.business_test_cli import run_cli
 
         raise SystemExit(run_cli(args))
-    result = asyncio.run(_run(args))
+    try:
+        result = asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        if args.command == "trace" and args.trace_command == "proxy":
+            raise SystemExit(130) from None
+        raise
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
 
 

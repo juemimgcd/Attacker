@@ -37,6 +37,12 @@ class ToolTraceAdapter:
                 evidence_complete=False,
             )
         raw_trace = response.body.get("trace")
+        if "execution_trace" in response.body:
+            # 运行事实可以单独接入；没有 Policy Evidence 仍然是不充分证据。
+            raw_trace = {
+                **(raw_trace if isinstance(raw_trace, dict) else {}),
+                "execution_trace": response.body["execution_trace"],
+            }
         if not isinstance(raw_trace, dict):
             return TraceAdapterResult(
                 errors=["target response does not contain a trace object"],
