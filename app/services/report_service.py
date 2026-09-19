@@ -61,11 +61,32 @@ class ReportService:
             from app.equipment.benchmark_metrics import benchmark_summary
 
             rows["benchmark_summary"] = benchmark_summary(rows)
+        if run["mode"] == "benchmark_import":
+            from app.services.benchmark_service import benchmark_metrics
+
+            rows["benchmark_summary"] = benchmark_metrics(
+                [step["result"] for step in rows["steps"]]
+            )
+            rows["benchmark_summary"]["source"] = next(
+                (
+                    event["evidence"]
+                    for event in rows["events"]
+                    if event["event_type"] == "benchmark_source_frozen"
+                ),
+                None,
+            )
         if self.equipment_repository is not None:
             snapshots = await self.equipment_repository.list_snapshots(run_id)
             executions = await self.equipment_repository.list_executions(run_id)
             rows["equipment_snapshots"] = [
-                {**snapshot, **self._equipment_provenance(snapshot, executions)}
+                {
+                    **snapshot,
+                    **(
+                        self._benchmark_provenance(snapshot, rows["events"])
+                        if snapshot["package_type"] == "benchmark"
+                        else self._equipment_provenance(snapshot, executions)
+                    ),
+                }
                 for snapshot in snapshots
             ]
             rows["equipment_executions"] = [
@@ -174,6 +195,39 @@ class ReportService:
                 **self.adaptive_observability.compare(rows, baseline_rows),
             }
         return rows
+
+    @staticmethod
+    def _benchmark_provenance(
+        snapshot: dict[str, Any], events: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        frozen = any(
+            event["event_type"] == "equipment_benchmark_frozen"
+            and event["evidence"].get("checksum") == snapshot["checksum"]
+            for event in events
+        )
+        phases = [
+            event
+            for event in events
+            if frozen
+            and event["event_type"]
+            in {
+                "equipment_benchmark_prepared",
+                "equipment_benchmark_observed",
+                "equipment_benchmark_cleaned",
+            }
+            and (
+                event["event_type"] != "equipment_benchmark_cleaned"
+                or event["evidence"].get("status") == "cleaned"
+            )
+        ]
+        return {
+            "provenance_status": "executed" if phases else "declared_only",
+            "execution_operation_ids": [event["operation_id"] for event in phases],
+            "lifecycle_phase_count": len(phases),
+            "observed_attempt_count": sum(
+                event["event_type"] == "equipment_benchmark_observed" for event in phases
+            ),
+        }
 
     @staticmethod
     def _equipment_provenance(
@@ -573,6 +627,34 @@ class ReportService:
                 )
             lines.append("")
         replay = report.get("replay")
+        benchmark = report.get("benchmark_summary")
+        if benchmark:
+            lines.extend(
+                [
+                    "",
+                    "## Public Benchmark",
+                    "",
+                    benchmark["provenance"],
+                    "",
+                    "| Metric | Success / Evaluable | Expected | Rate |",
+                    "|---|---:|---:|---:|",
+                ]
+            )
+            for name in ("attack_success_rate", "clean_utility", "utility_under_attack"):
+                metric = benchmark[name]
+                rate = "N/A" if metric["rate"] is None else f"{metric['rate']:.2%}"
+                lines.append(
+                    f"| {name} | {metric['numerator']} / {metric['denominator']} | "
+                    f"{metric['expected']} | {rate} |"
+                )
+            lines.extend(
+                [
+                    "",
+                    "Invalid, missing and errored results are excluded from rate denominators.",
+                    "InjecAgent has no clean-task utility judge; N/A is not zero utility.",
+                    "",
+                ]
+            )
         if replay:
             diff = replay["diff"]
             lines.extend(

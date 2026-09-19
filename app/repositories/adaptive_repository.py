@@ -7,6 +7,8 @@ from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -121,23 +123,32 @@ class AdaptiveRepository:
                 endpoint=str(target_snapshot["endpoint"]),
                 config_json=target_snapshot,
             )
-            existing_dataset = await session.scalar(
+            # Concurrent subagents can freeze the same dataset at the same time.
+            # Let the unique checksum arbitrate in SQL instead of select-then-insert.
+            insert = (
+                sqlite_insert if session.get_bind().dialect.name == "sqlite" else postgres_insert
+            )
+            await session.execute(
+                insert(DatasetSnapshotRecord)
+                .values(
+                    id=str(uuid4()),
+                    name=dataset.name,
+                    version=dataset.version,
+                    sha256=dataset.sha256,
+                    snapshot_json=dataset.snapshot,
+                )
+                .on_conflict_do_nothing(index_elements=["sha256"])
+            )
+            dataset_record = await session.scalar(
                 select(DatasetSnapshotRecord).where(DatasetSnapshotRecord.sha256 == dataset.sha256)
             )
-            dataset_record = existing_dataset or DatasetSnapshotRecord(
-                id=str(uuid4()),
-                name=dataset.name,
-                version=dataset.version,
-                sha256=dataset.sha256,
-                snapshot_json=dataset.snapshot,
-            )
+            if dataset_record is None:
+                raise RuntimeError("dataset snapshot was not persisted")
             policy_record = PolicySnapshotRecord(
                 id=str(uuid4()),
                 config_json=effective_policy.model_dump(mode="json"),
             )
             session.add(target)
-            if existing_dataset is None:
-                session.add(dataset_record)
             session.add(policy_record)
             await session.flush()
             run = EvaluationRunRecord(

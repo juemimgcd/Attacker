@@ -22,6 +22,7 @@ from app.repositories.event_store import EventStore
 from app.repositories.job_repository import JobRepository
 from app.repositories.run_repository import RunRepository
 from app.repositories.stateful_repository import StatefulRepository
+from app.repositories.subagent_repository import SubagentRepository
 from app.services.adaptive_run_service import (
     AdaptiveRunService,
     DeterministicGrayBoxRunService,
@@ -33,6 +34,7 @@ from app.services.replay_service import ReplayService
 from app.services.report_service import ReportService
 from app.services.run_service import DeterministicRunService
 from app.services.stateful_run_service import StatefulRunService
+from app.services.subagent_service import SubagentService
 from conf.settings import Settings, settings
 
 
@@ -56,6 +58,7 @@ class AppRuntime:
     stateful_run_service: StatefulRunService
     replay_service: ReplayService
     report_service: ReportService
+    subagent_service: SubagentService
     job_application_service: JobApplicationService
     job_dispatcher: JobDispatcher
     catalog_ready: bool
@@ -144,6 +147,9 @@ async def create_runtime(
                 run_repository,
             )
             report_service = ReportService(run_repository, equipment_repository)
+            subagent_service = SubagentService(
+                SubagentRepository(database.session_factory), adaptive_run_service, report_service
+            )
             job_application_service = JobApplicationService(
                 job_repository,
                 default_max_attempts=config.worker.max_attempts,
@@ -171,6 +177,7 @@ async def create_runtime(
                 stateful_run_service=stateful_run_service,
                 replay_service=replay_service,
                 report_service=report_service,
+                subagent_service=subagent_service,
                 job_application_service=job_application_service,
                 job_dispatcher=job_dispatcher,
                 catalog_ready=True,

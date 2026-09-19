@@ -1,6 +1,6 @@
 """确定性、灰盒、自适应和带状态 Run 的统一 HTTP 入口。"""
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
 from app.schemas.graybox_schema import (
@@ -11,8 +11,32 @@ from app.schemas.graybox_schema import (
 )
 from app.schemas.run_schema import DeterministicRunRequest
 from app.schemas.stateful_schema import StatefulRunRequest
+from app.schemas.subagent_schema import SubagentRunRequest
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+@router.post("/subagents")
+async def create_subagent_run(payload: SubagentRunRequest, request: Request) -> dict:
+    try:
+        return await request.app.state.subagent_service.start(payload)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/subagents")
+async def list_subagent_runs(
+    request: Request, limit: int = Query(default=20, ge=1, le=100)
+) -> list[dict]:
+    return await request.app.state.subagent_service.repository.list_recent(limit)
+
+
+@router.get("/subagents/{coordinator_id}")
+async def get_subagent_report(coordinator_id: str, request: Request) -> dict:
+    try:
+        return await request.app.state.subagent_service.report(coordinator_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/stateful")

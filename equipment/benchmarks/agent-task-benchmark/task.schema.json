@@ -1,0 +1,85 @@
+{
+  "type": "object",
+  "required": [
+    "id",
+    "payload",
+    "expected"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "prompt"
+      ],
+      "properties": {
+        "prompt": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "expected": {
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "pointer",
+              "op"
+            ],
+            "properties": {
+              "pointer": {
+                "type": "string",
+                "pattern": "^(/.*)?$"
+              },
+              "op": {
+                "enum": [
+                  "equals",
+                  "contains",
+                  "exists"
+                ]
+              },
+              "value": {}
+            },
+            "additionalProperties": false
+          }
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

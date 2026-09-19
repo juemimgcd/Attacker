@@ -23,6 +23,7 @@ from app.equipment.development import (
 )
 from app.equipment.runner import EquipmentRunner
 from app.infrastructure.database import Database
+from app.infrastructure.secrets import build_secret_broker
 from app.repositories.equipment_repository import EquipmentRepository
 from app.runtime import create_runtime
 from app.schemas.equipment_schema import (
@@ -42,14 +43,28 @@ from conf.settings import WorkerSettings, settings
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="attacker")
     commands = parser.add_subparsers(dest="command", required=True)
+    from app.benchmark_cli import add_parser
+
+    add_parser(commands)
+    from app.subagent_cli import add_parser as add_subagent_parser
+
+    add_subagent_parser(commands)
+    from app.trace_cli import add_parser as add_trace_parser
+
+    add_trace_parser(commands)
     equipment = commands.add_parser("equipment")
     equipment_commands = equipment.add_subparsers(dest="equipment_command", required=True)
     list_command = equipment_commands.add_parser("list")
-    list_command.add_argument("--type", choices=[item.value for item in PackageType], default=None)
+    list_command.add_argument(
+        "--type", choices=[item.value for item in PackageType], default="benchmark"
+    )
     validate = equipment_commands.add_parser("validate")
     validate.add_argument("path")
     validate.add_argument("--type", choices=[item.value for item in PackageType], required=True)
-    equipment_commands.add_parser("reload")
+    reload_command = equipment_commands.add_parser("reload")
+    reload_command.add_argument(
+        "--legacy", action="store_true", help="Also load legacy security equipment"
+    )
     import_command = equipment_commands.add_parser("import")
     import_command.add_argument("archive")
     scaffold = equipment_commands.add_parser("scaffold")
@@ -108,6 +123,18 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> Any:
+    if args.command == "trace":
+        from app.trace_cli import execute as execute_trace
+
+        return await execute_trace(args)
+    if args.command == "subagents":
+        from app.subagent_cli import execute as execute_subagents
+
+        return await execute_subagents(args)
+    if args.command == "benchmark":
+        from app.benchmark_cli import execute
+
+        return await execute(args)
     if args.command == "config" and args.config_command == "validate-production":
         settings.validate_production()
         return {"status": "valid", "profile": "production"}
@@ -122,24 +149,20 @@ async def _run(args: argparse.Namespace) -> Any:
     await database.initialize()
     repository = EquipmentRepository(database.session_factory)
     catalog = EquipmentCatalog(settings.equipment)
-    service = EquipmentService(repository, catalog)
-    harness = HarnessService(
-        repository,
-        service,
-        EquipmentRunner(settings.equipment),
-        settings.equipment,
+    service = EquipmentService(
+        repository, catalog, secret_broker=build_secret_broker(settings.secrets)
     )
     try:
         if args.command == "equipment" and args.equipment_command == "benchmark":
             from app.equipment.benchmark_cli import execute as execute_equipment_benchmark
 
-            return await execute_equipment_benchmark(args, service, harness)
+            return await execute_equipment_benchmark(args, service)
         if args.command == "equipment" and args.equipment_command in {"enable", "disable"}:
             return await service.set_package_enabled(
                 PackageType(args.type), args.package_id, args.equipment_command == "enable"
             )
         if args.command == "equipment" and args.equipment_command == "reload":
-            return await service.reload()
+            return await service.reload() if args.legacy else await service.reload_benchmarks()
         if args.command == "equipment" and args.equipment_command == "list":
             package_type = PackageType(args.type) if args.type else None
             return await repository.list_packages(package_type=package_type)
@@ -162,6 +185,13 @@ async def _run(args: argparse.Namespace) -> Any:
                 Path(args.path),
                 PackageType(args.type),
             )
+        harness = HarnessService(
+            repository,
+            service,
+            EquipmentRunner(settings.equipment),
+            settings.equipment,
+            secret_broker=service.secret_broker,
+        )
         if args.command == "provider-instance" and args.provider_command == "healthcheck":
             return await harness.healthcheck(args.instance_id)
         if args.command == "skill" and args.skill_command == "dry-run":
@@ -300,7 +330,12 @@ def _run_migrate(revision: str) -> dict[str, str]:
 
 def main() -> None:
     args = _parser().parse_args()
-    result = asyncio.run(_run(args))
+    try:
+        result = asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        if args.command == "trace" and args.trace_command == "proxy":
+            raise SystemExit(130) from None
+        raise
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
 
 

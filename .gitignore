@@ -16,3 +16,7 @@ data/
 deploy/secrets/
 deploy/provider-secrets/
 deploy/alert-secrets/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

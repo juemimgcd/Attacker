@@ -336,6 +336,26 @@ class EquipmentService:
                 broker.validate_reference(reference, require_configured=True)
         return await self.repository.set_instance_enabled(instance_id, enabled)
 
+    async def reload_benchmarks(self) -> dict[str, Any]:
+        """Register standalone Benchmark packages without resolving legacy components."""
+        packages = self.catalog.discover_benchmarks()
+        records = await self.repository.register_packages(packages)
+        self._archive_packages(
+            [
+                package
+                for package, record in zip(packages, records, strict=True)
+                if package.validation_status == "valid"
+                and record.get("error_code") is None
+                and record.get("checksum") == package.checksum
+                and record.get("validation_status") == "valid"
+            ]
+        )
+        return {
+            "packages": records,
+            "counts": {"benchmark": len(packages)},
+            "invalid_count": sum(package.validation_status != "valid" for package in packages),
+        }
+
     async def reload(self) -> dict[str, Any]:
         started = perf_counter()
         packages = self.catalog.discover()

@@ -119,7 +119,7 @@ class SkillManifest(BaseModel):
 class CasePackManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["casepack.v1", "casepack.v2"]
+    schema_version: Literal["casepack.v1"]
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9.-]*$")
     name: str
     version: str

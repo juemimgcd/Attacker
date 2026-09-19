@@ -27,6 +27,18 @@ class Base(DeclarativeBase):
     """所有 SQLAlchemy 业务模型的声明式基类。"""
 
 
+class SubagentRunRecord(Base):
+    """独立于子 Run 生命周期的主任务；manifest 不保存模型或 Target 凭据。"""
+
+    __tablename__ = "subagent_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    dispatch_finished: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    errors_json: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 # Run 输入快照与顶层状态：回答“这次评测在什么条件下执行”。
 class TargetRecord(Base):
     __tablename__ = "targets"
