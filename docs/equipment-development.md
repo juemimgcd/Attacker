@@ -2,17 +2,27 @@
 
 Attacker equipment is an offline, deployment-owned extension mechanism for security evaluation. It is not a public marketplace and never downloads executable packages from an unknown URL.
 
-## Package boundaries
+## Benchmark-first extension model
 
-- A **Capability Contract** is published by Core under `contracts/` and owns request/response schemas, risk, idempotency, Evidence, cleanup, limits, and error semantics.
-- A **Provider Package** implements contracts. A separately persisted **Provider Instance** binds non-sensitive config, secret references, allowed hosts, and immutable config/secret revisions.
-- A **Skill** depends on named contract bindings and receives only `SkillContext`; it does not receive a DB session, global settings, raw Provider config, Provider clients, or a generic Secret reader.
-- A **Case Pack** is data-only.
-- A **Benchmark** composes a `casepack.v2` task dataset, an evaluator Skill, named Provider
-  Instance bindings and metric definitions. See [Equipment benchmarks](equipment-benchmarks.md)
-  for the configuration, execution and reporting contracts.
+New Agent evaluations use a self-contained **Benchmark** package: tasks, target configuration,
+execution lifecycle, grading and metric definitions live together. Core supplies registration,
+version snapshots, bounded scheduling and persisted reports. Use `app.equipment.benchmark_sdk`;
+see [Equipment benchmarks](equipment-benchmarks.md) for the lifecycle and local workflow.
+`equipment reload` and `equipment list` default to Benchmarks. A Benchmark needs no legacy
+package or instance registration.
 
-Use `app.equipment.sdk` for the narrow Provider/Skill protocols. Manifests are validated without importing package Python.
+## Legacy security equipment compatibility
+
+The following contracts remain for existing security runs; they are not dependencies of the
+Benchmark execution path:
+
+- A **Capability Contract** owns request/response schemas and capability policies.
+- A **Provider Package** implements contracts; a **Provider Instance** binds configuration.
+- A **Skill** requests named capabilities through `SkillContext`.
+- A **Case Pack** contains security cases (`casepack.v1`).
+
+The remainder of this guide describes legacy extension development and shared package trust.
+Use `app.equipment.sdk` for legacy protocols. Manifests are validated without importing Python.
 
 ## Local workflow
 
@@ -21,7 +31,7 @@ Core 内置装备从安装包只读加载；`EQUIPMENT__ROOT` 指向当前部署
 
 ```powershell
 attacker equipment validate equipment/providers/my-provider --type provider
-attacker equipment reload
+attacker equipment reload --legacy
 attacker equipment scaffold provider my-provider
 attacker equipment import my-signed-provider.zip
 attacker equipment contract-test equipment/providers/my-provider --type provider

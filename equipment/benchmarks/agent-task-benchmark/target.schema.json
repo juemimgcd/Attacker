@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "required": [
+    "endpoint"
+  ],
+  "properties": {
+    "endpoint": {
+      "type": "string",
+      "pattern": "^https://"
+    }
+  },
+  "additionalProperties": false
+}

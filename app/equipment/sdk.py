@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Protocol
 
-from app.schemas.equipment_benchmark_schema import BenchmarkEvaluation, MetricSample
 from app.schemas.equipment_schema import (
     ProviderContext,
     ProviderResult,
@@ -89,8 +88,6 @@ class Skill(Protocol):
 
 
 __all__ = [
-    "BenchmarkEvaluation",
-    "MetricSample",
     "ProviderAdapter",
     "ProviderContext",
     "ProviderResult",

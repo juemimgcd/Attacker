@@ -158,14 +158,33 @@ class AdaptiveRunService:
             requested_run_id=requested_run_id,
         )
 
+    async def start_dataset(
+        self,
+        request: GrayBoxRunRequest,
+        dataset: LoadedGrayBoxDataset,
+        *,
+        requested_run_id: str,
+    ) -> dict[str, Any]:
+        """执行协调器已冻结的子集，避免排队期间重新读取发生变化的文件。"""
+
+        runtime_target = await self._prepare_target(request.target)
+        return await self._start_materialized(
+            request.model_copy(update={"target": runtime_target}),
+            on_run_created=None,
+            requested_run_id=requested_run_id,
+            dataset=dataset,
+        )
+
     async def _start_materialized(
         self,
         request: GrayBoxRunRequest,
         *,
         on_run_created: RunCreatedHook | None,
         requested_run_id: str | None,
+        dataset: LoadedGrayBoxDataset | None = None,
     ) -> dict[str, Any]:
-        dataset = await self.loader.load(request.dataset_path, request.case_ids)
+        if dataset is None:
+            dataset = await self.loader.load(request.dataset_path, request.case_ids)
         snapshot = self._redacted_target_snapshot(request.target)
         run_id, target_id, thread_id, policy = await self.repository.create_run(
             target_snapshot=snapshot,

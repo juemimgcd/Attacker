@@ -49,6 +49,22 @@ class EquipmentBenchmarkRepository:
                 evidence=step.result_json,
             )
 
+    async def record_phase(self, step_id: str, phase: str, evidence: dict[str, Any]) -> None:
+        """Persist preparation, observations and cleanup independently of final grading."""
+        async with self.runs.session_factory.begin() as session:
+            step = await session.get(RunStepRecord, step_id)
+            if step is None:
+                raise LookupError(step_id)
+            step.result_json = {**step.result_json, phase: evidence}
+            await self.runs.events.append_in_session(
+                session,
+                run_id=step.run_id,
+                step_id=step.id,
+                operation_id=f"{step.operation_id}:{phase}",
+                event_type=f"equipment_benchmark_{phase}",
+                evidence=evidence,
+            )
+
     async def finish(self, run_id: str, status: str, cleanup: list[dict[str, Any]]) -> None:
         async with self.runs.session_factory.begin() as session:
             run = await session.get(EvaluationRunRecord, run_id)
@@ -57,6 +73,12 @@ class EquipmentBenchmarkRepository:
             steps = list(
                 await session.scalars(select(RunStepRecord).where(RunStepRecord.run_id == run_id))
             )
+            if status == "completed" and any(
+                item.get("status") == "cleanup_failed"
+                for step in steps
+                for item in step.result_json.get("cleanup", [])
+            ):
+                status = "cleanup_failed"
             run.status = status
             run.completed_cases = sum(step.status == "completed" for step in steps)
             run.error_count = sum(step.outcome in {"error", "timeout", "denied"} for step in steps)

@@ -168,6 +168,10 @@ class EquipmentCatalog:
     def __init__(self, settings: EquipmentSettings) -> None:
         self.settings = settings.model_copy(deep=True)
 
+    def discover_benchmarks(self) -> list[DiscoveredPackage]:
+        """Discover independent Benchmark packages without loading legacy equipment."""
+        return self._scan_roots(PackageType.benchmark)
+
     def discover(self) -> list[DiscoveredPackage]:
         """先建立有效 Contract 集，再拒绝引用未知能力的可执行包。"""
 
@@ -191,31 +195,6 @@ class EquipmentCatalog:
                 package.validation_status = "invalid"
                 package.enabled = False
                 package.validation_errors.append(f"unknown capability contracts: {unknown}")
-        available = {
-            (item.package_type, item.package_id, item.version): item
-            for item in packages
-            if item.validation_status == "valid"
-        }
-        for package in packages:
-            if (
-                package.package_type != PackageType.benchmark
-                or package.validation_status != "valid"
-            ):
-                continue
-            manifest = EquipmentBenchmarkManifest.model_validate(package.manifest)
-            for kind, reference in (
-                (PackageType.casepack, manifest.casepack),
-                (PackageType.skill, manifest.skill),
-            ):
-                dependency = available.get((kind, reference.id, reference.version))
-                if dependency is None or (
-                    kind == PackageType.casepack
-                    and dependency.manifest.get("schema_version") != "casepack.v2"
-                ):
-                    package.validation_status = "invalid"
-                    package.validation_errors.append(
-                        f"missing or incompatible {kind.value}: {reference.id}@{reference.version}"
-                    )
         return sorted(
             packages,
             key=lambda item: (item.package_type.value, item.package_id, item.version),
@@ -316,7 +295,7 @@ class EquipmentCatalog:
             ):
                 raise ValueError("package signature is required")
             if (
-                package_type in {PackageType.provider, PackageType.skill}
+                package_type in {PackageType.provider, PackageType.skill, PackageType.benchmark}
                 and manifest_data.get("trust_level") == TrustLevel.trusted_builtin.value
                 and source_type != "builtin"
             ):
@@ -480,6 +459,10 @@ class EquipmentCatalog:
 
     @staticmethod
     def _parse_manifest(package_type: PackageType, data: dict[str, Any]):
+        if package_type == PackageType.benchmark and data.get("schema_version") == "benchmark.v1":
+            raise ValueError(
+                "benchmark.v1 composition is obsolete; migrate to a standalone benchmark.v2 package"
+            )
         models = {
             PackageType.benchmark: EquipmentBenchmarkManifest,
             PackageType.provider: ProviderManifest,
@@ -513,8 +496,8 @@ class EquipmentCatalog:
     ) -> None:
         references: list[str] = []
         if isinstance(manifest, EquipmentBenchmarkManifest):
-            return
-        if package_type == PackageType.provider:
+            references.extend([manifest.tasks_file, manifest.task_schema, manifest.target_schema])
+        elif package_type == PackageType.provider:
             references.append(manifest.configuration.schema_file)  # type: ignore[union-attr]
         elif package_type == PackageType.skill:
             references.extend([manifest.input_schema, manifest.output_schema])  # type: ignore[union-attr]
@@ -526,7 +509,10 @@ class EquipmentCatalog:
             target = (root / reference).resolve()
             if not target.is_relative_to(root.resolve()) or not target.is_file():
                 raise ValueError(f"missing or unsafe referenced file: {reference}")
-            if isinstance(manifest, CasePackManifest) and manifest.schema_version == "casepack.v2":
+            if (
+                isinstance(manifest, EquipmentBenchmarkManifest)
+                and reference == manifest.tasks_file
+            ):
                 BenchmarkTasks.model_validate(yaml.safe_load(target.read_text(encoding="utf-8")))
             elif reference.endswith(".json"):
                 schema = json.loads(target.read_text(encoding="utf-8"))
@@ -542,7 +528,7 @@ class EquipmentCatalog:
         | EquipmentBenchmarkManifest,
         package_type: PackageType,
     ) -> None:
-        if package_type not in {PackageType.provider, PackageType.skill}:
+        if package_type not in {PackageType.provider, PackageType.skill, PackageType.benchmark}:
             return
         if not self.settings.allow_executable_packages:
             raise ValueError("executable packages are disabled")
@@ -561,6 +547,25 @@ class EquipmentCatalog:
             tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
         except SyntaxError as exc:
             raise ValueError(f"invalid entrypoint Python: {exc}") from exc
+        if package_type == PackageType.benchmark:
+            definition = next(
+                (
+                    node
+                    for node in tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == symbol
+                ),
+                None,
+            )
+            required = {"prepare", "execute", "evaluate", "cleanup"}
+            methods = (
+                {node.name for node in definition.body if isinstance(node, ast.AsyncFunctionDef)}
+                if definition
+                else set()
+            )
+            if required - methods:
+                raise ValueError(
+                    f"Benchmark must implement async methods: {sorted(required - methods)}"
+                )
         prohibited_calls = {
             node.func.id
             for node in ast.walk(tree)

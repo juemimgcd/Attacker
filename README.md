@@ -4,6 +4,9 @@
 
 # Attacker
 
+主 Agent 委派多个独立自适应测试 Agent，并汇总其 Evidence：见
+[Subagent 测试模式](docs/subagents.md)。
+
 ### Evidence-driven security evaluation for AI Agents
 
 面向 AI Agent 的授权安全评测平台：用确定性策略、可追溯证据与可回放结果，持续验证 Agent 的安全边界。
@@ -46,6 +49,11 @@ AI Agent 的风险不只存在于最终回答中，还可能发生在工具调�
 | 证据与报告 | 从 SQL 事实源生成 JSON / Markdown 报告，Finding 可追溯到最短 Evidence 路径 |
 | Replay | 使用持久化快照重新评测，分类展示风险修复、新增、持续与回归 |
 | 装备目录 | 从本地目录加载经过 Manifest、JSON Schema、兼容性与 checksum 校验的 Provider、Skill、Case Pack 和 Benchmark |
+| 公开基准接入 | 通过独立 Python 环境运行 AgentDojo / InjecAgent，保留上游判定与证据，导入现有报告并对比复测结果 |
+
+公开基准使用独立的 `attacker benchmark` 入口，固定源码版本并分别统计场景目录、
+实际可评估结果与缺失证据，不计入下面的 82 条自建 Case。接入和复测命令见
+[Public Benchmarks](docs/public-benchmarks.md)。
 
 ### 当前状态
 
@@ -355,31 +363,24 @@ Equipment；Manifest/Checksum 快照只能证明声明和绑定，不能冒充�
 
 ## 装备扩展
 
-Attacker Core 拥有 Capability Contract、Policy Gate、预算、审批、Evidence、Finding、快照、Replay 与清理边界。Provider、Evaluator Skill 和 Case Pack 只能通过受控装备契约扩展这些能力，不能创建授权、绕过 Policy 或决定工作流路由。
-
-服务启动时会发现 `contracts/` 与 `equipment/` 下的本地装备，并验证：
-
-- Manifest 与 JSON Schema；
-- Attacker 版本兼容性；
-- Capability Contract 引用；
-- 入口文件与内容 checksum；
-- Provider Instance 的配置 revision 与 Secret 引用边界。
-
-常用命令：
+Equipment 以独立的 Benchmark 包扩展 Agent 评测：测试集、目标配置、接入代码、准备与
+清理、判分和指标定义都在包内。Core 负责包校验、版本冻结、并发和时间预算、阶段证据
+持久化及报告聚合。支持任务完成率、耗时、token、工具调用准确率和平均循环次数。
 
 ```bash
 uv run attacker equipment reload
-uv run attacker equipment list --type provider
-uv run attacker provider-instance healthcheck isolated-state-default
-uv run attacker skill dry-run state-poisoning-evaluator --payload '{"documents":[]}'
+uv run attacker equipment list
+uv run attacker equipment enable agent-task-benchmark --type benchmark
+uv run attacker equipment benchmark validate agent-task-benchmark --target development
+uv run attacker equipment scaffold benchmark my-benchmark
 ```
 
-完整契约、开发流程和安全边界见 [Equipment Development](docs/equipment-development.md)。
+示例目标是占位地址，运行评测前需要修改并注册实际配置。
+完整包结构、生命周期和统计口径见 [自定义 Benchmark](docs/equipment-benchmarks.md)。
 
-自定义 Agent 评测通过 Equipment Benchmark 组合任务集、目标 Provider Instance 和评估
-Skill，支持任务完成率、耗时、token、工具调用准确率、循环次数及自定义指标。
-运行入口为 `attacker equipment benchmark`，示例装备默认不启用；配置方式和统计口径见
-[自定义 Benchmark](docs/equipment-benchmarks.md)。
+旧安全评测继续使用 Capability Contract、Provider、Skill 和 CasePack 兼容链路，
+新 Benchmark 执行不依赖这些组件。旧装备命令使用 `equipment reload --legacy`；
+对应开发与信任边界见 [Equipment Development](docs/equipment-development.md)。
 
 ## 安全模型
 

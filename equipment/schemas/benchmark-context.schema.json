@@ -1,0 +1,81 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "operation_id": {
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "repetition": {
+      "minimum": 1,
+      "title": "Repetition",
+      "type": "integer"
+    },
+    "target_name": {
+      "title": "Target Name",
+      "type": "string"
+    },
+    "target_config": {
+      "additionalProperties": true,
+      "title": "Target Config",
+      "type": "object"
+    },
+    "allowed_hosts": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Hosts",
+      "type": "array"
+    },
+    "secret_names": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Secret Names",
+      "type": "array"
+    },
+    "workspace_path": {
+      "title": "Workspace Path",
+      "type": "string"
+    },
+    "timeout_seconds": {
+      "exclusiveMinimum": 0,
+      "title": "Timeout Seconds",
+      "type": "number"
+    },
+    "metric_names": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Metric Names",
+      "type": "array"
+    },
+    "test_principal_ref": {
+      "title": "Test Principal Ref",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "operation_id",
+    "task_id",
+    "repetition",
+    "target_name",
+    "target_config",
+    "allowed_hosts",
+    "secret_names",
+    "workspace_path",
+    "timeout_seconds",
+    "metric_names",
+    "test_principal_ref"
+  ],
+  "title": "BenchmarkContext",
+  "type": "object"
+}

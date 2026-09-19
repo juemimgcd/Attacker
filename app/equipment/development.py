@@ -122,7 +122,7 @@ async def contract_check(
     package = catalog.validate_path(package_path, package_type)
     if package.validation_status != "valid":
         raise ValueError("; ".join(package.validation_errors))
-    if package_type not in {PackageType.provider, PackageType.skill}:
+    if package_type not in {PackageType.provider, PackageType.skill, PackageType.benchmark}:
         return {
             "package_id": package.package_id,
             "package_type": package_type.value,
@@ -143,6 +143,13 @@ async def contract_check(
             "execute": ["self", "payload", "context"],
         }
     )
+    if package_type == PackageType.benchmark:
+        expected_parameters = {
+            "prepare": ["self", "task", "context"],
+            "execute": ["self", "task", "state", "context"],
+            "evaluate": ["self", "task", "observation", "context"],
+            "cleanup": ["self", "state", "context"],
+        }
     signatures = _inspect_method_signatures(
         Path(package.source_path),
         str(package.manifest["entrypoint"]),
@@ -157,6 +164,15 @@ async def contract_check(
             signature_errors.append(f"{name} parameters must be {expected}, received {actual}")
     if signature_errors:
         raise ValueError("; ".join(signature_errors))
+    if package_type == PackageType.benchmark:
+        return {
+            "package_id": package.package_id,
+            "package_type": "benchmark",
+            "valid": True,
+            "checked_methods": list(expected_parameters),
+            "method_signatures": signatures,
+            "external_calls": 0,
+        }
     known_contracts = {
         item.package_id
         for item in catalog.discover()
@@ -371,20 +387,16 @@ def _package_root(catalog: EquipmentCatalog, package_type: PackageType) -> Path:
 def _scaffold_files(package_type: PackageType, package_id: str) -> dict[str, str]:
     compatibility = "attacker_compatibility: {min_version: 0.1.0, max_version: 0.x}\n"
     if package_type == PackageType.benchmark:
-        return {
-            "benchmark.yaml": (
-                f"schema_version: benchmark.v1\nid: {package_id}\nname: {package_id}\n"
-                "version: 1.0.0\ndescription: Custom Agent task benchmark.\n"
-                + compatibility
-                + "casepack: {id: agent-task-examples, version: 1.0.0}\n"
-                "skill: {id: agent-task-evaluator, version: 1.0.0}\n"
-                "targets:\n  default:\n    bindings: {target: http-agent-dev}\n"
-                "execution: {concurrency: 1, repetitions: 1}\n"
-                "metrics:\n"
-                "  - {name: duration_ms, unit: ms, aggregation: mean, "
-                "description: Target invocation wall time.}\n"
-            )
+        template = Path(__file__).resolve().parents[2] / "equipment/benchmarks/agent-task-benchmark"
+        files = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in template.iterdir()
+            if path.is_file()
         }
+        manifest = yaml.safe_load(files["benchmark.yaml"])
+        manifest.update(id=package_id, name=package_id, version="1.0.0")
+        files["benchmark.yaml"] = yaml.safe_dump(manifest, sort_keys=False)
+        return files
     object_schema = json.dumps(
         {"type": "object", "properties": {}, "additionalProperties": False},
         indent=2,

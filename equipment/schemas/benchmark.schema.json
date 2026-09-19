@@ -24,18 +24,18 @@
           "title": "Timeout Seconds",
           "type": "number"
         },
-        "max_steps": {
-          "default": 20,
-          "maximum": 100,
-          "minimum": 1,
-          "title": "Max Steps",
-          "type": "integer"
+        "cleanup_timeout_seconds": {
+          "default": 30,
+          "exclusiveMinimum": 0,
+          "maximum": 120,
+          "title": "Cleanup Timeout Seconds",
+          "type": "number"
         },
-        "max_provider_calls": {
-          "default": 10,
-          "maximum": 1000,
-          "minimum": 1,
-          "title": "Max Provider Calls",
+        "max_output_bytes": {
+          "default": 1048576,
+          "maximum": 10485760,
+          "minimum": 1024,
+          "title": "Max Output Bytes",
           "type": "integer"
         }
       },
@@ -45,13 +45,24 @@
     "BenchmarkTarget": {
       "additionalProperties": false,
       "properties": {
-        "bindings": {
+        "config": {
+          "additionalProperties": true,
+          "title": "Config",
+          "type": "object"
+        },
+        "secret_refs": {
           "additionalProperties": {
             "type": "string"
           },
-          "minProperties": 1,
-          "title": "Bindings",
+          "title": "Secret Refs",
           "type": "object"
+        },
+        "allowed_hosts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Hosts",
+          "type": "array"
         },
         "parallel_safe": {
           "default": false,
@@ -59,9 +70,6 @@
           "type": "boolean"
         }
       },
-      "required": [
-        "bindings"
-      ],
       "title": "BenchmarkTarget",
       "type": "object"
     },
@@ -129,27 +137,6 @@
       "title": "MetricDefinition",
       "type": "object"
     },
-    "PackageReference": {
-      "additionalProperties": false,
-      "properties": {
-        "id": {
-          "pattern": "^[a-z0-9][a-z0-9.-]*$",
-          "title": "Id",
-          "type": "string"
-        },
-        "version": {
-          "minLength": 1,
-          "title": "Version",
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "version"
-      ],
-      "title": "PackageReference",
-      "type": "object"
-    },
     "TrustLevel": {
       "enum": [
         "trusted_builtin",
@@ -163,7 +150,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "benchmark.v1",
+      "const": "benchmark.v2",
       "title": "Schema Version",
       "type": "string"
     },
@@ -187,11 +174,21 @@
     "attacker_compatibility": {
       "$ref": "#/$defs/Compatibility"
     },
-    "casepack": {
-      "$ref": "#/$defs/PackageReference"
+    "entrypoint": {
+      "title": "Entrypoint",
+      "type": "string"
     },
-    "skill": {
-      "$ref": "#/$defs/PackageReference"
+    "tasks_file": {
+      "title": "Tasks File",
+      "type": "string"
+    },
+    "task_schema": {
+      "title": "Task Schema",
+      "type": "string"
+    },
+    "target_schema": {
+      "title": "Target Schema",
+      "type": "string"
     },
     "targets": {
       "additionalProperties": {
@@ -230,8 +227,10 @@
     "version",
     "description",
     "attacker_compatibility",
-    "casepack",
-    "skill",
+    "entrypoint",
+    "tasks_file",
+    "task_schema",
+    "target_schema",
     "targets"
   ],
   "title": "EquipmentBenchmarkManifest",

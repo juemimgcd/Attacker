@@ -1,4 +1,4 @@
-"""Equipment-owned benchmark composition and portable, evidence-backed metric contracts."""
+"""Self-contained Benchmark packages and their execution, observation and grading contracts."""
 
 from __future__ import annotations
 
@@ -12,11 +12,6 @@ from app.schemas.equipment_schema import Compatibility, TestPrincipal, TrustLeve
 
 class BenchmarkModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-
-class PackageReference(BenchmarkModel):
-    id: str = Field(pattern=r"^[a-z0-9][a-z0-9.-]*$")
-    version: str = Field(min_length=1)
 
 
 class BenchmarkTask(BenchmarkModel):
@@ -69,27 +64,82 @@ class BenchmarkEvaluation(BenchmarkModel):
 
 
 class BenchmarkTarget(BenchmarkModel):
-    bindings: dict[str, str] = Field(min_length=1)
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_refs: dict[str, str] = Field(default_factory=dict)
+    allowed_hosts: list[str] = Field(default_factory=list)
     parallel_safe: bool = False
+
+    @model_validator(mode="after")
+    def validate_secrets(self) -> BenchmarkTarget:
+        import re
+
+        from app.equipment.security import sensitive_values, validate_secret_reference
+
+        names = list(self.secret_refs)
+        if any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in names):
+            raise ValueError("secret names must be environment-safe identifiers")
+        if len({name.casefold() for name in names}) != len(names):
+            raise ValueError("secret names must be case-insensitively unique")
+        for reference in self.secret_refs.values():
+            validate_secret_reference(reference)
+        if sensitive_values(self.config):
+            raise ValueError("target config must not contain credentials; use secret_refs")
+        return self
 
 
 class BenchmarkExecution(BenchmarkModel):
     concurrency: int = Field(default=1, ge=1, le=32)
     repetitions: int = Field(default=1, ge=1, le=100)
     timeout_seconds: float = Field(default=120, gt=0, le=900)
-    max_steps: int = Field(default=20, ge=1, le=100)
-    max_provider_calls: int = Field(default=10, ge=1, le=1000)
+    cleanup_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    max_output_bytes: int = Field(default=1048576, ge=1024, le=10485760)
+
+
+class BenchmarkContext(BenchmarkModel):
+    run_id: str
+    operation_id: str
+    task_id: str
+    repetition: int = Field(ge=1)
+    target_name: str
+    target_config: dict[str, Any]
+    allowed_hosts: list[str]
+    secret_names: list[str]
+    workspace_path: str
+    timeout_seconds: float = Field(gt=0)
+    metric_names: list[str]
+    test_principal_ref: str
+
+
+class BenchmarkPreparation(BenchmarkModel):
+    ready: bool = True
+    reason: str | None = None
+    state: dict[str, Any] = Field(default_factory=dict)
+
+
+class BenchmarkObservation(BenchmarkModel):
+    status: Literal["success", "error", "timeout", "denied"]
+    output: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, MetricSample] = Field(default_factory=dict)
+    reason: str | None = None
+
+
+class BenchmarkCleanup(BenchmarkModel):
+    cleaned: bool
+    reason: str | None = None
 
 
 class EquipmentBenchmarkManifest(BenchmarkModel):
-    schema_version: Literal["benchmark.v1"]
+    schema_version: Literal["benchmark.v2"]
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9.-]*$")
     name: str
     version: str
     description: str
     attacker_compatibility: Compatibility
-    casepack: PackageReference
-    skill: PackageReference
+    entrypoint: str
+    tasks_file: str
+    task_schema: str
+    target_schema: str
     targets: dict[str, BenchmarkTarget] = Field(min_length=1)
     metrics: list[MetricDefinition] = Field(default_factory=list)
     execution: BenchmarkExecution = Field(default_factory=BenchmarkExecution)
@@ -105,7 +155,6 @@ class EquipmentBenchmarkManifest(BenchmarkModel):
 
 
 class BenchmarkRunPolicy(BenchmarkExecution):
-    approved_high_risk_capabilities: list[str] = Field(default_factory=list)
     test_principal_ref: str
 
 
@@ -113,7 +162,6 @@ class EquipmentBenchmarkRequest(BenchmarkModel):
     target: str
     version: str | None = None
     task_ids: list[str] | None = Field(default=None, min_length=1, max_length=10000)
-    approved_high_risk_capabilities: list[str] = Field(default_factory=list)
     test_principal: TestPrincipal = Field(
         default_factory=lambda: TestPrincipal(
             principal_id="benchmark", tenant_id="benchmark", session_scope_id="benchmark"

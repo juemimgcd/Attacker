@@ -49,9 +49,7 @@ async def validate_benchmark(
     from app.services.equipment_benchmark_service import EquipmentBenchmarkService
 
     try:
-        service = EquipmentBenchmarkService(
-            request.app.state.equipment_service, request.app.state.harness_service
-        )
+        service = EquipmentBenchmarkService(request.app.state.equipment_service)
         plan = await service.prepare(benchmark_id, payload)
         return {"valid": True, "task_count": len(plan["tasks"]), "external_calls": 0}
     except EQUIPMENT_ERRORS as exc:
@@ -65,9 +63,9 @@ async def run_benchmark(
     from app.services.equipment_benchmark_service import EquipmentBenchmarkService
 
     try:
-        return await EquipmentBenchmarkService(
-            request.app.state.equipment_service, request.app.state.harness_service
-        ).run(benchmark_id, payload)
+        return await EquipmentBenchmarkService(request.app.state.equipment_service).run(
+            benchmark_id, payload
+        )
     except EQUIPMENT_ERRORS as exc:
         _raise_http(exc)
 
@@ -215,7 +213,7 @@ async def get_equipment_metrics(request: Request) -> dict[str, Any]:
 @router.post("/reload")
 async def reload_equipment(request: Request) -> dict[str, Any]:
     try:
-        return await request.app.state.equipment_service.reload()
+        return await request.app.state.equipment_service.reload_benchmarks()
     except EQUIPMENT_ERRORS as exc:
         _raise_http(exc)
 

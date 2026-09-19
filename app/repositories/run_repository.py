@@ -25,6 +25,7 @@ from app.models import (
 )
 from app.repositories.event_store import EventStore
 from app.schemas.attack_sample_schema import BlackBoxCase
+from app.schemas.benchmark_schema import BenchmarkImportPolicy, LoadedBenchmarkDataset
 from app.schemas.equipment_benchmark_schema import (
     BenchmarkExecution,
     LoadedEquipmentBenchmarkDataset,
@@ -49,8 +50,8 @@ class RunRepository:
         self,
         *,
         target_snapshot: dict[str, Any],
-        dataset: LoadedDataset | LoadedEquipmentBenchmarkDataset,
-        budget: RunBudget | BenchmarkExecution,
+        dataset: LoadedDataset | LoadedBenchmarkDataset | LoadedEquipmentBenchmarkDataset,
+        budget: RunBudget | BenchmarkImportPolicy | BenchmarkExecution,
         mode: str = "deterministic",
         requested_run_id: str | None = None,
     ) -> str:
@@ -104,6 +105,83 @@ class RunRepository:
                 },
             )
         return run_id
+
+    async def record_benchmark_result(
+        self, *, run_id: str, sequence: int, case: dict[str, Any], observation: dict[str, Any]
+    ) -> None:
+        """Atomically link an imported upstream artifact to its normalized verdict."""
+        operation_id = f"{run_id}:benchmark:{case['id']}"
+        if await self.get_case_result(operation_id) is not None:
+            return
+        complete = observation["status"] == "evaluated"
+        control = case["kind"] == "control"
+        violation = complete and observation["attack_success"] is True
+        outcome = observation["status"]
+        if complete:
+            outcome = "violation" if violation else "safe"
+            if control and observation["utility"] is False:
+                outcome = "task_failed"
+        evaluation = {
+            "outcome": outcome,
+            "violated": violation,
+            "evidence_complete": complete,
+            "reason": observation["reason"],
+            "risk_level": "medium" if violation else "low",
+            "evaluator_type": "upstream-benchmark-v1",
+        }
+        result = {"case": case, "evaluation": evaluation, "benchmark": observation}
+        async with self.session_factory.begin() as session:
+            step = RunStepRecord(
+                id=str(uuid4()),
+                run_id=run_id,
+                case_id=case["id"],
+                operation_id=operation_id,
+                sequence=sequence,
+                status="completed",
+                outcome=outcome,
+                result_json=result,
+            )
+            session.add(step)
+            await session.flush()
+            artifact_id = await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                step_id=step.id,
+                operation_id=f"{operation_id}:artifact",
+                event_type="benchmark_artifact_imported",
+                evidence={"provenance": "upstream_artifacts", **observation},
+            )
+            evaluation_id = await self.events.append_in_session(
+                session,
+                run_id=run_id,
+                step_id=step.id,
+                operation_id=f"{operation_id}:evaluation",
+                event_type="evaluation_completed",
+                evidence={"evaluation": evaluation, "artifact_event_id": artifact_id},
+            )
+            if violation:
+                session.add(
+                    FindingRecord(
+                        id=str(uuid4()),
+                        run_id=run_id,
+                        step_id=step.id,
+                        event_id=evaluation_id,
+                        operation_id=f"{operation_id}:finding",
+                        case_id=case["id"],
+                        category=case["category"],
+                        risk_level="medium",
+                        outcome=outcome,
+                        reason=observation["reason"],
+                        fingerprint=finding_fingerprint(
+                            stage="benchmark",
+                            case_id=case["id"],
+                            category=case["category"],
+                            is_control=control,
+                        ),
+                        evidence_event_ids=[artifact_id, evaluation_id],
+                        is_control=control,
+                    )
+                )
 
     async def get_case_result(self, operation_id: str) -> dict[str, Any] | None:
         async with self.session_factory() as session:

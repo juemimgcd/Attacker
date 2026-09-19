@@ -7,7 +7,6 @@ from typing import Any
 from app.schemas.equipment_benchmark_schema import EquipmentBenchmarkRequest
 from app.services.equipment_benchmark_service import EquipmentBenchmarkService
 from app.services.equipment_service import EquipmentService
-from app.services.harness_service import HarnessService
 from app.services.report_service import ReportService
 
 
@@ -20,16 +19,13 @@ def add_parser(commands: Any) -> None:
         parser.add_argument("--target", required=True)
         parser.add_argument("--version")
         parser.add_argument("--task-id", action="append", dest="task_ids")
-        parser.add_argument("--approve-capability", action="append", default=[])
     report = actions.add_parser("report")
     report.add_argument("run_id")
     report.add_argument("--format", choices=["json", "markdown"], default="json")
 
 
-async def execute(
-    args: argparse.Namespace, equipment: EquipmentService, harness: HarnessService
-) -> Any:
-    service = EquipmentBenchmarkService(equipment, harness)
+async def execute(args: argparse.Namespace, equipment: EquipmentService) -> Any:
+    service = EquipmentBenchmarkService(equipment)
     if args.benchmark_action == "report":
         reports = ReportService(service.runs, equipment.repository)
         result = await reports.build_json(args.run_id)
@@ -44,7 +40,6 @@ async def execute(
         target=args.target,
         version=args.version,
         task_ids=args.task_ids,
-        approved_high_risk_capabilities=args.approve_capability,
     )
     if args.benchmark_action == "validate":
         plan = await service.prepare(args.benchmark_id, request)
@@ -52,9 +47,9 @@ async def execute(
             "valid": True,
             "benchmark": plan["manifest"].model_dump(mode="json"),
             "task_count": len(plan["tasks"]),
-            "bindings": {
-                name: binding.model_dump(mode="json") for name, binding in plan["bindings"].items()
-            },
+            "package_checksum": plan["package"]["checksum"],
+            "target": args.target,
+            "lifecycle": ["prepare", "execute", "evaluate", "cleanup"],
             "external_calls": 0,
         }
     # Core's CLI prints JSON once, preserving the complete report for redirection.
