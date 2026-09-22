@@ -5,7 +5,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.schemas.prompt_schema import PromptMessage, PromptTask
+from app.schemas.prompt_schema import ModelToolCall, PromptMessage, PromptTask
 
 
 class ProviderAttempt(BaseModel):
@@ -15,6 +15,9 @@ class ProviderAttempt(BaseModel):
     status: Literal["success", "error", "timeout"]
     latency_ms: int = Field(ge=0)
     error_category: str | None = Field(default=None, min_length=1)
+    input_tokens: int = Field(default=0, ge=0, strict=True)
+    output_tokens: int = Field(default=0, ge=0, strict=True)
+    estimated_cost: Decimal = Field(default=Decimal(0), ge=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_error_category(self) -> Self:
@@ -65,16 +68,21 @@ class ModelInferenceRequest(BaseModel):
     temperature: float = Field(default=0, ge=0, le=2)
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     max_physical_attempts: int = Field(default=1, ge=1, le=10)
+    tools: tuple[dict[str, Any], ...] = ()
+    max_output_tokens: int | None = Field(default=None, gt=0)
 
 
 class ModelInferenceResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    structured_output: dict[str, Any]
+    structured_output: dict[str, Any] = Field(default_factory=dict)
+    tool_calls: tuple[ModelToolCall, ...] = ()
     usage: ModelProviderUsage
 
     @model_validator(mode="after")
     def validate_successful_result(self) -> Self:
+        if self.tool_calls and self.structured_output:
+            raise ValueError("inference result cannot mix decisions and tool calls")
         if self.usage.attempts[-1].status != "success":
             raise ValueError("successful inference result requires a final successful attempt")
         if sum(attempt.status == "success" for attempt in self.usage.attempts) != 1:

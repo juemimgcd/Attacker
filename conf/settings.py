@@ -38,16 +38,6 @@ class DatabaseSettings(BaseSettings):
     connect_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
 
-# 定义 LangGraph checkpoint；本地默认 SQLite，生产使用 PostgreSQL URL。
-class CheckpointSettings(BaseSettings):
-    database_path: str = "data/langgraph_checkpoints.sqlite3"
-    url: str | None = None
-
-    @property
-    def connection_string(self) -> str:
-        return self.url or self.database_path
-
-
 # 定义 API 控制面的可选访问密钥。
 class SecuritySettings(BaseSettings):
     api_key: SecretStr | None = None
@@ -141,7 +131,6 @@ class Settings(BaseSettings):
     app: AppSettings = Field(default_factory=AppSettings)
     log: LogSettings = Field(default_factory=LogSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
-    checkpoint: CheckpointSettings = Field(default_factory=CheckpointSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
     secrets: SecretSettings = Field(default_factory=SecretSettings)
@@ -162,7 +151,6 @@ class Settings(BaseSettings):
 
         failures: list[str] = []
         database_url = self.database.url.lower()
-        checkpoint_url = self.checkpoint.connection_string.lower()
         api_key = self.security.api_key
         metrics_key = self.security.metrics_api_key
 
@@ -172,8 +160,6 @@ class Settings(BaseSettings):
             failures.append("DATABASE__URL must use PostgreSQL with the asyncpg driver")
         if self.database.auto_create_schema:
             failures.append("DATABASE__AUTO_CREATE_SCHEMA must be false; use Alembic")
-        if not checkpoint_url.startswith(("postgres://", "postgresql://")):
-            failures.append("CHECKPOINT__URL must use PostgreSQL")
         if api_key is None or len(api_key.get_secret_value()) < 32:
             failures.append("SECURITY__API_KEY must contain at least 32 characters")
         if self.observability.metrics_enabled and (

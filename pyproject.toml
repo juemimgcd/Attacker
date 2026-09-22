@@ -8,21 +8,17 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiosqlite>=0.22.0",
     "alembic>=1.18.0",
-    "anyio>=4.13.0",
+    "anyio>=4.14.2",
     "asyncpg>=0.30.0",
     "cryptography>=46.0.0",
     "fastapi>=0.136.1",
     "greenlet>=3.1.0",
     "httpx>=0.28.1",
     "idna>=3.15",
-    "langgraph>=1.2,<1.3",
-    "langgraph-checkpoint-postgres>=3.1.1,<4",
-    "langgraph-checkpoint-sqlite>=3.1.1,<4",
     "loguru>=0.7.3",
     "opentelemetry-exporter-otlp-proto-http>=1.39.0",
     "opentelemetry-sdk>=1.39.0",
     "prometheus-client>=0.22.0",
-    "psycopg[binary,pool]>=3.2.0",
     "pydantic>=2.13.4",
     "pydantic-evals>=1.0.0",
     "pydantic-settings>=2.14.2",
@@ -56,6 +52,8 @@ exclude = ["/.pytest-tmp", "/data", "/logs"]
 [tool.uv]
 package = true
 required-version = "==0.12.2"
+# Security floors for transitive HTTP clients used by model evaluation dependencies.
+constraint-dependencies = ["httpcore2>=2.10.0", "httpx2>=2.12.0"]
 
 [dependency-groups]
 dev = [

@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from sqlalchemy import select
 
+from app.agent.runtime import AgentRuntime
 from app.models import EvaluationRunRecord
 from app.repositories.adaptive_repository import AdaptiveRepository
 from app.repositories.run_repository import RunRepository
@@ -85,13 +85,12 @@ class FailingEquipmentService:
         raise RuntimeError("equipment credential=do-not-persist")
 
 
-class CapturingGraph:
+class CapturingLoop:
     def __init__(self) -> None:
         self.state: dict[str, Any] | None = None
 
-    async def ainvoke(self, state: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        self.state = state
-        return {}
+    async def run(self, runtime: AgentRuntime) -> None:
+        self.state = dict(runtime.state)
 
 
 class CapturingFinishGate:
@@ -176,9 +175,8 @@ async def test_repository_preserves_explicit_policy_allowlists(session_factory) 
         )
 
 
-async def test_adaptive_start_freezes_effective_case_allowlist_in_graph_state(
+async def test_adaptive_start_freezes_effective_case_allowlist_in_session_state(
     session_factory,
-    tmp_path,
 ) -> None:
     dataset = await GrayBoxDatasetLoader().load("samples/graybox/phase2.yaml")
     selected = dataset.cases[0]
@@ -187,26 +185,21 @@ async def test_adaptive_start_freezes_effective_case_allowlist_in_graph_state(
         allowed_capability_contracts={selected.capability_contract},
         allowed_provider_instance_refs={selected.provider_instance_ref},
     )
-    checkpoint_path = tmp_path / "adaptive-policy-checkpoints.sqlite3"
-    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
-        await checkpointer.setup()
-        service = AdaptiveRunService(
-            repository=AdaptiveRepository(session_factory),
-            checkpointer=checkpointer,
-        )
-        graph = CapturingGraph()
-        service.graph.graph = cast(Any, graph)
+    service = AdaptiveRunService(
+        repository=AdaptiveRepository(session_factory),
+    )
+    loop = CapturingLoop()
+    service._execute_runtime = loop.run
 
-        result = await service.start(GrayBoxRunRequest(target=_target(), policy=policy))
+    result = await service.start(GrayBoxRunRequest(target=_target(), policy=policy))
 
     assert result["status"] == "running"
-    assert graph.state is not None
-    assert graph.state["allowed_case_ids"] == [selected.id]
+    assert loop.state is not None
+    assert loop.state["allowed_case_ids"] == [selected.id]
 
 
 async def test_adaptive_finish_gate_uses_only_policy_allowed_cases(
     session_factory,
-    tmp_path,
 ) -> None:
     dataset = await GrayBoxDatasetLoader().load("samples/graybox/phase2.yaml")
     selected = dataset.cases[0]
@@ -215,19 +208,15 @@ async def test_adaptive_finish_gate_uses_only_policy_allowed_cases(
         allowed_capability_contracts={selected.capability_contract},
         allowed_provider_instance_refs={selected.provider_instance_ref},
     )
-    checkpoint_path = tmp_path / "adaptive-finish-checkpoints.sqlite3"
-    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
-        await checkpointer.setup()
-        service = AdaptiveRunService(
-            repository=AdaptiveRepository(session_factory),
-            checkpointer=checkpointer,
-        )
-        connector = CountingGrayBoxConnector()
-        finish_gate = CapturingFinishGate()
-        cast(Any, service.graph).connector = connector
-        cast(Any, service.graph).finish_gate_service = finish_gate
+    service = AdaptiveRunService(
+        repository=AdaptiveRepository(session_factory),
+    )
+    connector = CountingGrayBoxConnector()
+    finish_gate = CapturingFinishGate()
+    cast(Any, service).connector = connector
+    cast(Any, service).finish_gate_service = finish_gate
 
-        result = await service.start(GrayBoxRunRequest(target=_target(), policy=policy))
+    result = await service.start(GrayBoxRunRequest(target=_target(), policy=policy))
 
     assert result["status"] == "completed"
     assert connector.calls == 1
@@ -240,26 +229,21 @@ async def test_adaptive_finish_gate_uses_only_policy_allowed_cases(
 
 async def test_adaptive_finish_gate_excludes_cases_denied_by_equipment_policy(
     session_factory,
-    tmp_path,
 ) -> None:
-    checkpoint_path = tmp_path / "adaptive-empty-capability-checkpoints.sqlite3"
-    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
-        await checkpointer.setup()
-        service = AdaptiveRunService(
-            repository=AdaptiveRepository(session_factory),
-            checkpointer=checkpointer,
-        )
-        connector = CountingGrayBoxConnector()
-        finish_gate = CapturingFinishGate()
-        cast(Any, service.graph).connector = connector
-        cast(Any, service.graph).finish_gate_service = finish_gate
+    service = AdaptiveRunService(
+        repository=AdaptiveRepository(session_factory),
+    )
+    connector = CountingGrayBoxConnector()
+    finish_gate = CapturingFinishGate()
+    cast(Any, service).connector = connector
+    cast(Any, service).finish_gate_service = finish_gate
 
-        result = await service.start(
-            GrayBoxRunRequest(
-                target=_target(),
-                policy=AttackPolicy(allowed_capability_contracts=set()),
-            )
+    result = await service.start(
+        GrayBoxRunRequest(
+            target=_target(),
+            policy=AttackPolicy(allowed_capability_contracts=set()),
         )
+    )
 
     assert result["status"] == "completed"
     assert connector.calls == 0
@@ -353,24 +337,20 @@ async def test_deterministic_graybox_interruptions_are_terminalized(
     assert "do-not-persist" not in repr(rows)
 
 
-async def test_adaptive_start_failure_is_terminalized(session_factory, tmp_path) -> None:
+async def test_adaptive_start_failure_is_terminalized(session_factory) -> None:
     repository = AdaptiveRepository(session_factory)
-    checkpoint_path = tmp_path / "adaptive-checkpoints.sqlite3"
-    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
-        await checkpointer.setup()
-        service = AdaptiveRunService(
-            repository=repository,
-            checkpointer=checkpointer,
-            equipment_service=cast(Any, FailingEquipmentService()),
-        )
+    service = AdaptiveRunService(
+        repository=repository,
+        equipment_service=cast(Any, FailingEquipmentService()),
+    )
 
-        with pytest.raises(RuntimeError, match="do-not-persist"):
-            await service.start(
-                DeterministicGrayBoxRunRequest(
-                    target=_target(),
-                    case_ids=["gb_unauthorized_tool_attack"],
-                )
+    with pytest.raises(RuntimeError, match="do-not-persist"):
+        await service.start(
+            DeterministicGrayBoxRunRequest(
+                target=_target(),
+                case_ids=["gb_unauthorized_tool_attack"],
             )
+        )
 
     async with session_factory() as session:
         run = await session.scalar(select(EvaluationRunRecord))

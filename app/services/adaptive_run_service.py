@@ -7,17 +7,19 @@ import hashlib
 import json
 from asyncio import CancelledError, Lock
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 from weakref import WeakValueDictionary
 
-from langgraph.types import Command
 from loguru import logger
 
+from app.agent.loop import run_loop
+from app.agent.runtime import AgentRuntime, RunResources
+from app.agent.session import Session, load_session, save_session
+from app.agent.state import RunState
 from app.equipment.security import SecretBroker, validate_target_url
-from app.infrastructure.model_adapter import PlannerModelAdapter, create_planner_adapter
+from app.infrastructure.model_adapter import create_planner_adapter
 from app.repositories.adaptive_repository import AdaptiveRepository
 from app.schemas.graybox_schema import (
     AdaptiveControlAction,
@@ -32,14 +34,13 @@ from app.schemas.graybox_schema import (
     ToolPolicyDecision,
 )
 from app.schemas.target_schema import TargetConfig
+from app.services.finish_gate_service import FinishGateService
 from app.services.graybox_case_pipeline import GrayBoxCasePipeline
 from app.services.graybox_connector import GrayBoxConnector
 from app.services.policy_service import PolicyService
 from app.services.run_lifecycle import RunCreatedHook, notify_run_created
 from app.services.sample_loader import GrayBoxDatasetLoader
 from app.services.target_binding import canonical_target_binding, canonical_target_ref
-from app.workflows.attack_graph import AttackGraph
-from app.workflows.attack_state import AttackGraphState
 
 if TYPE_CHECKING:
     from app.services.equipment_service import EquipmentService
@@ -51,42 +52,7 @@ RESUME_CLAIM_RENEW_TIMEOUT_SECONDS = 10.0
 
 
 class ResumeClaimLostError(RuntimeError):
-    """The graph must stop because its cross-process resume claim cannot be renewed."""
-
-
-@dataclass
-class AdaptiveRuntime:
-    """仅驻留内存的 Target 与 Planner 运行时对象；Secret 不进入 checkpoint。"""
-
-    target: TargetConfig
-    cases: dict[str, Any]
-    policy: Any
-    planner: PlannerModelAdapter
-    started_at: datetime
-    secret_values: set[str]
-    target_runtime: Callable[[], AbstractAsyncContextManager[TargetConfig]]
-
-
-class AdaptiveRuntimeRegistry:
-    """按 run_id 保存当前进程可用的瞬时运行时，重启后必须重新构建。"""
-
-    def __init__(self) -> None:
-        self._runtimes: dict[str, AdaptiveRuntime] = {}
-
-    def add(self, run_id: str, runtime: AdaptiveRuntime) -> None:
-        self._runtimes[run_id] = runtime
-
-    def get(self, run_id: str) -> AdaptiveRuntime:
-        try:
-            return self._runtimes[run_id]
-        except KeyError as exc:
-            raise LookupError(f"runtime for run {run_id} is not loaded") from exc
-
-    def contains(self, run_id: str) -> bool:
-        return run_id in self._runtimes
-
-    def discard(self, run_id: str) -> None:
-        self._runtimes.pop(run_id, None)
+    """The loop must stop because its cross-process resume claim cannot be renewed."""
 
 
 async def _persist_interrupted_run(
@@ -116,26 +82,35 @@ async def _persist_interrupted_run(
 
 
 class AdaptiveRunService:
-    """冻结输入并驱动 LangGraph；SQL 记录事实，checkpoint 记录继续位置。"""
+    """冻结输入、驱动手写循环，并通过 SQL Session 恢复审批与 Planner 暂停。"""
 
     def __init__(
         self,
         *,
         repository: AdaptiveRepository,
-        checkpointer: Any,
         equipment_service: EquipmentService | None = None,
         secret_broker: SecretBroker | None = None,
+        connector: GrayBoxConnector | None = None,
+        finish_gate: FinishGateService | None = None,
     ) -> None:
         self.repository = repository
         self.equipment_service = equipment_service
         self.secret_broker = secret_broker
         self.loader = GrayBoxDatasetLoader()
-        self.registry = AdaptiveRuntimeRegistry()
+        self.connector = connector or GrayBoxConnector()
+        self.finish_gate_service = finish_gate or FinishGateService()
         self._resume_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
-        self.graph = AttackGraph(
-            repository=repository,
-            runtime_registry=self.registry,
-            checkpointer=checkpointer,
+
+    async def _execute_runtime(self, runtime: AgentRuntime) -> None:
+        await run_loop(runtime)
+
+    def _runtime(self, resources: RunResources, state: RunState) -> AgentRuntime:
+        return AgentRuntime(
+            self.repository,
+            resources,
+            state,
+            connector=self.connector,
+            finish_gate=self.finish_gate_service,
         )
 
     async def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
@@ -149,7 +124,7 @@ class AdaptiveRunService:
         on_run_created: RunCreatedHook | None = None,
         requested_run_id: str | None = None,
     ) -> dict[str, Any]:
-        """创建 Run、冻结绑定和候选宇宙，然后启动同一 thread 的图执行。"""
+        """创建 Run、冻结绑定和候选宇宙，然后启动该 Run 的手写循环。"""
 
         runtime_target = await self._prepare_target(request.target)
         return await self._start_materialized(
@@ -233,10 +208,8 @@ class AdaptiveRunService:
                         owner_token=owner_token,
                     )
         except ResumeClaimLostError:
-            self.registry.discard(run_id)
             raise
         except CancelledError as exc:
-            self.registry.discard(run_id)
             await _persist_interrupted_run(
                 self.repository,
                 run_id=run_id,
@@ -246,7 +219,6 @@ class AdaptiveRunService:
             )
             raise
         except Exception as exc:
-            self.registry.discard(run_id)
             await _persist_interrupted_run(
                 self.repository,
                 run_id=run_id,
@@ -275,27 +247,24 @@ class AdaptiveRunService:
             run_id=run_id,
             cases=dataset.cases,
         )
-        self.registry.add(
-            run_id,
-            AdaptiveRuntime(
-                target=request.target,
-                cases={case.id: case for case in dataset.cases},
-                policy=policy,
-                planner=create_planner_adapter(request.planner),
-                started_at=datetime.now(UTC),
-                secret_values=self._secret_values(request.target),
-                target_runtime=lambda: self._target_runtime(
-                    request.target,
-                    frozen=request.target.provider_instance_id is not None,
-                ),
+        resources = RunResources(
+            target=request.target,
+            cases={case.id: case for case in dataset.cases},
+            policy=policy,
+            planner=create_planner_adapter(request.planner),
+            started_at=datetime.now(UTC),
+            secret_values=self._secret_values(request.target),
+            target_runtime=lambda: self._target_runtime(
+                request.target,
+                frozen=request.target.provider_instance_id is not None,
             ),
         )
-        state: AttackGraphState = {
+        state: RunState = {
             "run_id": run_id,
             "goal_id": f"adaptive_graybox:{run_id}",
             "target_id": target_id,
             "thread_id": thread_id,
-            "checkpoint_ref": f"langgraph:{thread_id}",
+            "checkpoint_ref": f"session:{run_id}",
             "allowed_case_ids": [
                 case.id for case in dataset.cases if case.id in policy.allowed_case_ids
             ],
@@ -342,24 +311,19 @@ class AdaptiveRunService:
             "decision_history": [],
             "target_call_count": 0,
             "target_transport_failure_count": 0,
-            "graph_step_count": 0,
+            "step_count": 0,
             "last_state_fingerprint": None,
             "repeated_state_count": 0,
             "consecutive_no_gain_steps": 0,
-            "next_action": "initialize",
+            "next_action": "plan",
             "status": "running",
             "terminal_reason": None,
             "stop_reason": None,
             "recovery_pending": False,
         }
-        result = await self.graph.graph.ainvoke(
-            state,
-            config={
-                "configurable": {"thread_id": thread_id},
-                "recursion_limit": policy.max_steps * 10 + 20,
-            },
-        )
-        return await self._status(run_id, result)
+        await save_session(self.repository, state)
+        await self._execute_runtime(self._runtime(resources, state))
+        return await self._status(run_id)
 
     async def _freeze_equipment(
         self,
@@ -392,132 +356,15 @@ class AdaptiveRunService:
         target: TargetConfig | None = None,
         planner: PlannerConfig | None = None,
     ) -> dict[str, Any]:
-        """处理审批并恢复；手工凭据需重供，Provider 凭据按冻结 revision 短租。"""
-
-        run = await self.repository.get_run(run_id)
-        if run.status not in {"waiting_approval", "running"}:
-            raise ValueError("run is not waiting for approval")
-        if run.thread_id is None:
-            raise ValueError("run does not have a resumable thread")
-        checkpoint_id = await self._require_checkpoint_node(
-            thread_id=run.thread_id,
-            node_name="human_review",
+        return await self._resume(
+            run_id=run_id,
+            target=target,
+            planner=planner,
             approval_id=approval_id,
+            approved=approved,
+            resolved_by=resolved_by,
+            reason=reason,
         )
-        async with self._resume_locks.setdefault(run_id, Lock()):
-            run = await self.repository.get_run(run_id)
-            if run.status not in {"waiting_approval", "running"}:
-                raise ValueError("run is not waiting for approval")
-            if run.thread_id is None:
-                raise ValueError("run does not have a resumable thread")
-            current_checkpoint_id = await self._require_checkpoint_node(
-                thread_id=run.thread_id,
-                node_name="human_review",
-                approval_id=approval_id,
-            )
-            if current_checkpoint_id != checkpoint_id:
-                raise ValueError("run checkpoint advanced while the resume request was waiting")
-            claim_kind = "approval"
-            owner_token = await self.repository.acquire_resume_claim(
-                run_id=run_id,
-                claim_kind=claim_kind,
-                checkpoint_id=checkpoint_id,
-                lease_seconds=RESUME_CLAIM_LEASE_SECONDS,
-            )
-            try:
-                run = await self.repository.get_run(run_id)
-                if run.status not in {"waiting_approval", "running"}:
-                    raise ValueError("run is not waiting for approval")
-                if run.thread_id is None:
-                    raise ValueError("run does not have a resumable thread")
-                claimed_checkpoint_id = await self._require_checkpoint_node(
-                    thread_id=run.thread_id,
-                    node_name="human_review",
-                    approval_id=approval_id,
-                )
-                if claimed_checkpoint_id != checkpoint_id:
-                    raise ValueError("run checkpoint advanced before the resume claim was acquired")
-                await self._renew_resume_claim(
-                    run_id=run_id,
-                    claim_kind=claim_kind,
-                    checkpoint_id=checkpoint_id,
-                    owner_token=owner_token,
-                )
-                recovered = False
-                if not self.registry.contains(run_id):
-                    runtime_context = self._rehydrate_runtime(
-                        run_id=run_id,
-                        target_override=target,
-                        planner_override=planner,
-                    )
-                    recovered = True
-                else:
-                    runtime_context = nullcontext()
-                async with runtime_context:
-                    await self._renew_resume_claim(
-                        run_id=run_id,
-                        claim_kind=claim_kind,
-                        checkpoint_id=checkpoint_id,
-                        owner_token=owner_token,
-                    )
-                    approval = await self.repository.resolve_approval(
-                        run_id=run_id,
-                        approval_id=approval_id,
-                        approved=approved,
-                        resolved_by=resolved_by,
-                        reason=reason,
-                    )
-                    try:
-                        result = await self._invoke_with_resume_claim(
-                            run_id=run_id,
-                            claim_kind=claim_kind,
-                            checkpoint_id=checkpoint_id,
-                            owner_token=owner_token,
-                            operation=lambda: self.graph.graph.ainvoke(
-                                Command(
-                                    resume={
-                                        "approval_id": approval_id,
-                                        "status": approval["status"],
-                                        "recovered": recovered,
-                                    }
-                                ),
-                                config={
-                                    "configurable": {"thread_id": run.thread_id},
-                                    "recursion_limit": 1_000,
-                                },
-                            ),
-                        )
-                    except ResumeClaimLostError:
-                        self.registry.discard(run_id)
-                        raise
-                    except CancelledError as exc:
-                        self.registry.discard(run_id)
-                        await _persist_interrupted_run(
-                            self.repository,
-                            run_id=run_id,
-                            status="cancelled",
-                            operation_id="approval_resume",
-                            exc=exc,
-                        )
-                        raise
-                    except Exception as exc:
-                        self.registry.discard(run_id)
-                        await _persist_interrupted_run(
-                            self.repository,
-                            run_id=run_id,
-                            status="failed",
-                            operation_id="approval_resume",
-                            exc=exc,
-                        )
-                        raise
-                    return await self._status(run_id, result)
-            finally:
-                await self._release_resume_claim(
-                    run_id=run_id,
-                    claim_kind=claim_kind,
-                    checkpoint_id=checkpoint_id,
-                    owner_token=owner_token,
-                )
 
     async def resume_paused(
         self,
@@ -526,106 +373,112 @@ class AdaptiveRunService:
         target: TargetConfig | None = None,
         planner: PlannerConfig | None = None,
     ) -> dict[str, Any]:
+        return await self._resume(run_id=run_id, target=target, planner=planner)
+
+    async def _require_session(
+        self,
+        run_id: str,
+        approval_id: str | None,
+    ) -> Session:
         run = await self.repository.get_run(run_id)
-        if run.status not in {"paused", "running"}:
-            raise ValueError("run is not paused")
-        if run.thread_id is None:
-            raise ValueError("run does not have a resumable thread")
-        checkpoint_id = await self._require_checkpoint_node(
-            thread_id=run.thread_id,
-            node_name="planner_pause",
-        )
+        session = await load_session(self.repository, run_id)
+        expected = "waiting_approval" if approval_id is not None else "paused"
+        if run.status not in {expected, "running"} or session.state["status"] != expected:
+            raise ValueError(f"run session is not {expected}")
+        if approval_id is not None and session.state["approval_id"] != approval_id:
+            raise ValueError("approval does not match the current run session")
+        return session
+
+    async def _resume(
+        self,
+        *,
+        run_id: str,
+        target: TargetConfig | None,
+        planner: PlannerConfig | None,
+        approval_id: str | None = None,
+        approved: bool = False,
+        resolved_by: str = "",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        expected = await self._require_session(run_id, approval_id)
         async with self._resume_locks.setdefault(run_id, Lock()):
-            run = await self.repository.get_run(run_id)
-            if run.status not in {"paused", "running"}:
-                raise ValueError("run is not paused")
-            if run.thread_id is None:
-                raise ValueError("run does not have a resumable thread")
-            current_checkpoint_id = await self._require_checkpoint_node(
-                thread_id=run.thread_id,
-                node_name="planner_pause",
-            )
-            if current_checkpoint_id != checkpoint_id:
-                raise ValueError("run checkpoint advanced while the resume request was waiting")
-            claim_kind = "planner"
+            session = await self._require_session(run_id, approval_id)
+            if session.id != expected.id:
+                raise ValueError("run session advanced while the resume request was waiting")
+            claim_kind = "approval" if approval_id is not None else "planner"
             owner_token = await self.repository.acquire_resume_claim(
                 run_id=run_id,
                 claim_kind=claim_kind,
-                checkpoint_id=checkpoint_id,
+                checkpoint_id=session.id,
                 lease_seconds=RESUME_CLAIM_LEASE_SECONDS,
             )
             try:
-                run = await self.repository.get_run(run_id)
-                if run.status not in {"paused", "running"}:
-                    raise ValueError("run is not paused")
-                if run.thread_id is None:
-                    raise ValueError("run does not have a resumable thread")
-                claimed_checkpoint_id = await self._require_checkpoint_node(
-                    thread_id=run.thread_id,
-                    node_name="planner_pause",
-                )
-                if claimed_checkpoint_id != checkpoint_id:
-                    raise ValueError("run checkpoint advanced before the resume claim was acquired")
-                await self._renew_resume_claim(
+                claimed = await self._require_session(run_id, approval_id)
+                if claimed.id != session.id:
+                    raise ValueError("run session advanced before the resume claim was acquired")
+                # 凭据或绑定错误不消耗暂停点，调用者可以修正输入后重试。
+                resources = await self._rehydrate_runtime(
                     run_id=run_id,
-                    claim_kind=claim_kind,
-                    checkpoint_id=checkpoint_id,
-                    owner_token=owner_token,
+                    target_override=target,
+                    planner_override=planner,
                 )
-                recovered = False
-                if not self.registry.contains(run_id) or target is not None or planner is not None:
-                    runtime_context = self._rehydrate_runtime(
-                        run_id=run_id,
-                        target_override=target,
-                        planner_override=planner,
+
+                async def continue_run() -> dict[str, Any]:
+                    state = session.state
+                    if approval_id is not None:
+                        approval = await self.repository.resolve_approval(
+                            run_id=run_id,
+                            approval_id=approval_id,
+                            approved=approved,
+                            resolved_by=resolved_by,
+                            reason=reason,
+                        )
+                        state["approval_status"] = approval["status"]
+                    state.update(
+                        status="running",
+                        terminal_reason=None,
+                        stop_reason=None,
+                        recovery_pending=True,
+                        next_action="policy" if approval_id is not None else "plan",
                     )
-                    recovered = True
-                else:
-                    runtime_context = nullcontext()
-                async with runtime_context:
-                    try:
-                        result = await self._invoke_with_resume_claim(
-                            run_id=run_id,
-                            claim_kind=claim_kind,
-                            checkpoint_id=checkpoint_id,
-                            owner_token=owner_token,
-                            operation=lambda: self.graph.graph.ainvoke(
-                                Command(resume={"recovered": recovered}),
-                                config={
-                                    "configurable": {"thread_id": run.thread_id},
-                                    "recursion_limit": 1_000,
-                                },
-                            ),
-                        )
-                    except ResumeClaimLostError:
-                        self.registry.discard(run_id)
-                        raise
-                    except CancelledError as exc:
-                        self.registry.discard(run_id)
-                        await _persist_interrupted_run(
-                            self.repository,
-                            run_id=run_id,
-                            status="cancelled",
-                            operation_id="planner_resume",
-                            exc=exc,
-                        )
-                        raise
-                    except Exception as exc:
-                        self.registry.discard(run_id)
-                        await _persist_interrupted_run(
-                            self.repository,
-                            run_id=run_id,
-                            status="failed",
-                            operation_id="planner_resume",
-                            exc=exc,
-                        )
-                        raise
-                    return await self._status(run_id, result)
+                    # 在任何工具副作用之前消耗暂停点。崩溃后的 running Session 不自动重放。
+                    await save_session(self.repository, state, resumed_from=session.id)
+                    await self._execute_runtime(self._runtime(resources, state))
+                    return await self._status(run_id)
+
+                try:
+                    return await self._invoke_with_resume_claim(
+                        run_id=run_id,
+                        claim_kind=claim_kind,
+                        checkpoint_id=session.id,
+                        owner_token=owner_token,
+                        operation=continue_run,
+                    )
+                except ResumeClaimLostError:
+                    raise
+                except CancelledError as exc:
+                    await _persist_interrupted_run(
+                        self.repository,
+                        run_id=run_id,
+                        status="cancelled",
+                        operation_id=f"{claim_kind}_resume",
+                        exc=exc,
+                    )
+                    raise
+                except Exception as exc:
+                    await _persist_interrupted_run(
+                        self.repository,
+                        run_id=run_id,
+                        status="failed",
+                        operation_id=f"{claim_kind}_resume",
+                        exc=exc,
+                    )
+                    raise
             finally:
                 await self._release_resume_claim(
                     run_id=run_id,
                     claim_kind=claim_kind,
-                    checkpoint_id=checkpoint_id,
+                    checkpoint_id=session.id,
                     owner_token=owner_token,
                 )
 
@@ -662,23 +515,6 @@ class AdaptiveRunService:
             "status": current.status,
         }
 
-    async def _require_checkpoint_node(
-        self,
-        *,
-        thread_id: str,
-        node_name: str,
-        approval_id: str | None = None,
-    ) -> str:
-        snapshot = await self.graph.graph.aget_state({"configurable": {"thread_id": thread_id}})
-        if node_name not in snapshot.next:
-            raise ValueError(f"run checkpoint is not waiting at {node_name}")
-        if approval_id is not None and snapshot.values.get("approval_id") != approval_id:
-            raise ValueError("approval does not match the current run checkpoint")
-        checkpoint_id = snapshot.config.get("configurable", {}).get("checkpoint_id")
-        if not isinstance(checkpoint_id, str) or not checkpoint_id:
-            raise ValueError("run checkpoint does not expose a stable identity")
-        return checkpoint_id
-
     async def _invoke_with_resume_claim(
         self,
         *,
@@ -688,7 +524,7 @@ class AdaptiveRunService:
         owner_token: str,
         operation: Callable[[], Awaitable[dict[str, Any]]],
     ) -> dict[str, Any]:
-        """Renew the DB claim while graph I/O runs and cancel immediately if ownership is lost."""
+        """Renew the DB claim while loop I/O runs and cancel immediately if ownership is lost."""
 
         await self._renew_resume_claim(
             run_id=run_id,
@@ -725,7 +561,7 @@ class AdaptiveRunService:
                     operation_task.cancel()
                     await asyncio.gather(operation_task, return_exceptions=True)
                     raise ResumeClaimLostError(
-                        "adaptive resume claim was lost while the graph was running"
+                        "adaptive resume claim was lost while the loop was running"
                     ) from exc
         finally:
             if not operation_task.done():
@@ -779,15 +615,14 @@ class AdaptiveRunService:
                 error_type=type(exc).__name__,
             )
 
-    @asynccontextmanager
     async def _rehydrate_runtime(
         self,
         *,
         run_id: str,
         target_override: TargetConfig | None,
         planner_override: PlannerConfig | None,
-    ) -> AsyncIterator[None]:
-        """从 SQL 快照重建运行时，并在图调用期间短租 Provider Secret。"""
+    ) -> RunResources:
+        """从 SQL 快照重建运行时，并仅在工具执行期间短租 Provider Secret。"""
 
         snapshot = await self.repository.load_runtime_snapshot(run_id)
         stored_target = dict(snapshot["target"])
@@ -842,64 +677,53 @@ class AdaptiveRunService:
                     raise ValueError(f"resupplied planner {field} must match the original run")
             planner_config = planner_override
 
-        try:
-            runtime_target = await self._prepare_target(
-                target,
+        runtime_target = await self._prepare_target(
+            target,
+            frozen=stored_provider_id is not None,
+        )
+        if canonical_target_binding(runtime_target) != canonical_target_binding(stored_target):
+            raise ValueError("resupplied target must match the original non-secret behavior")
+
+        raw_cases = snapshot["dataset"].get("cases", [])
+        cases = [GrayBoxCase.model_validate(raw_case["inputs"]) for raw_case in raw_cases]
+        started_at = snapshot["started_at"]
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        resources = RunResources(
+            target=runtime_target,
+            cases={case.id: case for case in cases},
+            policy=AttackPolicy.model_validate(snapshot["policy"]),
+            planner=create_planner_adapter(planner_config),
+            started_at=started_at,
+            secret_values=self._secret_values(runtime_target),
+            target_runtime=lambda: self._target_runtime(
+                runtime_target,
                 frozen=stored_provider_id is not None,
-            )
-            if canonical_target_binding(runtime_target) != canonical_target_binding(stored_target):
-                raise ValueError("resupplied target must match the original non-secret behavior")
+            ),
+        )
+        await self.repository.append_event(
+            run_id=run_id,
+            operation_id=f"{run_id}:runtime_rehydrated",
+            event_type="runtime_rehydrated",
+            evidence={
+                "thread_id": snapshot["thread_id"],
+                "target_id": snapshot["target_id"],
+                "credentials_persisted": False,
+            },
+        )
+        return resources
 
-            raw_cases = snapshot["dataset"].get("cases", [])
-            cases = [GrayBoxCase.model_validate(raw_case["inputs"]) for raw_case in raw_cases]
-            started_at = snapshot["started_at"]
-            if started_at.tzinfo is None:
-                started_at = started_at.replace(tzinfo=UTC)
-            self.registry.add(
-                run_id,
-                AdaptiveRuntime(
-                    target=runtime_target,
-                    cases={case.id: case for case in cases},
-                    policy=AttackPolicy.model_validate(snapshot["policy"]),
-                    planner=create_planner_adapter(planner_config),
-                    started_at=started_at,
-                    secret_values=self._secret_values(runtime_target),
-                    target_runtime=lambda: self._target_runtime(
-                        runtime_target,
-                        frozen=stored_provider_id is not None,
-                    ),
-                ),
-            )
-            await self.repository.append_event(
-                run_id=run_id,
-                operation_id=f"{run_id}:runtime_rehydrated",
-                event_type="runtime_rehydrated",
-                evidence={
-                    "thread_id": snapshot["thread_id"],
-                    "target_id": snapshot["target_id"],
-                    "credentials_persisted": False,
-                },
-            )
-            yield
-        finally:
-            self.registry.discard(run_id)
-
-    async def _status(self, run_id: str, graph_result: dict[str, Any]) -> dict[str, Any]:
-        try:
-            run = await self.repository.get_run(run_id)
-            approvals = await self.repository.list_approvals(run_id)
-            return {
-                "run_id": run_id,
-                "thread_id": run.thread_id,
-                "status": run.status,
-                "terminal_reason": run.terminal_reason,
-                "pending_approvals": [
-                    approval for approval in approvals if approval["status"] == "pending"
-                ],
-                "interrupted": bool(graph_result.get("__interrupt__")),
-            }
-        finally:
-            self.registry.discard(run_id)
+    async def _status(self, run_id: str) -> dict[str, Any]:
+        run = await self.repository.get_run(run_id)
+        approvals = await self.repository.list_approvals(run_id)
+        return {
+            "run_id": run_id,
+            "thread_id": run.thread_id,
+            "status": run.status,
+            "terminal_reason": run.terminal_reason,
+            "pending_approvals": [item for item in approvals if item["status"] == "pending"],
+            "interrupted": run.status in {"waiting_approval", "paused"},
+        }
 
     @staticmethod
     def _secret_values(target: TargetConfig) -> set[str]:
@@ -926,6 +750,8 @@ class AdaptiveRunService:
             "temperature": planner.temperature,
             "max_physical_attempts": planner.max_physical_attempts,
             "prompt_template_version": planner.prompt_template_version,
+            "response_mode": planner.response_mode,
+            "context_budget": planner.context_budget.model_dump(mode="json"),
             "api_key_required": planner.api_key is not None,
         }
 

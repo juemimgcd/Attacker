@@ -11,7 +11,6 @@ x-attacker-environment: &attacker-environment
   DATABASE__POOL_SIZE: "10"
   DATABASE__MAX_OVERFLOW: "20"
   DATABASE__POOL_PRE_PING: "true"
-  CHECKPOINT__URL_FILE: /run/secrets/checkpoint_url
   SECURITY__API_KEY_FILE: /run/secrets/api_key
   SECURITY__METRICS_API_KEY_FILE: /run/secrets/metrics_api_key
   SECRETS__BACKEND: file
@@ -37,7 +36,6 @@ x-attacker-service: &attacker-service
   environment: *attacker-environment
   secrets:
     - database_url
-    - checkpoint_url
     - api_key
     - metrics_api_key
   volumes:
@@ -319,8 +317,6 @@ secrets:
     file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/postgres_password"
   database_url:
     file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/database_url"
-  checkpoint_url:
-    file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/checkpoint_url"
   api_key:
     file: "${ATTACKER_SECRETS_DIR:-./deploy/secrets}/api_key"
   metrics_api_key:

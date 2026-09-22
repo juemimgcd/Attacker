@@ -16,10 +16,12 @@ from app.schemas.adaptive_agent_schema import (
     PlannerReasonCode,
     UntrustedObservation,
 )
+from app.schemas.agent_schema import ContextBudget, HistorySummary
 from app.schemas.attack_sample_schema import CaseKind, RiskLevel
 from app.schemas.attack_state_schema import CoverageStatus, PlannerFallbackMode
 from app.schemas.execution_trace_schema import ExecutionTrace
 from app.schemas.judge_schema import TargetResponse
+from app.schemas.prompt_schema import ModelToolCall, ToolExchange
 from app.schemas.target_schema import TargetConfig
 
 
@@ -197,6 +199,8 @@ class PlannerContext(BaseModel):
         max_length=100,
     )
     remaining_steps: int
+    history_summary: HistorySummary = Field(default_factory=HistorySummary)
+    tool_history: tuple[ToolExchange, ...] = ()
 
 
 class PlannerDecision(BaseModel):
@@ -253,6 +257,7 @@ class PlannerResult(BaseModel):
     usage: PlannerUsage = Field(default_factory=PlannerUsage)
     backend: str
     call_snapshot: PlannerCallSnapshot
+    tool_call: ModelToolCall | None = None
 
 
 class PlannerConfig(BaseModel):
@@ -265,6 +270,8 @@ class PlannerConfig(BaseModel):
     temperature: float = Field(default=0, ge=0, le=2)
     max_physical_attempts: int = Field(default=1, ge=1, le=10)
     prompt_template_version: str = "1.0.0"
+    response_mode: Literal["json", "tools"] = "json"
+    context_budget: ContextBudget = Field(default_factory=ContextBudget)
 
     @model_validator(mode="after")
     def validate_http_config(self) -> "PlannerConfig":

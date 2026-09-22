@@ -1,9 +1,9 @@
-"""LangGraph 控制流 State；只保存恢复所需引用、摘要、计数和停止状态。"""
+"""手写 Agent 的可持久化运行状态；只保存恢复所需引用、摘要、计数和停止状态。"""
 
 from typing import TypedDict
 
 
-class AttackGraphState(TypedDict):
+class RunState(TypedDict):
     """完整 Evidence 与凭据不进入 State；它们分别留在 SQL 和运行时内存。"""
 
     run_id: str
@@ -51,7 +51,7 @@ class AttackGraphState(TypedDict):
     decision_history: list[str]
     target_call_count: int
     target_transport_failure_count: int
-    graph_step_count: int
+    step_count: int
     last_state_fingerprint: str | None
     repeated_state_count: int
     consecutive_no_gain_steps: int

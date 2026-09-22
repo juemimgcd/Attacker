@@ -1,4 +1,4 @@
-"""组装数据库、checkpoint、仓库、服务、装备和后台恢复任务。"""
+"""组装数据库、Session、仓库、服务、装备和后台恢复任务。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from app.equipment.catalog import EquipmentCatalog
 from app.equipment.metrics import EquipmentMetrics
 from app.equipment.runner import EquipmentRunner
 from app.equipment.security import SecretBroker
-from app.infrastructure.checkpoint import open_checkpointer
 from app.infrastructure.database import Database
 from app.infrastructure.secrets import build_secret_broker
 from app.repositories.adaptive_repository import AdaptiveRepository
@@ -43,7 +42,6 @@ class AppRuntime:
     """持有一次应用进程的已初始化组件，并安装到 FastAPI app.state。"""
 
     database: Database
-    checkpointer: Any
     run_repository: RunRepository
     adaptive_repository: AdaptiveRepository
     stateful_repository: StatefulRepository
@@ -77,110 +75,102 @@ async def create_runtime(
     secret_broker: SecretBroker | None = None,
     recover_cleanups: bool = True,
 ) -> AsyncIterator[AppRuntime]:
-    """按依赖顺序构建运行时，并在 finally 中关闭 checkpoint、任务与数据库。"""
+    """按依赖顺序构建运行时，并在 finally 中关闭任务与数据库。"""
 
     database = Database.from_settings(config.database)
     resolved_secret_broker = secret_broker or build_secret_broker(config.secrets)
     await database.initialize()
     try:
-        async with (
-            database.advisory_lock("attacker:checkpoint_schema_setup"),
-            open_checkpointer(config.checkpoint),
-        ):
-            pass
-        async with open_checkpointer(config.checkpoint, setup_schema=False) as checkpointer:
-            event_store = EventStore(database.session_factory)
-            run_repository = RunRepository(database.session_factory, event_store)
-            adaptive_repository = AdaptiveRepository(database.session_factory, event_store)
-            stateful_repository = StatefulRepository(database.session_factory, event_store)
-            equipment_repository = EquipmentRepository(database.session_factory, event_store)
-            job_repository = JobRepository(database.session_factory)
-            equipment_metrics = EquipmentMetrics()
-            equipment_service = EquipmentService(
-                equipment_repository,
-                EquipmentCatalog(config.equipment),
-                equipment_metrics,
-                secret_broker=resolved_secret_broker,
-            )
-            harness_service = HarnessService(
-                equipment_repository,
-                equipment_service,
-                EquipmentRunner(config.equipment, equipment_metrics),
-                config.equipment,
-                secret_broker=resolved_secret_broker,
-                metrics=equipment_metrics,
-            )
-            async with database.advisory_lock("attacker:equipment_catalog_reload"):
-                await equipment_service.reload()
-            if recover_cleanups:
-                async with database.advisory_lock("attacker:equipment_cleanup_recovery"):
-                    cleanup_recovery = await harness_service.recover_pending_cleanups()
-                    if cleanup_recovery:
-                        logger.info(
-                            "equipment cleanup recovery completed",
-                            lease_count=len(cleanup_recovery),
-                        )
-            run_service = DeterministicRunService(
-                run_repository,
-                equipment_service=equipment_service,
-            )
-            adaptive_run_service = AdaptiveRunService(
-                repository=adaptive_repository,
-                checkpointer=checkpointer,
-                equipment_service=equipment_service,
-                secret_broker=resolved_secret_broker,
-            )
-            deterministic_graybox_service = DeterministicGrayBoxRunService(
-                adaptive_repository,
-                equipment_service=equipment_service,
-            )
-            stateful_run_service = StatefulRunService(
-                stateful_repository,
-                equipment_service=equipment_service,
-            )
-            replay_service = ReplayService(
-                stateful_repository,
-                stateful_run_service,
-                run_service,
-                deterministic_graybox_service,
-                equipment_repository,
-                run_repository,
-            )
-            report_service = ReportService(run_repository, equipment_repository)
-            subagent_service = SubagentService(
-                SubagentRepository(database.session_factory), adaptive_run_service, report_service
-            )
-            job_application_service = JobApplicationService(
-                job_repository,
-                default_max_attempts=config.worker.max_attempts,
-            )
-            job_dispatcher = JobDispatcher(
-                deterministic_run_service=run_service,
-                adaptive_run_service=adaptive_run_service,
-                deterministic_graybox_service=deterministic_graybox_service,
-                stateful_run_service=stateful_run_service,
-            )
-            yield AppRuntime(
-                database=database,
-                checkpointer=checkpointer,
-                run_repository=run_repository,
-                adaptive_repository=adaptive_repository,
-                stateful_repository=stateful_repository,
-                equipment_repository=equipment_repository,
-                job_repository=job_repository,
-                equipment_metrics=equipment_metrics,
-                equipment_service=equipment_service,
-                harness_service=harness_service,
-                run_service=run_service,
-                adaptive_run_service=adaptive_run_service,
-                deterministic_graybox_service=deterministic_graybox_service,
-                stateful_run_service=stateful_run_service,
-                replay_service=replay_service,
-                report_service=report_service,
-                subagent_service=subagent_service,
-                job_application_service=job_application_service,
-                job_dispatcher=job_dispatcher,
-                catalog_ready=True,
-            )
+        event_store = EventStore(database.session_factory)
+        run_repository = RunRepository(database.session_factory, event_store)
+        adaptive_repository = AdaptiveRepository(database.session_factory, event_store)
+        stateful_repository = StatefulRepository(database.session_factory, event_store)
+        equipment_repository = EquipmentRepository(database.session_factory, event_store)
+        job_repository = JobRepository(database.session_factory)
+        equipment_metrics = EquipmentMetrics()
+        equipment_service = EquipmentService(
+            equipment_repository,
+            EquipmentCatalog(config.equipment),
+            equipment_metrics,
+            secret_broker=resolved_secret_broker,
+        )
+        harness_service = HarnessService(
+            equipment_repository,
+            equipment_service,
+            EquipmentRunner(config.equipment, equipment_metrics),
+            config.equipment,
+            secret_broker=resolved_secret_broker,
+            metrics=equipment_metrics,
+        )
+        async with database.advisory_lock("attacker:equipment_catalog_reload"):
+            await equipment_service.reload()
+        if recover_cleanups:
+            async with database.advisory_lock("attacker:equipment_cleanup_recovery"):
+                cleanup_recovery = await harness_service.recover_pending_cleanups()
+                if cleanup_recovery:
+                    logger.info(
+                        "equipment cleanup recovery completed",
+                        lease_count=len(cleanup_recovery),
+                    )
+        run_service = DeterministicRunService(
+            run_repository,
+            equipment_service=equipment_service,
+        )
+        adaptive_run_service = AdaptiveRunService(
+            repository=adaptive_repository,
+            equipment_service=equipment_service,
+            secret_broker=resolved_secret_broker,
+        )
+        deterministic_graybox_service = DeterministicGrayBoxRunService(
+            adaptive_repository,
+            equipment_service=equipment_service,
+        )
+        stateful_run_service = StatefulRunService(
+            stateful_repository,
+            equipment_service=equipment_service,
+        )
+        replay_service = ReplayService(
+            stateful_repository,
+            stateful_run_service,
+            run_service,
+            deterministic_graybox_service,
+            equipment_repository,
+            run_repository,
+        )
+        report_service = ReportService(run_repository, equipment_repository)
+        subagent_service = SubagentService(
+            SubagentRepository(database.session_factory), adaptive_run_service, report_service
+        )
+        job_application_service = JobApplicationService(
+            job_repository,
+            default_max_attempts=config.worker.max_attempts,
+        )
+        job_dispatcher = JobDispatcher(
+            deterministic_run_service=run_service,
+            adaptive_run_service=adaptive_run_service,
+            deterministic_graybox_service=deterministic_graybox_service,
+            stateful_run_service=stateful_run_service,
+        )
+        yield AppRuntime(
+            database=database,
+            run_repository=run_repository,
+            adaptive_repository=adaptive_repository,
+            stateful_repository=stateful_repository,
+            equipment_repository=equipment_repository,
+            job_repository=job_repository,
+            equipment_metrics=equipment_metrics,
+            equipment_service=equipment_service,
+            harness_service=harness_service,
+            run_service=run_service,
+            adaptive_run_service=adaptive_run_service,
+            deterministic_graybox_service=deterministic_graybox_service,
+            stateful_run_service=stateful_run_service,
+            replay_service=replay_service,
+            report_service=report_service,
+            subagent_service=subagent_service,
+            job_application_service=job_application_service,
+            job_dispatcher=job_dispatcher,
+            catalog_ready=True,
+        )
     finally:
         await database.dispose()

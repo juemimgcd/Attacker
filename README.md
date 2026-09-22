@@ -33,7 +33,7 @@ AI Agent 的风险不只存在于最终回答中，还可能发生在工具调�
 - **Deterministic by default**：固定数据集、策略和 Evaluator，可复现地执行回归评测；
 - **Bounded autonomy**：自适应 Planner 只能在批准的 Case、Tool、Target 和预算内行动；
 - **Replay for regression**：对修复前后的运行做 `fixed`、`new`、`persistent`、`regressed` 差异分析；
-- **Secrets stay ephemeral**：Target 凭据不会写入事件、报告或 checkpoint；手工凭据恢复时需重供，
+- **Secrets stay ephemeral**：Target 凭据不会写入事件、报告或 Session；手工凭据恢复时需重供，
   Provider Instance 凭据会按冻结 revision 重新短租。
 
 ## 功能概览
@@ -44,7 +44,7 @@ AI Agent 的风险不只存在于最终回答中，还可能发生在工具调�
 | 灰盒评测 | 使用脱敏 Tool/Policy/Approval Trace 验证工具越权、危险参数、审批绕过与 Planner 循环 |
 | 带状态评测 | 验证 Memory/RAG 污染、身份与命名空间隔离、checkpoint 恢复及测试数据清理 |
 | 确定性运行 | 固定 Dataset、Policy 和 Evaluator，不依赖 LLM 决策，适合作为安全回归基线 |
-| 自适应运行 | 由 LangGraph 编排下一步，所有候选仍受 allowlist、审批与硬预算约束 |
+| 自适应运行 | 由手写循环选择和执行下一步，所有候选仍受 allowlist、审批与硬预算约束 |
 | 人工审批 | 高风险步骤可暂停，审批后恢复同一工作流，并在执行前重新校验 Policy |
 | 证据与报告 | 从 SQL 事实源生成 JSON / Markdown 报告，Finding 可追溯到最短 Evidence 路径 |
 | Replay | 使用持久化快照重新评测，分类展示风险修复、新增、持续与回归 |
@@ -86,7 +86,7 @@ JSON 或 CSV 内容验证数据/指令边界；需要验证真实网页、邮件
 flowchart LR
     A["Target + Dataset + Policy"] --> B{"运行模式"}
     B -->|Deterministic| C["固定顺序执行"]
-    B -->|Adaptive| D["LangGraph Planner"]
+    B -->|Adaptive| D["Handwritten Agent Loop"]
     C --> E["Policy Gate"]
     D --> E
     E -->|允许| F["Target / Tool 调用"]
@@ -104,6 +104,10 @@ flowchart LR
 - **Deterministic Mode**：按照固定顺序执行已批准 Case，不调用 Planner 模型。适合回归评测、Evaluator 校准和自适应运行基线。
 - **Adaptive Mode**：Planner 只决定“下一条已批准 Case 是什么”。Core 负责 Prompt 约束、结构化响应验证、预算、Policy、审批、状态迁移和停止条件。
 
+Adaptive 内核将 手写 Loop、Context、Compaction 和 Tool 执行分开管理。默认兼容
+JSON Planner，也可启用 `execute_candidate` / `finish_run` 原生工具调用；输入按预算压缩，
+保留 SQL 事实来源与实际请求快照。代码入口及配置见 [Agent Runtime](docs/agent-runtime.md)。
+
 ### 三个观测阶段
 
 - **Black-box** 只依赖目标的输入与输出，不推断不可见的内部工具行为；
@@ -112,7 +116,7 @@ flowchart LR
 
 ### 事实与恢复分离
 
-SQLAlchemy 业务库保存“实际发生了什么”，LangGraph checkpoint 保存“工作流从哪里继续”。报告与 Replay 只读取业务事实；checkpoint 丢失不会改变已经落库的 Finding 与 Evidence。本地默认使用 SQLite，生产模式使用 PostgreSQL 保存业务事实与 checkpoint。
+SQLAlchemy 业务库统一保存业务事实与 Agent Session。手写循环在完整轮次和审批/暂停边界保存状态，恢复时重新校验策略；报告与 Replay 读取已提交事实。本地使用 SQLite，生产使用 PostgreSQL，不再配置独立 checkpoint 存储。旧 LangGraph 暂停记录不能直接续跑，迁移边界见 [Agent Runtime](docs/agent-runtime.md)。
 
 ## 快速开始
 
@@ -210,7 +214,6 @@ Copy-Item .env.example .env
 | 配置项 | 默认值 | 用途 |
 |---|---|---|
 | `DATABASE__URL` | `sqlite+aiosqlite:///data/attacker.sqlite3` | 业务与审计事实存储 |
-| `CHECKPOINT__DATABASE_PATH` | `data/langgraph_checkpoints.sqlite3` | LangGraph 控制流 checkpoint |
 | `SECURITY__API_KEY` | 空 | 设置后使用 `X-API-Key` 保护业务接口 |
 | `EQUIPMENT__ROOT` | `equipment` | 本地可写装备扩展目录；内置装备从安装包只读加载 |
 | `EQUIPMENT__ALLOW_UNTRUSTED` | `false` | 是否允许不受信任装备；默认关闭 |
@@ -330,7 +333,7 @@ POST /runs/{run_id}/control
 使用 `provider_instance_id` 的 Target 会按冻结的 package/config/Secret binding revision 重新短租
 凭据，调用方不需要知道其明文。
 恢复配置必须与 Run 快照匹配；运行时在每次图调用返回后即销毁，原始凭据不会留在进程注册表、
-数据库或 checkpoint 中。
+数据库或 Session 中。
 
 ### 报告与 Replay
 
@@ -394,7 +397,7 @@ uv run attacker equipment scaffold benchmark my-benchmark
   Provider 上限流式截断；
 - 高风险步骤未获批准时无法执行，批准后仍会再次经过 Policy Gate；
 - Planner 不能越过 Target、Case、Tool、预算与风险等级 allowlist；
-- Target 与 Planner 凭据在快照、事件、报告和 checkpoint 中均会脱敏；
+- Target 与 Planner 凭据在快照、事件、报告和 Session 中均会脱敏；
 - 状态测试数据按 run、tenant、user、session 与 namespace 隔离并留下清理证据；
 - 服务级 API Key 只是单密钥部署基础，不等同于完整用户身份体系或 RBAC；
 - 不受信任装备默认禁用；只有经过评审的 Linux 容器后端才可承载强隔离执行。
@@ -405,7 +408,7 @@ uv run attacker equipment scaffold benchmark my-benchmark
 
 当前版本在保留单 API Key、暂不引入身份平面的前提下，提供以下生产基础：
 
-- PostgreSQL SQLAlchemy 业务数据库和 PostgreSQL LangGraph checkpoint；
+- PostgreSQL SQLAlchemy 数据库统一保存业务事实与 Agent Session；
 - 基于数据库租约、`FOR UPDATE SKIP LOCKED`、心跳和过期恢复的持久化 Run Job；
 - `env:`（仅本地）、受限 `file:` 和 Vault KV v2 `vault:` Secret 引用；
 - request ID、结构化日志、Prometheus 指标、Alertmanager 路由、Loki 集中日志与可选 OpenTelemetry OTLP；
@@ -442,14 +445,14 @@ revision 重新短租，而不是要求调用方提交隐藏 Secret。
 ```text
 .
 ├── app/
+│   ├── agent/               # 手写 Loop、Tool、Context、Compact 与 SQL Session
 │   ├── api/                 # Run、Job、Approval、Replay、Metrics API
 │   ├── core/                # 应用生命周期
 │   ├── equipment/           # 装备发现、校验、执行与 Catalog
-│   ├── infrastructure/      # 数据库、Checkpoint、Secret 与模型适配
+│   ├── infrastructure/      # 数据库、Secret 与模型适配
 │   ├── repositories/        # SQL 事实存储与持久化 Job
 │   ├── services/            # 应用服务、Policy、Evaluator 与共享执行 Pipeline
-│   ├── static/              # 无构建步骤的同源控制台
-│   └── workflows/           # LangGraph 自适应工作流
+│   └── static/              # 同源控制台静态资源
 ├── contracts/               # 版本化 Capability Contract
 ├── equipment/               # 内置 Provider、Skill 与 Case Pack
 ├── samples/                 # 三阶段评测数据集

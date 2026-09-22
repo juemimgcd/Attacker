@@ -25,6 +25,9 @@ umask 077
 mkdir -p "${destination}"
 
 database_url="$(cat "${ATTACKER_DATABASE_URL_FILE}")"
+case "${database_url}" in
+    postgresql+asyncpg://*) database_url="postgresql://${database_url#postgresql+asyncpg://}" ;;
+esac
 pg_dump --dbname="${database_url}" --format=custom --no-owner --no-acl \
     --file="${destination}/database.dump"
 

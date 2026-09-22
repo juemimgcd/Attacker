@@ -1,7 +1,7 @@
 """受治理模型调用的 Prompt 模板、消息、快照和输出边界。"""
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # 区分 Planner 与 Model Judge，禁止共享配置和用量统计。
 class PromptTask(str, Enum):
     planner = "planner"
+    planner_tools = "planner_tools"
     model_judge = "model_judge"
 
 
@@ -20,6 +21,31 @@ class PromptLimits(BaseModel):
     max_fact_refs: int = Field(default=50, gt=0)
     max_chars_per_observation: int = Field(default=1000, gt=0)
     max_total_input_tokens: int = Field(default=4096, gt=0)
+
+
+class ModelToolFunction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    arguments: str
+
+
+class ModelToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1, max_length=256, pattern=r"^\S+$")
+    type: Literal["function"] = "function"
+    function: ModelToolFunction
+
+
+class ToolExchange(BaseModel):
+    """一个完整的调用/结果单元，压缩时不能拆开。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    call: ModelToolCall
+    result: str
+    result_ref: str
 
 
 # 调用方只能提交结构化摘要与事实引用，不能提交 system prompt。
@@ -76,6 +102,7 @@ class PromptBuildRequest(BaseModel):
     model_id: str = Field(min_length=1)
     provider_id: str = Field(min_length=1)
     model_parameters: dict[str, int | float | bool | None] = Field(default_factory=dict)
+    tool_history: tuple[ToolExchange, ...] = ()
 
 
 # 保存最终传给 Provider 的单条消息。
@@ -83,7 +110,9 @@ class PromptMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     role: str
-    content: str
+    content: str | None = None
+    tool_calls: tuple[ModelToolCall, ...] | None = None
+    tool_call_id: str | None = None
 
 
 # 保存可根据相同 Core 模板和规范化输入重建的模型调用快照。
@@ -103,6 +132,7 @@ class PromptSnapshot(BaseModel):
     provider_id: str
     model_parameters: dict[str, Any]
     input_checksum: str
+    tool_history: tuple[ToolExchange, ...] = ()
 
 
 # 同时返回快照和实际消息，便于调用前持久化并在恢复时重建。

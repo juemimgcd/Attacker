@@ -44,6 +44,7 @@ def test_builtin_catalog_discovery_is_deterministic_and_complete(tmp_path: Path)
         for package_type in PackageType
     }
     assert counts == {
+        PackageType.benchmark: 1,
         PackageType.provider: 3,
         PackageType.skill: 6,
         PackageType.casepack: 3,
