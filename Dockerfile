@@ -26,7 +26,11 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUTF8=1
 
-RUN groupadd --gid 10001 attacker \
+# Apply the Bookworm PCRE2 security fix even when the Python base layer is cached.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends --only-upgrade libpcre2-8-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 attacker \
     && useradd --uid 10001 --gid attacker --home-dir /app --shell /usr/sbin/nologin attacker
 
 WORKDIR /app

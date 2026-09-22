@@ -464,6 +464,18 @@ revision 重新短租，而不是要求调用方提交隐藏 Secret。
 └── tests/                   # API、Repository 与 Service 验证
 ```
 
+## 并发业务对话测试
+
+配置目标 API、模拟用户信息、成功标准和并发限制后，可批量执行多轮业务测试：
+
+```bash
+uv run attacker business-test validate --config docs/examples/business-tests.yaml
+uv run attacker business-test run --config my-suite.yaml --output data/business-tests
+```
+
+支持 JSON、SSE 和提交后读取 SSE，输出逐次证据、JSON 汇总与 JUnit 报告。
+接入边界、配置示例和 CI 用法见 [业务测试指南](docs/business-testing.md)。
+
 ## 开发与验证
 
 ```bash

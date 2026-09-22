@@ -1,0 +1,30 @@
+# 用此段替换 business-tests.yaml 的整个 target 配置；这是接入片段，不是完整测试集。
+# 接口路径参照当前本地 AtlasClaw 源码；base path、认证和合法 session key 仍需部署方确认。
+# AtlasClaw session 必须事先可用；通过 scenario.setup 准备，并在 body.session_key
+# 设置 target.session_setup_pointer: /session_key，或由接入适配器映射独立 session_id。
+target:
+  endpoint: http://127.0.0.1:8001/api/agent/run
+  credential_env: TARGET_API_KEY
+  body:
+    session_key: '${session_id}'
+    message: '${query}'
+    timeout_seconds: 120
+  session_response_pointer: /session_key
+  completion:
+    endpoint: http://127.0.0.1:8001/api/agent/runs
+    path_suffix: '/${target#/run_id}/stream'
+    method: GET
+    protocol: sse
+    credential_env: TARGET_API_KEY
+    timeout_seconds: 150
+    stream:
+      text_event: assistant
+      text_pointer: /text
+      text_mode: append
+      done_data: ''
+      terminal_event: lifecycle
+      terminal_pointer: /phase
+      success_values: [end]
+      failure_values: [error, timeout, aborted]
+      error_events: [error]
+  response_text_pointer: /text

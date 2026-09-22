@@ -49,6 +49,9 @@ def _parser() -> argparse.ArgumentParser:
     from app.subagent_cli import add_parser as add_subagent_parser
 
     add_subagent_parser(commands)
+    from app.business_test_cli import add_parser as add_business_parser
+
+    add_business_parser(commands)
     from app.trace_cli import add_parser as add_trace_parser
 
     add_trace_parser(commands)
@@ -132,9 +135,13 @@ async def _run(args: argparse.Namespace) -> Any:
 
         return await execute_subagents(args)
     if args.command == "benchmark":
-        from app.benchmark_cli import execute
+        from app.benchmark_cli import execute as execute_benchmark
 
-        return await execute(args)
+        return await execute_benchmark(args)
+    if args.command == "business-test":
+        from app.business_test_cli import execute as execute_business_test
+
+        return await execute_business_test(args)
     if args.command == "config" and args.config_command == "validate-production":
         settings.validate_production()
         return {"status": "valid", "profile": "production"}
@@ -330,6 +337,10 @@ def _run_migrate(revision: str) -> dict[str, str]:
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.command == "business-test":
+        from app.business_test_cli import run_cli
+
+        raise SystemExit(run_cli(args))
     try:
         result = asyncio.run(_run(args))
     except KeyboardInterrupt:

@@ -8,7 +8,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "aiosqlite>=0.22.0",
     "alembic>=1.18.0",
-    "anyio>=4.13.0",
+    "anyio>=4.14.2",
     "asyncpg>=0.30.0",
     "cryptography>=46.0.0",
     "fastapi>=0.136.1",
@@ -52,6 +52,8 @@ exclude = ["/.pytest-tmp", "/data", "/logs"]
 [tool.uv]
 package = true
 required-version = "==0.12.2"
+# Security floors for transitive HTTP clients used by model evaluation dependencies.
+constraint-dependencies = ["httpcore2>=2.10.0", "httpx2>=2.12.0"]
 
 [dependency-groups]
 dev = [
