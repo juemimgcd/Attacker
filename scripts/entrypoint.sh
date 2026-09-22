@@ -21,7 +21,6 @@ load_file_env() {
 }
 
 load_file_env DATABASE__URL
-load_file_env CHECKPOINT__URL
 load_file_env SECURITY__API_KEY
 load_file_env SECURITY__METRICS_API_KEY
 

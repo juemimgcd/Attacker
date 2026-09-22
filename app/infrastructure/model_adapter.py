@@ -1,16 +1,17 @@
 """把受治理 Prompt 与模型 Provider 适配为 Planner 和 Model Judge 窄接口。"""
 
 import hashlib
-from typing import Protocol
+from typing import Any, Protocol
 
-from pydantic import ValidationError
-
+from app.agent.context import prepare_context
+from app.agent.tools import resolve_tool_call, tool_schemas, validate_decision
 from app.infrastructure.model_provider import (
     ModelProvider,
     ModelProviderError,
     OpenAICompatibleModelProvider,
 )
 from app.schemas.adaptive_agent_schema import PlannerCallSnapshot, PlannerReasonCode
+from app.schemas.agent_schema import HistorySummary
 from app.schemas.graybox_schema import (
     PlannerConfig,
     PlannerContext,
@@ -33,8 +34,6 @@ from app.services.prompt_governance import (
     PromptGovernanceService,
     prompt_governance_service,
 )
-
-MAX_PLANNER_CONTEXT_BYTES = 131_072
 
 
 def _input_fact_refs(context: PlannerContext) -> tuple[str, ...]:
@@ -186,10 +185,10 @@ class OpenAICompatiblePlannerAdapter:
         operation_id: str = "planner",
         max_physical_attempts: int = 1,
     ) -> PlannerResult:
-        if len(context.model_dump_json().encode("utf-8")) > MAX_PLANNER_CONTEXT_BYTES:
-            raise ValueError("planner context exceeds the Core byte limit")
-        prompt = self._build_prompt(context)
-        call_snapshot = self._call_snapshot(prompt.snapshot)
+        schemas = tool_schemas() if self.config.response_mode == "tools" else ()
+        view = prepare_context(context, self.config, self.prompt_governance, schemas)
+        prompt = view.prompt
+        call_snapshot = self._call_snapshot(prompt.snapshot, schemas, view.context.history_summary)
         allowed_attempts = min(
             self.config.max_physical_attempts,
             max_physical_attempts,
@@ -206,7 +205,7 @@ class OpenAICompatiblePlannerAdapter:
             provider_result = await self.provider.infer(
                 ModelInferenceRequest(
                     operation_id=operation_id,
-                    task=PromptTask.planner,
+                    task=prompt.snapshot.task,
                     provider_id=self.provider_id,
                     model_id=self.model_id,
                     messages=tuple(prompt.messages),
@@ -214,6 +213,8 @@ class OpenAICompatiblePlannerAdapter:
                     temperature=self.config.temperature,
                     timeout_seconds=self.config.timeout_seconds,
                     max_physical_attempts=allowed_attempts,
+                    tools=schemas,
+                    max_output_tokens=self.config.context_budget.output_tokens,
                 )
             )
         except ModelProviderError as exc:
@@ -221,22 +222,25 @@ class OpenAICompatiblePlannerAdapter:
                 error_category=exc.error_category,
                 provider_id=self.provider_id,
                 model_id=self.model_id,
-                usage=PlannerUsage(
-                    physical_attempts=exc.physical_attempts,
-                    latency_ms=exc.latency_ms,
-                    attempt_errors=[
-                        attempt.error_category
-                        for attempt in exc.attempts
-                        if attempt.error_category is not None
-                    ],
-                ),
+                usage=self._planner_usage(exc.usage),
                 call_snapshot=call_snapshot,
             ) from exc
 
         usage = self._planner_usage(provider_result.usage)
         try:
-            decision = PlannerDecision.model_validate(provider_result.structured_output)
-        except ValidationError as exc:
+            if schemas:
+                if len(provider_result.tool_calls) != 1:
+                    raise ValueError("planner must request exactly one tool")
+                decision = resolve_tool_call(provider_result.tool_calls[0])
+            else:
+                if provider_result.tool_calls:
+                    raise ValueError("JSON planner unexpectedly requested tools")
+                decision = PlannerDecision.model_validate(provider_result.structured_output)
+            # The adapter checks the compacted view; the loop also checks every backend.
+            rejection = validate_decision(view.context, decision)
+            if rejection is not None:
+                raise ValueError(rejection)
+        except (ValueError, TypeError) as exc:
             raise PlannerAdapterError(
                 error_category="invalid_structured_response",
                 provider_id=self.provider_id,
@@ -249,58 +253,15 @@ class OpenAICompatiblePlannerAdapter:
             usage=usage,
             backend="openai_compatible",
             call_snapshot=call_snapshot,
+            tool_call=provider_result.tool_calls[0] if schemas else None,
         )
 
-    def _build_prompt(self, context: PlannerContext):
-        prompt = self.prompt_governance.build(
-            PromptBuildRequest(
-                task=PromptTask.planner,
-                profile_id="core.planner.v1",
-                caller_id="attacker_core",
-                schema_version="planner-decision-v1",
-                trusted_payload={
-                    "candidate_snapshot_id": context.candidate_snapshot_id,
-                    "candidates": [
-                        candidate.model_dump(mode="json") for candidate in context.candidates
-                    ],
-                    "coverage": {tag: status.value for tag, status in context.coverage.items()},
-                    "hypotheses": [
-                        hypothesis.model_dump(mode="json") for hypothesis in context.hypotheses
-                    ],
-                    "information_gains": [
-                        gain.model_dump(mode="json") for gain in context.information_gains
-                    ],
-                    "remaining_steps": context.remaining_steps,
-                },
-                observations=[
-                    ObservationSummary(
-                        observation_ref=observation.observation_ref,
-                        summary=observation.summary,
-                    )
-                    for observation in context.observations
-                ],
-                fact_refs=list(
-                    dict.fromkeys(
-                        [
-                            context.candidate_snapshot_id,
-                            *context.evidence_refs,
-                            *context.finding_refs,
-                            *context.hypothesis_refs,
-                            *context.coverage_refs,
-                            *context.information_gain_refs,
-                        ]
-                    )
-                ),
-                model_id=self.model_id,
-                provider_id=self.provider_id,
-                model_parameters={"temperature": self.config.temperature},
-            )
-        )
-        if prompt.snapshot.template_version != self.config.prompt_template_version:
-            raise ValueError("planner prompt template version is not approved")
-        return prompt
-
-    def _call_snapshot(self, snapshot: PromptSnapshot) -> PlannerCallSnapshot:
+    def _call_snapshot(
+        self,
+        snapshot: PromptSnapshot,
+        schemas: tuple[dict[str, Any], ...] = (),
+        summary: HistorySummary | None = None,
+    ) -> PlannerCallSnapshot:
         return PlannerCallSnapshot(
             provider_id=self.provider_id,
             prompt_template_version=snapshot.template_version,
@@ -308,9 +269,16 @@ class OpenAICompatiblePlannerAdapter:
             prompt_profile_id=snapshot.profile_id,
             input_checksum=snapshot.input_checksum,
             model_id=self.model_id,
-            model_parameters={"temperature": self.config.temperature},
+            model_parameters={
+                "temperature": self.config.temperature,
+                "max_tokens": self.config.context_budget.output_tokens,
+                "response_mode": self.config.response_mode,
+            },
             schema_version="planner-decision-v2",
             input_fact_refs=tuple(snapshot.fact_refs),
+            context_snapshot=snapshot,
+            tool_schemas=schemas,
+            history_summary=summary,
         )
 
     @staticmethod

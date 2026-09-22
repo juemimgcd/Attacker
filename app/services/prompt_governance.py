@@ -11,6 +11,7 @@ from app.schemas.prompt_schema import (
     GovernedObservation,
     PromptBuildRequest,
     PromptBuildResult,
+    PromptLimits,
     PromptMessage,
     PromptProfile,
     PromptSnapshot,
@@ -80,7 +81,18 @@ _CORE_TEMPLATES = {
         filename="model_judge_v1.txt",
         checksum="2e6285d2613423d62d88c6f8d8599c96f7e1d31c356bfbf1be41ebbc39c5bf8b",
     ),
+    PromptTask.planner_tools: CorePromptTemplate(
+        task=PromptTask.planner_tools,
+        name="core_planner_tools",
+        version="1.0.0",
+        filename="planner_tools_v1.txt",
+        checksum="09c70c5e9a907c020462fe631c360c603f9bfa29671305ab11a8f08eeb13e3ea",
+    ),
 }
+
+
+class PromptBudgetError(ValueError):
+    """只表示可通过缩小输入视图处理的预算不足，不包含模板/引用错误。"""
 
 
 # 只从 Core 模板和已批准 Profile 构建模型输入，调用方无法覆盖 system prompt。
@@ -92,6 +104,12 @@ class PromptGovernanceService:
         self._profiles = {profile.profile_id: profile for profile in selected_profiles}
         if len(self._profiles) != len(selected_profiles):
             raise ValueError("prompt profile IDs must be unique")
+
+    def get_limits(self, profile_id: str) -> PromptLimits:
+        profile = self._profiles.get(profile_id)
+        if profile is None or not profile.approved:
+            raise ValueError("unknown or unapproved prompt profile")
+        return profile.limits.model_copy(deep=True)
 
     # 对输入脱敏并执行条数、长度和保守 token 上限后生成可重建快照。
     def build(self, request: PromptBuildRequest) -> PromptBuildResult:
@@ -120,6 +138,10 @@ class PromptGovernanceService:
             "provider_id": request.provider_id,
             "model_parameters": request.model_parameters,
         }
+        if request.tool_history:
+            if request.task not in {PromptTask.planner, PromptTask.planner_tools}:
+                raise ValueError("tool history requires a planner profile")
+            snapshot_data["tool_history"] = request.tool_history
         input_checksum = self._checksum_json(snapshot_data)
         snapshot = PromptSnapshot(
             **snapshot_data,
@@ -142,6 +164,8 @@ class PromptGovernanceService:
             schema_version=snapshot.schema_version,
         )
         snapshot_data = snapshot.model_dump(exclude={"input_checksum"})
+        if not snapshot.tool_history:
+            snapshot_data.pop("tool_history")
         if self._checksum_json(snapshot_data) != snapshot.input_checksum:
             raise ValueError("prompt snapshot input checksum mismatch")
         system_prompt = self._load_core_template(profile)
@@ -195,7 +219,7 @@ class PromptGovernanceService:
         profile: PromptProfile,
     ) -> list[GovernedObservation]:
         if len(request.observations) > profile.limits.max_observations:
-            raise ValueError("observation count exceeds prompt profile limit")
+            raise PromptBudgetError("observation count exceeds prompt profile limit")
 
         governed: list[GovernedObservation] = []
         seen_refs: set[str] = set()
@@ -222,7 +246,7 @@ class PromptGovernanceService:
         profile: PromptProfile,
     ) -> list[str]:
         if len(fact_refs) > profile.limits.max_fact_refs:
-            raise ValueError("fact reference count exceeds prompt profile limit")
+            raise PromptBudgetError("fact reference count exceeds prompt profile limit")
         if len(fact_refs) != len(set(fact_refs)):
             raise ValueError("fact references must be unique")
         for fact_ref in fact_refs:
@@ -250,8 +274,22 @@ class PromptGovernanceService:
                 observation.model_dump() for observation in snapshot.observations
             ],
         }
+        if snapshot.task == PromptTask.planner and snapshot.tool_history:
+            user_payload["tool_history"] = [
+                turn.model_dump(mode="json") for turn in snapshot.tool_history
+            ]
+        messages = [PromptMessage(role="system", content=system_prompt)]
+        for exchange in snapshot.tool_history if snapshot.task == PromptTask.planner_tools else ():
+            messages.extend(
+                [
+                    PromptMessage(role="assistant", tool_calls=(exchange.call,)),
+                    PromptMessage(
+                        role="tool", content=exchange.result, tool_call_id=exchange.call.id
+                    ),
+                ]
+            )
         return [
-            PromptMessage(role="system", content=system_prompt),
+            *messages,
             PromptMessage(
                 role="user",
                 content=json.dumps(
@@ -269,9 +307,14 @@ class PromptGovernanceService:
         messages: list[PromptMessage],
         profile: PromptProfile,
     ) -> None:
-        input_bytes = sum(len(message.content.encode("utf-8")) for message in messages)
+        input_bytes = sum(len((message.content or "").encode("utf-8")) for message in messages)
+        input_bytes += sum(
+            len(call.model_dump_json().encode("utf-8"))
+            for message in messages
+            for call in (message.tool_calls or ())
+        )
         if input_bytes > profile.limits.max_total_input_tokens:
-            raise ValueError("prompt input exceeds conservative token limit")
+            raise PromptBudgetError("prompt input exceeds conservative token limit")
 
     def _checksum_json(self, value: object) -> str:
         payload = json.dumps(
@@ -285,6 +328,17 @@ class PromptGovernanceService:
 
     def _default_profiles(self) -> list[PromptProfile]:
         return [
+            PromptProfile(
+                profile_id="core.planner.tools.v1",
+                task=PromptTask.planner_tools,
+                template_name=_CORE_TEMPLATES[PromptTask.planner_tools].name,
+                template_version=_CORE_TEMPLATES[PromptTask.planner_tools].version,
+                template_checksum=_CORE_TEMPLATES[PromptTask.planner_tools].checksum,
+                approved=True,
+                allowed_callers={"attacker_core"},
+                compatible_schema_versions={"planner-decision-v1"},
+                limits=PromptLimits(max_total_input_tokens=8192),
+            ),
             PromptProfile(
                 profile_id="core.planner.v1",
                 task=PromptTask.planner,

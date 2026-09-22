@@ -1,7 +1,9 @@
 """自适应 Run 的 SQL 事实仓库，持久化候选、审批、执行、Evaluation 与 Finding。"""
 
+import json
 import secrets
 from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import uuid4
@@ -35,6 +37,7 @@ from app.schemas.adaptive_agent_schema import (
     PlannerCallSnapshot,
     UntrustedObservation,
 )
+from app.schemas.agent_schema import HistorySummary
 from app.schemas.attack_state_schema import CoverageStatus
 from app.schemas.graybox_schema import (
     AdaptiveControlAction,
@@ -50,6 +53,7 @@ from app.schemas.graybox_schema import (
     TraceAdapterResult,
 )
 from app.schemas.judge_schema import TargetResponse
+from app.schemas.prompt_schema import ModelToolCall, ToolExchange
 from app.services.finding_fingerprint import finding_fingerprint
 
 
@@ -241,6 +245,90 @@ class AdaptiveRepository:
             evidence=evidence,
             step_id=step_id,
         )
+
+    async def save_agent_session(
+        self,
+        *,
+        state: dict[str, Any],
+        resumed_from: str | None = None,
+    ) -> str:
+        """暂停/恢复的 Run 状态、转换事件和 Session 必须在同一事务内提交。"""
+
+        run_id = str(state["run_id"])
+        status = state["status"]
+        async with self.session_factory.begin() as session:
+            run = await session.get(EvaluationRunRecord, run_id, with_for_update=True)
+            if run is None:
+                raise LookupError(f"run {run_id} not found")
+            if status in {"running", "paused", "waiting_approval"} and run.status in {
+                "completed",
+                "failed",
+                "aborted",
+                "cancelled",
+            }:
+                raise ValueError(f"terminal run {run_id} cannot save an active Session")
+
+            if status == "waiting_approval":
+                run.status = status
+                run.terminal_reason = None
+                await self._append_event(
+                    session,
+                    run_id=run_id,
+                    operation_id=f"{run_id}:approval_wait:{state['approval_id']}",
+                    event_type="run_waiting_approval",
+                    evidence={
+                        "approval_id": state["approval_id"],
+                        "checkpoint_ref": state["checkpoint_ref"],
+                    },
+                )
+            elif status == "paused":
+                run.status = status
+                run.terminal_reason = state["terminal_reason"]
+                await self._append_event(
+                    session,
+                    run_id=run_id,
+                    operation_id=f"{run_id}:planner:{state['planner_call_count']}:paused",
+                    event_type="run_paused",
+                    evidence={
+                        "reason": state["terminal_reason"],
+                        "checkpoint_ref": state["checkpoint_ref"],
+                        "stop_reason": None,
+                    },
+                )
+            elif resumed_from is not None:
+                if status != "running":
+                    raise ValueError("resumed Session must be running")
+                run.status = status
+                run.terminal_reason = None
+                await self._append_event(
+                    session,
+                    run_id=run_id,
+                    operation_id=f"{run_id}:session:{resumed_from}:resumed",
+                    event_type="approval_resumed"
+                    if state["next_action"] == "policy"
+                    else "planner_resumed",
+                    evidence={"status": status},
+                )
+            return await self._append_event(
+                session,
+                run_id=run_id,
+                operation_id=f"{run_id}:session:{uuid4()}",
+                event_type="agent_session_saved",
+                evidence={"version": 1, "state": state},
+            )
+
+    async def load_agent_session(self, run_id: str) -> tuple[str, dict[str, Any]] | None:
+        async with self.session_factory() as session:
+            event = await session.scalar(
+                select(EventRecord)
+                .where(
+                    EventRecord.run_id == run_id,
+                    EventRecord.event_type == "agent_session_saved",
+                )
+                .order_by(EventRecord.sequence.desc())
+                .limit(1)
+            )
+            return (event.id, event.evidence_json) if event is not None else None
 
     async def initialize_hypotheses(
         self,
@@ -574,7 +662,7 @@ class AdaptiveRepository:
             "coverage": coverage,
             "coverage_ref_by_tag": coverage_refs,
             "coverage_refs": [coverage_refs[tag] for tag in sorted(coverage_refs)],
-            "observations": observations[-20:],
+            "observations": observations,
             "observation_refs": [item.observation_ref for item in observations],
             "finding_refs": [finding.id for finding in findings],
             "finding_fingerprints": sorted(
@@ -583,7 +671,70 @@ class AdaptiveRepository:
             "evidence_gaps": evidence_gaps,
             "information_gain_refs": information_gain_refs,
             "information_gains": information_gains,
+            "tool_history": self._tool_history(events),
+            "history_summary": self._history_summary(events),
         }
+
+    @staticmethod
+    def _tool_history(events: Sequence[EventRecord]) -> tuple[ToolExchange, ...]:
+        """只从已提交结果配对模型工具调用；审批中和未知执行状态不虚构成功。"""
+
+        by_event: dict[str, ModelToolCall] = {}
+        by_operation: dict[str, ModelToolCall] = {}
+        bound: dict[str, ModelToolCall] = {}
+        history: list[ToolExchange] = []
+        for event in events:
+            evidence = event.evidence_json
+            call = None
+            result = None
+            if event.event_type in {"planner_decided", "planner_rejected"}:
+                raw = evidence.get("tool_call")
+                if raw is not None:
+                    call = ModelToolCall.model_validate(raw)
+                    by_event[event.id] = call
+                    by_operation[event.operation_id] = call
+                    if event.event_type == "planner_rejected":
+                        result = {"status": "rejected", "result_ref": event.id}
+            elif event.event_type == "decision_bound":
+                if evidence.get("decision_source") != "deterministic_fallback":
+                    call = by_event.get(str(evidence.get("planner_event_id")))
+                    if call is not None:
+                        bound[event.operation_id.removesuffix(":decision")] = call
+            elif event.event_type == "case_persisted":
+                call = bound.get(event.operation_id.removesuffix(":persisted"))
+                result = {
+                    "case_id": evidence["case_id"],
+                    "outcome": evidence["outcome"],
+                    "result_ref": event.id,
+                    "finding_ref": evidence.get("finding_id"),
+                }
+            elif event.event_type == "planner_finish_rejected":
+                index = event.operation_id.rsplit(":", 1)[-1]
+                call = by_operation.get(f"{event.run_id}:planner:{index}")
+                result = {
+                    "status": "rejected",
+                    "reason_code": evidence["reason_code"],
+                    "result_ref": event.id,
+                }
+            if call is not None and result is not None:
+                history.append(
+                    ToolExchange(
+                        call=call,
+                        result=json.dumps(result, ensure_ascii=False, sort_keys=True),
+                        result_ref=event.id,
+                    )
+                )
+        return tuple(history)
+
+    @staticmethod
+    def _history_summary(events: Sequence[EventRecord]) -> HistorySummary:
+        for event in reversed(events):
+            if event.event_type not in {"planner_decided", "planner_rejected", "planner_error"}:
+                continue
+            snapshot = event.evidence_json.get("call_snapshot") or {}
+            if snapshot.get("history_summary") is not None:
+                return HistorySummary.model_validate(snapshot["history_summary"])
+        return HistorySummary()
 
     async def validate_planner_references(
         self,
@@ -616,12 +767,21 @@ class AdaptiveRepository:
         missing_evidence = sorted(set(evidence_refs) - persisted_evidence_refs)
         if missing_evidence:
             return f"planner referenced non-persisted evidence: {', '.join(missing_evidence)}"
-        observation_refs = {
-            event.id for event in event_rows if event.event_type == "observation_normalized"
+        # 工具结果也是已提交事实，包括拒绝/跳过；它们不等同于漏洞 Finding。
+        fact_refs = {
+            event.id
+            for event in event_rows
+            if event.event_type
+            in {
+                "observation_normalized",
+                "case_persisted",
+                "planner_rejected",
+                "planner_finish_rejected",
+            }
         }
         finding_refs = {finding.id for finding in finding_rows}
-        if not set(evidence_refs) & (observation_refs | finding_refs):
-            return "planner proposal must cite a persisted observation or finding"
+        if not set(evidence_refs) & (fact_refs | finding_refs):
+            return "planner proposal must cite a persisted observation, finding or tool result"
         missing_hypotheses = sorted(set(hypothesis_refs) - events_by_id.keys())
         if missing_hypotheses:
             return f"planner referenced non-persisted hypotheses: {', '.join(missing_hypotheses)}"
@@ -659,6 +819,9 @@ class AdaptiveRepository:
                     "backend": result.backend,
                     "usage": result.usage.model_dump(mode="json"),
                     "call_snapshot": result.call_snapshot.model_dump(mode="json"),
+                    "tool_call": result.tool_call.model_dump(mode="json")
+                    if result.tool_call is not None
+                    else None,
                     "rejection_reason": rejection_reason,
                 },
             )
@@ -888,32 +1051,6 @@ class AdaptiveRepository:
             ).all()
             return [self._approval_dict(approval) for approval in approvals]
 
-    async def mark_waiting_approval(
-        self,
-        *,
-        run_id: str,
-        approval_id: str,
-        checkpoint_ref: str,
-    ) -> None:
-        async with self.session_factory.begin() as session:
-            run = await session.get(EvaluationRunRecord, run_id)
-            if run is None:
-                raise LookupError(f"run {run_id} not found")
-            if run.status in {"completed", "failed", "aborted", "cancelled"}:
-                raise ValueError(f"terminal run {run_id} cannot wait for approval")
-            run.status = "waiting_approval"
-            run.terminal_reason = None
-            await self._append_event(
-                session,
-                run_id=run_id,
-                operation_id=f"{run_id}:approval_wait:{approval_id}",
-                event_type="run_waiting_approval",
-                evidence={
-                    "approval_id": approval_id,
-                    "checkpoint_ref": checkpoint_ref,
-                },
-            )
-
     async def resolve_approval(
         self,
         *,
@@ -936,10 +1073,6 @@ class AdaptiveRepository:
             if approval.status != "pending":
                 if approval.status != desired_status:
                     raise ValueError(f"approval already resolved as {approval.status}")
-                run = await session.get(EvaluationRunRecord, run_id)
-                if run is not None and run.status == "waiting_approval":
-                    run.status = "running"
-                    run.terminal_reason = None
                 return self._approval_dict(approval)
 
             approval.status = desired_status
@@ -953,12 +1086,6 @@ class AdaptiveRepository:
                 event_type="approval_resolved",
                 evidence=self._approval_dict(approval),
             )
-            run = await session.get(EvaluationRunRecord, run_id)
-            if run is None:
-                raise LookupError(f"run {run_id} not found")
-            if run.status == "waiting_approval":
-                run.status = "running"
-                run.terminal_reason = None
             return self._approval_dict(approval)
 
     async def ensure_step(
@@ -1368,57 +1495,6 @@ class AdaptiveRepository:
                 },
             )
 
-    async def pause_run(
-        self,
-        *,
-        run_id: str,
-        reason: str,
-        checkpoint_ref: str,
-        operation_id: str,
-    ) -> None:
-        async with self.session_factory.begin() as session:
-            run = await session.get(EvaluationRunRecord, run_id)
-            if run is None:
-                raise LookupError(f"run {run_id} not found")
-            if run.status in {"completed", "failed", "aborted", "cancelled"}:
-                return
-            run.status = "paused"
-            run.terminal_reason = reason
-            await self._append_event(
-                session,
-                run_id=run_id,
-                operation_id=operation_id,
-                event_type="run_paused",
-                evidence={
-                    "reason": reason,
-                    "checkpoint_ref": checkpoint_ref,
-                    "stop_reason": None,
-                },
-            )
-
-    async def mark_run_running(
-        self,
-        *,
-        run_id: str,
-        operation_id: str,
-        event_type: str,
-    ) -> None:
-        async with self.session_factory.begin() as session:
-            run = await session.get(EvaluationRunRecord, run_id)
-            if run is None:
-                raise LookupError(f"run {run_id} not found")
-            if run.status in {"completed", "failed", "aborted", "cancelled"}:
-                raise ValueError(f"terminal run {run_id} cannot resume")
-            run.status = "running"
-            run.terminal_reason = None
-            await self._append_event(
-                session,
-                run_id=run_id,
-                operation_id=operation_id,
-                event_type=event_type,
-                evidence={"status": "running"},
-            )
-
     async def get_run(self, run_id: str) -> EvaluationRunRecord:
         async with self.session_factory() as session:
             run = await session.get(EvaluationRunRecord, run_id)
@@ -1434,7 +1510,7 @@ class AdaptiveRepository:
         checkpoint_id: str,
         lease_seconds: int,
     ) -> str:
-        """Atomically claim one checkpoint without holding a transaction during graph I/O."""
+        """Atomically claim one Session without holding a transaction during loop I/O."""
 
         if claim_kind not in {"start", "approval", "planner"}:
             raise ValueError("unsupported adaptive resume claim kind")
@@ -1483,7 +1559,7 @@ class AdaptiveRepository:
         owner_token: str,
         lease_seconds: int,
     ) -> None:
-        """Renew only the exact checkpoint claim still owned by this caller."""
+        """Renew only the Session claim still owned by this caller."""
 
         now = datetime.now(UTC)
         async with self.session_factory.begin() as session:

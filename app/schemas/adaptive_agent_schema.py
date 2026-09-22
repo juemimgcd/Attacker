@@ -6,8 +6,10 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.agent_schema import HistorySummary
 from app.schemas.attack_sample_schema import RiskLevel
 from app.schemas.attack_state_schema import CoverageStatus
+from app.schemas.prompt_schema import PromptSnapshot
 
 
 class InformationGain(str, Enum):
@@ -188,6 +190,9 @@ class PlannerCallSnapshot(BaseModel):
     model_parameters: dict[str, int | float | str | bool]
     schema_version: str
     input_fact_refs: tuple[str, ...]
+    context_snapshot: PromptSnapshot | None = None
+    tool_schemas: tuple[dict[str, Any], ...] = ()
+    history_summary: HistorySummary | None = None
 
 
 class DerivedCase(BaseModel):

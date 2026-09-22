@@ -2,7 +2,7 @@
 
 主 Agent 接收显式测试分工，先校验范围和前置 Case，再分配预算并启动多个独立的
 Adaptive Run。每个 Subagent 运行自己的 Planner → Policy Gate → Execute → Evaluate
-循环，拥有独立 run_id、thread_id、候选、假设和 checkpoint。主 Agent 最后读取 SQL
+循环，拥有独立 run_id、thread_id、候选、假设和 SQL Session。主 Agent 最后读取 SQL
 中的结果和 Evidence，生成结构化汇总。现有单 Run API 保持可用。
 
 本版的主 Agent 是确定性协调器，分工由调用方指定，汇总不调用 LLM；每个 Subagent

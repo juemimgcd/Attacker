@@ -1,4 +1,4 @@
-"""存活与就绪探针；就绪状态反映数据库、checkpoint 和运行时依赖是否可用。"""
+"""存活与就绪探针；就绪状态反映数据库和运行时依赖是否可用。"""
 
 from __future__ import annotations
 
@@ -49,14 +49,11 @@ async def _readiness_payload(request: Request) -> tuple[dict[str, Any], bool]:
         else {"status": "unavailable", "error": "runtime_not_initialized"}
     )
     catalog_ready = bool(getattr(request.app.state, "catalog_ready", False))
-    checkpoint_ready = getattr(request.app.state, "checkpointer", None) is not None
     dependencies = {
         "database": database_status,
-        "checkpoint": {"status": "ready" if checkpoint_ready else "unavailable"},
         "equipment_catalog": {"status": "ready" if catalog_ready else "unavailable"},
     }
     set_readiness("database", database_status["status"] == "ready")
-    set_readiness("checkpoint", checkpoint_ready)
     set_readiness("equipment_catalog", catalog_ready)
     ready = all(item["status"] == "ready" for item in dependencies.values())
     return (

@@ -55,7 +55,6 @@ jobs:
         env:
           DATABASE__URL: postgresql+asyncpg://attacker:attacker-ci-password@127.0.0.1:5432/attacker
           DATABASE__AUTO_CREATE_SCHEMA: "false"
-          CHECKPOINT__URL: postgresql://attacker:attacker-ci-password@127.0.0.1:5432/attacker
         run: |
           echo "postgres-smoke: alembic upgrade"
           uv run alembic upgrade head
@@ -108,7 +107,6 @@ jobs:
           LOG__STRUCTURED_JSON: "true"
           DATABASE__URL: postgresql+asyncpg://attacker:attacker-ci-password@127.0.0.1:5432/attacker
           DATABASE__AUTO_CREATE_SCHEMA: "false"
-          CHECKPOINT__URL: postgresql://attacker:attacker-ci-password@127.0.0.1:5432/attacker
           SECURITY__API_KEY: ci-control-key-00000000000000000000000000000000
           SECURITY__METRICS_API_KEY: ci-metrics-key-00000000000000000000000000000000
           SECRETS__BACKEND: file

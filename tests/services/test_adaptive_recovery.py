@@ -1,8 +1,7 @@
 import json
 from typing import Any, cast
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
+from app.agent.session import load_session
 from app.repositories.adaptive_repository import AdaptiveRepository
 from app.repositories.run_repository import RunRepository
 from app.schemas.graybox_schema import GrayBoxRunRequest
@@ -35,38 +34,32 @@ def _target() -> TargetConfig:
 
 async def test_approval_resume_after_runtime_rehydration_calls_target_once(
     session_factory,
-    tmp_path,
 ) -> None:
-    checkpoint_path = tmp_path / "adaptive-checkpoints.sqlite3"
     repository = AdaptiveRepository(session_factory)
-    async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
-        await checkpointer.setup()
-        first_process = AdaptiveRunService(
-            repository=repository,
-            checkpointer=checkpointer,
-        )
-        started = await first_process.start(
-            GrayBoxRunRequest(
-                target=_target(),
-                case_ids=["gb_approval_bypass_attack"],
-            )
-        )
-        approval = started["pending_approvals"][0]
-
-        second_process = AdaptiveRunService(
-            repository=repository,
-            checkpointer=checkpointer,
-        )
-        connector = CountingConnector()
-        cast(Any, second_process.graph).connector = connector
-        resumed = await second_process.resume(
-            run_id=started["run_id"],
-            approval_id=approval["id"],
-            approved=True,
-            resolved_by="test-reviewer",
-            reason="authorized isolated test",
+    first_process = AdaptiveRunService(
+        repository=repository,
+    )
+    started = await first_process.start(
+        GrayBoxRunRequest(
             target=_target(),
+            case_ids=["gb_approval_bypass_attack"],
         )
+    )
+    approval = started["pending_approvals"][0]
+
+    second_process = AdaptiveRunService(
+        repository=repository,
+    )
+    connector = CountingConnector()
+    cast(Any, second_process).connector = connector
+    resumed = await second_process.resume(
+        run_id=started["run_id"],
+        approval_id=approval["id"],
+        approved=True,
+        resolved_by="test-reviewer",
+        reason="authorized isolated test",
+        target=_target(),
+    )
 
     report = await RunRepository(session_factory).get_report_rows(started["run_id"])
     event_types = [event["event_type"] for event in report["events"]]
@@ -79,4 +72,5 @@ async def test_approval_resume_after_runtime_rehydration_calls_target_once(
     )
     assert event_types.index("recovery_policy_revalidated") < event_types.index("target_called")
     assert "runtime-only-secret" not in json.dumps(report)
-    assert b"runtime-only-secret" not in checkpoint_path.read_bytes()
+    session = await load_session(repository, started["run_id"])
+    assert "runtime-only-secret" not in json.dumps(session.state)

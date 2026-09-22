@@ -46,6 +46,9 @@ if tar -tzf "${source_dir}/equipment-archive.tar.gz" \
 fi
 
 database_url="$(cat "${ATTACKER_DATABASE_URL_FILE}")"
+case "${database_url}" in
+    postgresql+asyncpg://*) database_url="postgresql://${database_url#postgresql+asyncpg://}" ;;
+esac
 table_count="$(psql "${database_url}" -Atc \
     "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname = 'public';")"
 if [ "${table_count}" != "0" ]; then

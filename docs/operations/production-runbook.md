@@ -7,7 +7,7 @@ OIDC, user management, and RBAC are intentionally outside this deployment. Keep 
 an enterprise gateway or private load balancer and retain the deployment API key as a second
 service boundary.
 
-SQLite and the local LangGraph checkpoint file are development-only. Production schema changes
+SQLite is development-only; Agent Sessions share the business database. Production schema changes
 are applied only by Alembic. A successful container start is not evidence of high availability:
 the database, ingress, volumes, secret backend, telemetry backend, and backup destination must
 each meet the operator's availability target.
@@ -32,19 +32,17 @@ chown 10001:10001 deploy/alert-secrets/alert_webhook_url
 chmod 0440 deploy/alert-secrets/alert_webhook_url
 ```
 
-Create `database_url` for SQLAlchemy/asyncpg and `checkpoint_url` for psycopg. Percent-encode
+Create `database_url` for SQLAlchemy/asyncpg. Percent-encode
 reserved characters in the password.
 
 ```text
 postgresql+asyncpg://attacker:<encoded-password>@postgres:5432/attacker
-postgresql://attacker:<encoded-password>@postgres:5432/attacker
 ```
 
-Put those complete URLs into:
+Put the complete URL into:
 
 ```text
 deploy/secrets/database_url
-deploy/secrets/checkpoint_url
 ```
 
 Provider Instance secrets use references, never raw values:
@@ -79,7 +77,7 @@ docker compose -f docker-compose.production.yml run --rm api \
 ```
 
 The production validator fails closed when it sees debug mode, SQLite, ORM auto-create, missing
-control/metrics keys, non-PostgreSQL checkpoints, unsigned external equipment, environment
+control/metrics keys, unsigned external equipment, environment
 Provider Secrets, missing trust/revocation files, or an untrusted runtime without a container
 image.
 
@@ -104,7 +102,7 @@ curl --fail -H "Authorization: Bearer $ATTACKER_METRICS_API_KEY" \
 ```
 
 `/health/live` proves only that the process serves HTTP. `/health/ready` checks database
-connectivity, the checkpointer, and equipment catalog initialization.
+connectivity (including Agent Sessions) and equipment catalog initialization.
 
 Prometheus scrapes the authenticated API endpoint for HTTP, readiness, and repository-backed
 queue state. It separately scrapes `worker:9100` on the internal backend network for Job and
@@ -247,13 +245,23 @@ schema downgrade is required, stop API and workers, take another backup, run the
 Alembic downgrade target, and then start the previous image. Never run concurrent application
 versions with incompatible schema expectations.
 
+## Agent runtime upgrade
+
+New Adaptive Runs use SQL `agent_session_saved` events, not LangGraph checkpoints. No new
+business schema migration is needed for this switch. Remove `CHECKPOINT__URL` and its separate
+secret from deployment configuration. Finish old paused runs using the old version, or create
+a new run from frozen inputs; old graph checkpoints cannot resume in the new loop. Existing SQL
+evidence, reports and replay inputs remain available. Do not delete old checkpoint files until
+their operational retention period has passed.
+
 ## Backup
 
 The backup script requires PostgreSQL client tools, `tar`, `sha256sum`, and `realpath`.
+Backup and restore accept the application URL and strip the SQLAlchemy `+asyncpg` driver suffix.
 
 ```bash
 export ATTACKER_BACKUP_ROOT=/srv/backups/attacker
-export ATTACKER_DATABASE_URL_FILE="$PWD/deploy/secrets/checkpoint_url"
+export ATTACKER_DATABASE_URL_FILE="$PWD/deploy/secrets/database_url"
 export ATTACKER_DATA_DIR=/var/lib/docker/volumes/attacker-production_attacker-data/_data
 ./scripts/backup.sh
 ```

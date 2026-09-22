@@ -1,6 +1,6 @@
 # Attacker 技术选型与架构决策
 
-> 文档状态：目标架构
+> 文档状态：技术决策；Agent 运行时已更新为手写实现，其余交付阶段保留原规划语境
 > 适用范围：Attacker v1
 > 决策目标：形成一个可完成、可解释、可恢复的 Agent 安全评测项目，而不是展示技术名词集合。
 
@@ -11,8 +11,8 @@
 | 语言 | Python 3.12 | 兼容主流 Agent、Web 与数据库生态 |
 | API | FastAPI、Uvicorn | 控制面、运行接口、健康检查 |
 | Schema 与配置 | Pydantic、pydantic-settings | API、领域对象、配置校验 |
-| Agent 编排 | LangGraph | Adaptive Workflow、条件路由、checkpoint、interrupt |
-| 模型接入 | 独立 Model Adapter | 仅供 Planner Node 生成结构化决策 |
+| Agent 编排 | Python 手写循环 | loop、tool、context、compact、SQL Session |
+| 模型接入 | 独立 Model Adapter | 供 Planner 生成受约束的 JSON 或工具调用 |
 | Eval Dataset | Pydantic Evals、YAML | Dataset、Case、Evaluator、Experiment |
 | HTTP | httpx | Target Connector |
 | ORM | SQLAlchemy Async | 领域 Repository 和事务 |
@@ -32,66 +32,21 @@ v1 不同时引入：
 - DuckDB/Parquet 在线主存储；
 - Web 前端和 Kubernetes。
 
-## 2. 为什么选择 LangGraph
+## 2. 为什么使用手写循环
 
-Attacker 的 Adaptive Mode 不是一次普通的“模型调用工具”循环，而是具有明确业务状态的
-安全评测工作流：
+参考 Zeta，将一次请求展开为 `prepare -> request -> execute_tool -> save_session`。
+Attacker 的动作限定为执行已批准候选和请求结束，普通函数与 `while` 足以表达业务分支。
+Policy、审批、Evaluator、Evidence 和停止预算继续由现有领域服务处理。
 
-```text
-initialize
-  -> plan_next_case
-  -> policy_gate
-       -> denied ------------> record_skip
-       -> approval_required -> human_review
-       -> allowed -----------> execute_target
-  -> evaluate_result
-  -> persist_evidence
-  -> decide_next
-       -> continue ----------> plan_next_case
-       -> finish ------------> generate_report
-```
+审批与 Planner 暂停显式返回等待状态，恢复请求读取 SQL Session，再重新校验策略。
+不再维护图节点、条件边、interrupt、Saver、独立 checkpoint 数据库或运行时 Registry。
+执行中结果不明的 Session 不自动重放；旧 LangGraph 暂停记录不能直接迁移续跑。
 
-该流程真实需要：
+## 3. 保持一套运行时
 
-1. 显式且类型化的运行状态；
-2. 条件分支与有界循环；
-3. Target 超时或服务重启后的恢复；
-4. 高风险步骤执行前的人工审批；
-5. 节点级事件和运行轨迹；
-6. Deterministic Mode 与 Adaptive Mode 共用同一领域核心。
-
-这些需求与 LangGraph 的 StateGraph、checkpoint、interrupt 和 streaming 能力直接对应。
-LangGraph 只承担 Adaptive Workflow 编排，不承担授权、Judge、Evidence、报告和业务事实
-持久化。
-
-## 3. 为什么不再选择 PydanticAI
-
-PydanticAI 适合工具调用 Agent，AtlasClaw 也使用它作为模型与工具运行时。但 Attacker 和
-AtlasClaw 的问题形态不同：
-
-| 项目 | 主要问题 |
-|---|---|
-| AtlasClaw | 通用企业 Agent Runtime、Providers、Skills、Hooks 与多种交互入口 |
-| Attacker | 固定生命周期的安全评测工作流、条件路由、审批、恢复与 Replay |
-
-如果同时使用 LangGraph 和 PydanticAI，将出现重复编排：
-
-```text
-LangGraph 选择节点
-  -> PydanticAI 决定工具
-     -> Attacker Service 再维护领域状态
-```
-
-这会增加：
-
-- 两套 Agent Runtime；
-- 两套消息与工具抽象；
-- 重复的状态转换；
-- 更难解释的错误边界；
-- 更复杂的 tracing 和敏感数据治理。
-
-因此 v1 选择 LangGraph，删除 PydanticAI。模型能力通过一个窄接口注入 Planner Node，
-其余节点保持确定性。
+不引入 PydanticAI、OpenAI Agents SDK 或 LangChain 的 Agent/Memory 抽象。
+模型通过窄 `PlannerModelAdapter` 接口注入，JSON 和原生 tool calling 共享工具执行入口。
+Pydantic 仍负责 Schema 校验，不承担 Agent 调度。
 
 ## 4. Pydantic Evals 的职责
 
@@ -117,61 +72,24 @@ Pydantic Evals 用于：
 
 它不保存产品运行状态，也不替代 Attacker 的 Run、Event、Finding 和 Replay 模型。
 
-## 5. LangGraph 与领域核心的边界
+## 5. Agent 与领域核心的边界
 
-### 5.1 Graph 节点
+| 模块 | 职责 |
+|---|---|
+| loop | 显式顺序、循环和等待状态 |
+| runtime | 候选、请求、usage、降级与领域服务调用 |
+| tools | 普通工具表、参数约束和执行函数 |
+| context | 按预算选择当前事实和连续历史后缀 |
+| compaction | 连续旧轮次摘要，保留最近完整调用/结果 |
+| session/state | SQL Session 身份、状态与恢复所需引用 |
 
-v1 状态图包含：
+Planner 返回 `PlannerDecision(action="execute" / "finish")`，或原生调用
+`execute_candidate` / `finish_run`。候选 ID 必须来自实际展示的快照，引用必须属于当前
+Run。工具执行仍经过 Policy/Approval，结束请求仍经过 Finish Gate。
 
-| 节点 | 类型 | 职责 |
-|---|---|---|
-| `initialize_run` | 确定性 | 加载快照、预算和已完成 Case |
-| `plan_next_case` | LLM | 从允许集合中提出下一条 Case 和理由 |
-| `policy_gate` | 确定性 | 校验 Target、Case、风险级别和预算 |
-| `human_review` | interrupt | 等待高风险动作批准或拒绝 |
-| `execute_target` | 确定性 | 通过 Connector 调用目标 |
-| `evaluate_result` | 确定性 | 执行 Evaluator Pipeline |
-| `persist_evidence` | 确定性 | 原子保存 Event 和 Finding |
-| `record_skip` | 确定性 | 保存拒绝原因 |
-| `decide_next` | 确定性 | 判断继续、停止或失败 |
-| `generate_report` | 确定性 | 从数据库事实生成报告 |
-
-只有 `plan_next_case` 可以调用模型。
-
-### 5.2 Planner 输出
-
-Planner 必须返回结构化决策：
-
-```python
-class PlannerDecision(BaseModel):
-    action: Literal["execute_case", "finish_run"]
-    case_id: str | None
-    reason: str
-```
-
-`case_id` 必须来自 `allowed_case_ids`。Planner 不接收 Target 凭据，不生成任意 URL、
-任意 prompt 或任意工具名称。
-
-### 5.3 Graph State
-
-Graph State 只保存控制流需要的紧凑状态：
-
-```python
-class AttackGraphState(TypedDict):
-    run_id: str
-    target_id: str
-    allowed_case_ids: list[str]
-    completed_case_ids: list[str]
-    current_case_id: str | None
-    finding_summaries: list[dict]
-    target_call_count: int
-    remaining_steps: int
-    next_action: str
-    status: str
-```
-
-完整 Target 响应、凭据和证据正文不进入 Planner 上下文；Graph State 只保存引用和脱敏
-摘要。
+`RunState` 保存身份、已完成 Case、当前操作、引用、计数与停止状态；
+`RunResources` 仅在调用期间持有 Target/Planner 对象和凭据。完整证据留在 SQL。
+请求视图和摘要不改变权威事实。详细对象流见 [Agent Runtime](docs/agent-runtime.md)。
 
 ## 6. 两种运行模式
 
@@ -185,7 +103,7 @@ Dataset -> Case Iterator -> Policy -> Connector -> Evaluator
 特点：
 
 - 不调用 LLM；
-- 不经过 LangGraph；
+- 直接调用领域 Pipeline；
 - 执行顺序固定；
 - 可复现；
 - 是 Judge 校准、回归评测和 Adaptive Mode 比较基线。
@@ -194,7 +112,7 @@ Dataset -> Case Iterator -> Policy -> Connector -> Evaluator
 
 ```text
 Dataset + Policy + prior Findings
-  -> LangGraph Planner
+  -> Handwritten Agent Loop + Planner
   -> Policy Gate
   -> Target Connector
   -> Evaluator
@@ -212,44 +130,19 @@ Adaptive Mode 只能改变批准 Case 的选择顺序和停止时机，不能：
 - 直接写数据库；
 - 直接生成最终审计结论。
 
-## 7. 双重状态设计
+## 7. 事实与 Session 同库
 
-### 7.1 LangGraph Checkpoint
+SQLAlchemy 保存 Target、Dataset、Policy、Run、Step、Event、Finding、Approval、Replay
+和 Job。Agent Session 通过现有 `agent_session_saved` 事件保存，不新增第二套数据库。
 
-Checkpoint 负责：
+1. 工具结果落库后才进入下一轮；稳定 `operation_id` 防止重复提交。
+2. Session 只保存引用、摘要、计数和继续所需状态，不复制完整 Evidence。
+3. 恢复校验 Session 身份，并使用 SQL owner token 和续租防止并发领取。
+4. 恢复先消耗原暂停点，再执行工具；失去租约时取消循环。
+5. `running` 不代表工具未执行，不自动重放未知副作用。
+6. 报告从领域事实生成，Session 和压缩摘要不能改写审计结论。
 
-- 当前节点；
-- 节点输入输出；
-- 条件边结果；
-- interrupt 状态；
-- 工作流恢复。
-
-Checkpoint 是可丢弃、可重建的执行数据，不是安全报告的证据来源。
-
-### 7.2 Attacker 业务数据库
-
-SQLite + SQLAlchemy 保存：
-
-- Target 和授权快照；
-- Dataset/Case 版本；
-- Run 与 Step；
-- Evidence Event；
-- Finding；
-- Replay；
-- Approval Decision；
-- Tool/Policy Trace；
-- Memory/RAG 测试快照和 Retrieval Event；
-- 报告索引。
-
-数据库是审计事实源。报告只从数据库生成，不直接读取 LangGraph State。
-
-### 7.3 一致性规则
-
-1. 先持久化领域事件，再允许状态图进入下一业务步骤；
-2. 每个节点使用稳定 `operation_id`，重试时幂等；
-3. Checkpoint 引用 `run_id` 和 `event_sequence`，不复制完整 Evidence；
-4. 恢复时先读取业务数据库，再校验 checkpoint；
-5. 两者冲突时以业务数据库为准，并从最后一个已提交事件恢复。
+历史列名 `checkpoint_ref` 等为兼容既有 Schema 保留，新的内容指向 Session。
 
 ## 8. 数据库决策
 
@@ -277,62 +170,16 @@ DuckDB 和 Parquet 适合未来批量离线分析，不再承担在线 Run 状�
 
 ## 9. 模块边界
 
-目标模块结构：
-
 ```text
-app/
-  api/
-    runs.py
-    approvals.py
-    reports.py
-  domain/
-    targets.py
-    datasets.py
-    runs.py
-    events.py
-    findings.py
-    policies.py
-  workflows/
-    attack_state.py
-    attack_graph.py
-    routes.py
-    nodes/
-      initialize.py
-      plan.py
-      authorize.py
-      execute.py
-      evaluate.py
-      persist.py
-      report.py
-  services/
-    run_service.py
-    policy_service.py
-    evaluator_service.py
-    replay_service.py
-    report_service.py
-  connectors/
-    base.py
-    http_json.py
-  repositories/
-    run_repository.py
-    event_repository.py
-    finding_repository.py
-  infrastructure/
-    database.py
-    checkpoint.py
-    model_adapter.py
+api -> application services -> agent loop/runtime -> domain services
+agent context/tools -> schemas + prompt governance
+repositories -> SQLAlchemy + EventStore
+model adapter -> provider HTTP transport
 ```
 
-依赖方向：
-
-```text
-api -> application services -> workflows/domain
-workflows -> domain services
-repositories/connectors/model adapter -> domain ports
-domain -> Pydantic and Python only
-```
-
-Node 保持薄，只负责 Graph State 与领域服务之间的转换。
+`app/agent` 包含 `loop.py`、`runtime.py`、`tools.py`、`context.py`、`compaction.py`、
+`session.py` 和 `state.py`。已删除 `app/workflows/attack_graph.py`、`attack_state.py`
+与 `app/infrastructure/checkpoint.py`，不保留旧图的兼容执行入口。
 
 ## 10. 安全约束
 
@@ -346,16 +193,16 @@ Node 保持薄，只负责 Graph State 与领域服务之间的转换。
 
 ### Action Policy
 
-- Planner 只能返回 `execute_case` 或 `finish_run`；
+- Planner 只能选择执行候选或请求结束；
 - Case 必须来自允许集合；
 - 每次 Target 调用前重新校验预算；
-- 高风险 Case 必须进入 interrupt；
+- 高风险 Case 必须返回等待审批状态；
 - 不提供 Shell、浏览器、文件系统或通用 HTTP 工具。
 
 ### Secret Policy
 
 - 凭据由 Connector 在调用时注入；
-- Planner、Graph State、日志和报告不持有明文凭据；
+- Planner、Session、日志和报告不持有明文凭据；
 - Evidence 写入前执行字段级脱敏；
 - tracing 默认不记录完整目标输入输出。
 
@@ -365,7 +212,7 @@ Node 保持薄，只负责 Graph State 与领域服务之间的转换。
 
 - `run_id`；
 - `thread_id`；
-- `node_name`；
+- `event_type`；
 - `case_id`；
 - `operation_id`；
 - `event_sequence`；
@@ -416,8 +263,8 @@ Evidence，并提供正常任务对照。
 
 - 定义脱敏 `ToolEvent`、`PolicyEvent` 和 `ApprovalEvent`；
 - 定义 Tool Trace Adapter，隔离不同目标 Agent 的 trace 格式；
-- 实现 LangGraph StateGraph、Planner Model Adapter 和条件路由；
-- 实现 Policy Gate、interrupt、Approval 和稳定 `operation_id`；
+- 实现手写 Loop、Planner Model Adapter 和工具分发；
+- 实现 Policy Gate、SQL Session、Approval 和稳定 `operation_id`；
 - 覆盖未授权工具、危险参数、审批绕过、Tool Output Injection 和 Planner 循环；
 - 使用 Mock Tool 或沙箱 Target 验证副作用，不接触生产资源。
 
@@ -429,13 +276,13 @@ Evidence，并提供正常任务对照。
 - 定义测试专用 Memory Adapter 和 RAG Adapter；
 - 保存 Session、User、Tenant、Memory、Dataset、Policy 和 Evaluator 快照；
 - 记录 Retrieval Document、排名、来源和权限过滤结果；
-- 接入 LangGraph checkpoint 和稳定 `thread_id`；
+- 使用 SQL Session 和稳定 `thread_id`；
 - 实现 Finding fingerprint、source/replay Run 和修复差异；
 - 覆盖 Memory Poisoning、RAG Poisoning、跨用户污染、恢复安全和 Replay；
 - 提供污染数据清理与隔离。
 
-第三阶段要求 checkpoint 恢复后重新校验 Policy，并保证不会重复 Target/Tool 调用或
-Finding。Memory/RAG 测试必须使用隔离测试数据。
+第三阶段要求 Session 恢复后重新校验 Policy；已提交结果按 operation_id 复用，未知副作用
+不自动重放。Memory/RAG 测试必须使用隔离测试数据。
 
 ## 13. 组件引入条件
 
@@ -448,8 +295,7 @@ Finding。Memory/RAG 测试必须使用隔离测试数据。
 | DuckDB/Parquet | 需要跨大量 Run 的批量离线统计与导出 |
 | Web 前端 | API 和报告闭环稳定，且真实需要审批操作台 |
 
-PydanticAI 和 OpenAI Agents SDK 不属于后续扩容组件；除非移除 LangGraph，否则不再引入
-第二套 Agent Runtime。
+不因扩容再次引入第二套 Agent Runtime；新增设施需要对应实际瓶颈。
 
 ## 14. 结论
 
@@ -458,13 +304,12 @@ Attacker v1 的技术主线是：
 ```text
 Python 3.12
 FastAPI + Pydantic
-LangGraph Adaptive Workflow
+Handwritten Agent Loop + SQL Session
 Pydantic Evals + YAML
 SQLAlchemy Async + SQLite + Alembic
 httpx Target Connector
 Markdown + JSON Reports
 ```
 
-LangGraph 负责可恢复的 Adaptive Workflow，确定性领域核心负责 Policy、执行、Evaluator、
-Evidence、Finding 和 Replay，SQLite 保存审计事实。该边界既能体现 Agent 工程能力，又
-避免双 Agent Runtime、数据库堆叠和不必要的基础设施。
+手写循环负责 Adaptive 编排，确定性领域核心负责 Policy、执行、Evaluator、Evidence、
+Finding 和 Replay。SQLite 用于本地，PostgreSQL 用于生产，Session 与事实共享数据库。
