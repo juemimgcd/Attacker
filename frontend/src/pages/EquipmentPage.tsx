@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Card, Table, Tabs, Tag, Typography } from "antd";
+import { Alert, Button, Card, Table, Tabs, Tag, Typography } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import { listEquipment } from "@/api/client";
 import PageHeader from "@/components/PageHeader";
@@ -98,8 +99,11 @@ export default function EquipmentPage() {
       <PageHeader
         eyebrow="Equipment Catalog"
         title="装备目录"
-        desc="本地目录加载的 Provider、Skill、Case Pack 与 Benchmark，均通过 Manifest、JSON Schema、兼容性与 checksum 校验。"
+        desc="浏览可用的评测能力、用例包与基准，检查版本和校验状态。"
+        extra={<Button icon={<ReloadOutlined />} onClick={() => packagesQuery.refetch()} loading={packagesQuery.isFetching}>刷新目录</Button>}
       />
+
+      {packagesQuery.isError && <Alert className="query-alert" type="error" showIcon title="无法加载装备目录" description={(packagesQuery.error as Error).message} />}
 
       <Card className="panel">
         <Tabs
@@ -115,6 +119,7 @@ export default function EquipmentPage() {
                 columns={columns}
                 dataSource={packagesQuery.data ?? []}
                 loading={packagesQuery.isLoading}
+                scroll={{ x: 850 }}
                 pagination={{ pageSize: 15, showSizeChanger: false }}
                 locale={{
                   emptyText: packagesQuery.isError

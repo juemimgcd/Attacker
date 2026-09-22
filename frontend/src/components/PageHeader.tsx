@@ -1,7 +1,7 @@
 import { Space, Typography } from "antd";
 import type { ReactNode } from "react";
 
-/** 统一页头：红色眉题 + 大标题 + 描述 + 右侧操作区。 */
+/** 统一页头与可换行的操作区。 */
 export default function PageHeader({
   eyebrow,
   title,
@@ -14,13 +14,13 @@ export default function PageHeader({
   extra?: ReactNode;
 }) {
   return (
-    <div className="page-header" style={{ display: "flex", justifyContent: "space-between" }}>
-      <div>
+    <div className="page-header">
+      <div className="page-heading">
         <div className="eyebrow">{eyebrow}</div>
         <h1 className="page-title">{title}</h1>
         {desc && <div className="page-desc">{desc}</div>}
       </div>
-      {extra && <Space align="start">{extra}</Space>}
+      {extra && <Space className="page-actions" align="start" wrap>{extra}</Space>}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { App, Button, Popconfirm, Segmented, Space, Table, Typography } from "antd";
-import { Link } from "react-router-dom";
+import { Alert, App, Button, Popconfirm, Segmented, Space, Table, Typography } from "antd";
+import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
 import { cancelJob, listJobs, retryJob } from "@/api/client";
@@ -20,6 +21,7 @@ const statusOptions = [
 ];
 
 export default function JobsPage() {
+  const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const { message } = App.useApp();
   const queryClient = useQueryClient();
@@ -60,7 +62,7 @@ export default function JobsPage() {
       title: "请求 ID",
       dataIndex: "request_id",
       render: (value: string, record) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           {record.run_id ? (
             <Link to={`/runs/${record.run_id}`} className="mono">
               {value}
@@ -120,13 +122,13 @@ export default function JobsPage() {
               title="确认取消该任务？"
               onConfirm={() => cancelMutation.mutate(record.id)}
             >
-              <Button size="small" danger type="link">
+              <Button size="small" danger type="link" loading={cancelMutation.isPending && cancelMutation.variables === record.id} disabled={cancelMutation.isPending && cancelMutation.variables !== record.id}>
                 取消
               </Button>
             </Popconfirm>
           )}
           {record.status === "failed" && (
-            <Button size="small" type="link" onClick={() => retryMutation.mutate(record.id)}>
+            <Button size="small" type="link" loading={retryMutation.isPending && retryMutation.variables === record.id} disabled={retryMutation.isPending && retryMutation.variables !== record.id} onClick={() => retryMutation.mutate(record.id)}>
               重试
             </Button>
           )}
@@ -141,29 +143,33 @@ export default function JobsPage() {
       <PageHeader
         eyebrow="Job Queue"
         title="任务队列"
-        desc="持久 Run Job 的排队、租约与重试状态。"
+        desc="跟踪每一次评测的执行进度，查看结果或处理失败任务。"
         extra={
-          <Space>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate("/runs/new")}>新建评测</Button>
+        }
+      />
+      <div className="jobs-toolbar">
             <Segmented
               options={statusOptions}
               value={statusFilter}
               onChange={(value) => setStatusFilter(value as string)}
             />
-            <Button onClick={() => jobsQuery.refetch()} loading={jobsQuery.isFetching}>
+            <Button icon={<ReloadOutlined />} onClick={() => jobsQuery.refetch()} loading={jobsQuery.isFetching}>
               刷新
             </Button>
-          </Space>
-        }
-      />
+      </div>
+      {jobsQuery.isError && <Alert className="query-alert" type="error" showIcon title="无法加载任务队列" description={(jobsQuery.error as Error).message} />}
 
       <Table
+        className="table-panel"
         rowKey="id"
         size="middle"
         columns={columns}
         dataSource={jobsQuery.data ?? []}
         loading={jobsQuery.isLoading}
+        scroll={{ x: 980 }}
         pagination={{ pageSize: 20, showSizeChanger: false }}
-        locale={{ emptyText: "没有匹配的任务" }}
+        locale={{ emptyText: <div className="empty-state"><h3>{jobsQuery.isError ? "任务数据暂不可用" : "没有匹配的任务"}</h3><p>{jobsQuery.isError ? "检查后端连接或 API Key 后重试。" : "尝试切换状态筛选，或创建新的评测任务。"}</p></div> }}
       />
     </>
   );
