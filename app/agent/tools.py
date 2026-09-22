@@ -54,7 +54,14 @@ TOOLS = {
 
 
 async def execute_tool(name: str, runtime: "AgentRuntime") -> None:
-    await TOOLS[name][2](runtime)
+    handler = TOOLS[name][2]
+    reason = await runtime.invoke_hook("before_tool", tool_name=name)
+    if reason is None:
+        await handler(runtime)
+    else:
+        await runtime.reject_tool(name, reason)
+    if runtime.state["status"] not in {"waiting_approval", "paused"}:
+        await runtime.invoke_hook("after_tool", tool_name=name)
 
 
 def decision_to_tool_call(decision: PlannerDecision, call_id: str) -> ModelToolCall:

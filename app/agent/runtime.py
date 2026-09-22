@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from app.agent.context import build_context
+from app.agent.hooks import HookContext, HookName, Hooks
 from app.agent.session import save_session
 from app.agent.state import RunState
 from app.agent.tools import decision_to_tool_call, validate_decision
@@ -52,6 +53,7 @@ from app.services.graybox_case_pipeline import GrayBoxCasePipeline
 from app.services.graybox_connector import GrayBoxConnector
 from app.services.hypothesis_service import HypothesisService
 from app.services.policy_service import PolicyService
+from app.services.prompt_governance import redact_sensitive_text
 from app.services.run_control import RunControlService
 
 
@@ -75,6 +77,7 @@ class AgentRuntime:
         *,
         connector: GrayBoxConnector | None = None,
         finish_gate: FinishGateService | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         self.repository = repository
         self.resources = resources
@@ -86,6 +89,64 @@ class AgentRuntime:
         self.run_control = RunControlService()
         self.case_pipeline = GrayBoxCasePipeline(repository, connector=connector)
         self.snapshot: CandidateSnapshot | None = None
+        self.hooks = hooks if hooks is not None else Hooks()
+
+    async def invoke_hook(
+        self,
+        name: HookName,
+        *,
+        planner_context: PlannerContext | None = None,
+        tool_name: str | None = None,
+    ) -> str | None:
+        """回调只能读状态副本；控制决定先脱敏落库，再由调用点应用。"""
+
+        decision = await self.hooks.invoke(
+            name,
+            HookContext(self.state, planner_context=planner_context, tool_name=tool_name),
+        )
+        if not decision.stop or self.state["status"] != "running":
+            return None
+        reason = redact_sensitive_text(decision.reason, self.resources.secret_values)[:1000]
+        await self.repository.append_event(
+            run_id=self.state["run_id"],
+            operation_id=(f"{self.state['run_id']}:hook:{name}:{self.state['planner_call_count']}"),
+            event_type="agent_hook_decision",
+            evidence={"hook": name, "tool_name": tool_name, "reason": reason},
+        )
+        return reason
+
+    async def reject_tool(self, name: str, reason: str) -> None:
+        """拒绝也提交配对结果，不执行目标，不回退已消耗的规划或步数预算。"""
+
+        state = self.state
+        if name == "finish_run":
+            await self.repository.record_finish_rejected(
+                run_id=state["run_id"],
+                operation_id=f"{state['run_id']}:finish_rejected:{state['planner_call_count']}",
+                reason_code="hook_denied",
+                detail=reason,
+            )
+            state.update(next_action="build")
+            return
+        state.update(
+            policy_decision="deny",
+            policy_reason=f"before_tool hook: {reason}",
+            recovery_pending=False,
+        )
+        state.update(**await self.skip())
+        state.update(**await self.decide_next())
+
+    async def after_turn(self, tool_name: str) -> None:
+        if self.state["status"] in {"waiting_approval", "paused"}:
+            return
+        reason = await self.invoke_hook("after_turn", tool_name=tool_name)
+        if reason is not None:
+            self.state.update(
+                status="aborted",
+                next_action="finalize",
+                terminal_reason=f"after_turn hook: {reason}",
+                stop_reason="policy_terminated",
+            )
 
     async def prepare(self) -> PlannerContext:
         self.state.update(**await self.build_candidates())

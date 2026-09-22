@@ -14,6 +14,7 @@ from weakref import WeakValueDictionary
 
 from loguru import logger
 
+from app.agent.hooks import Hooks
 from app.agent.loop import run_loop
 from app.agent.runtime import AgentRuntime, RunResources
 from app.agent.session import Session, load_session, save_session
@@ -92,6 +93,7 @@ class AdaptiveRunService:
         secret_broker: SecretBroker | None = None,
         connector: GrayBoxConnector | None = None,
         finish_gate: FinishGateService | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         self.repository = repository
         self.equipment_service = equipment_service
@@ -99,6 +101,7 @@ class AdaptiveRunService:
         self.loader = GrayBoxDatasetLoader()
         self.connector = connector or GrayBoxConnector()
         self.finish_gate_service = finish_gate or FinishGateService()
+        self.hooks = hooks if hooks is not None else Hooks()
         self._resume_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
 
     async def _execute_runtime(self, runtime: AgentRuntime) -> None:
@@ -111,6 +114,7 @@ class AdaptiveRunService:
             state,
             connector=self.connector,
             finish_gate=self.finish_gate_service,
+            hooks=self.hooks,
         )
 
     async def list_approvals(self, run_id: str) -> list[dict[str, Any]]:
