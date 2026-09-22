@@ -1,37 +1,31 @@
-/** 品牌统计卡：左侧色条 + 大数字，accent 取 CSS 变量。 */
+import type { CSSProperties } from "react";
+
+/** 共享指标组件：颜色用于状态标记，数字保持清晰、稳定。 */
 export default function StatCard({
   label,
   value,
   suffix,
   accent,
   valueColor,
+  hint,
+  loading = false,
 }: {
   label: string;
   value: number | string;
   suffix?: string;
   accent: string;
   valueColor?: string;
+  hint?: string;
+  loading?: boolean;
 }) {
   return (
-    <div
-      className="stat-card"
-      style={{ ["--accent" as string]: accent, padding: "16px 18px" }}
-    >
-      <div className="stat-label">{label}</div>
-      <div
-        style={{
-          fontSize: 26,
-          fontWeight: 700,
-          fontVariantNumeric: "tabular-nums",
-          color: valueColor ?? "var(--text-1)",
-          lineHeight: 1.3,
-        }}
-      >
-        {value}
-        {suffix && (
-          <span style={{ fontSize: 13, fontWeight: 500, marginLeft: 2 }}>{suffix}</span>
-        )}
+    <div className="stat-card" style={{ "--accent": accent } as CSSProperties} aria-busy={loading}>
+      <div className="stat-label"><span className="stat-dot" />{label}</div>
+      <div className={`stat-value ${loading ? "stat-loading" : ""}`} style={{ color: valueColor }}>
+        {loading ? <span aria-label="正在加载">—</span> : value}
+        {!loading && suffix && <span className="stat-suffix">{suffix}</span>}
       </div>
+      {hint && <div className="stat-hint">{hint}</div>}
     </div>
   );
 }

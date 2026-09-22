@@ -46,22 +46,22 @@ type RunMode = "deterministic" | "deterministic_graybox" | "adaptive" | "statefu
 const modeMeta: Record<RunMode, { title: string; desc: string; icon: React.ReactNode }> = {
   deterministic: {
     title: "确定性黑盒",
-    desc: "标准 Request/Response，固定数据集与 Evaluator，适合安全回归基线。",
+    desc: "使用固定用例验证目标的输入输出，建立可重复的安全回归基线。",
     icon: <CloudServerOutlined />,
   },
   deterministic_graybox: {
     title: "确定性灰盒",
-    desc: "固定 Case 顺序 + Tool/Policy/Approval Trace，验证工具越权与审批绕过。",
+    desc: "结合工具、策略与审批轨迹，检查工具越权和审批绕过。",
     icon: <NodeIndexOutlined />,
   },
   adaptive: {
     title: "自适应灰盒",
-    desc: "LangGraph 编排下一步，所有候选仍受 allowlist、审批与硬预算约束。",
+    desc: "根据评测反馈选择下一步，在授权范围、审批与预算内探索。",
     icon: <ApartmentOutlined />,
   },
   stateful: {
     title: "带状态基线",
-    desc: "Memory/RAG 污染、身份隔离与 checkpoint 恢复，使用内置隔离适配器。",
+    desc: "使用内置隔离环境，检查记忆污染、身份隔离与状态恢复。",
     icon: <DatabaseOutlined />,
   },
 };
@@ -253,31 +253,38 @@ export default function NewRunPage() {
       <PageHeader
         eyebrow="New Evaluation"
         title="新建评测"
-        desc="选择评测模式后配置数据集与 Target。所有候选动作都受 Policy Gate 约束。"
+        desc="选择评测模式，配置目标、用例与预算，开始一次可追溯的安全评测。"
       />
 
-      <Row gutter={[12, 12]} style={{ marginBottom: 18 }}>
-        {(Object.keys(modeMeta) as RunMode[]).map((key) => (
+      <div className="form-section-label"><span>01</span> 选择评测模式</div>
+      <Row gutter={[12, 12]} className="mode-selector">
+        {(Object.keys(modeMeta) as RunMode[]).map((key, index) => (
           <Col xs={12} md={6} key={key}>
-            <div
+            <button
+              type="button"
+              aria-pressed={mode === key}
+              aria-label={modeMeta[key].title}
               className={`mode-card ${mode === key ? "mode-active" : ""}`}
               onClick={() => {
                 setMode(key);
                 form.setFieldValue("dataset_path", datasetDefaults[key]);
               }}
             >
-              <div className="mode-check">
+              <span className="mode-check">
                 <CheckOutlined />
-              </div>
-              <div className="mode-icon">{modeMeta[key].icon}</div>
-              <div className="mode-name">{modeMeta[key].title}</div>
-              <div className="mode-desc">{modeMeta[key].desc}</div>
-            </div>
+              </span>
+              <span className="mode-icon">{modeMeta[key].icon}</span>
+              <span className="mode-name">{modeMeta[key].title}</span>
+              <span className="mode-desc">{modeMeta[key].desc}</span>
+              <span className="mode-index">{String(index + 1).padStart(2, "0")}</span>
+            </button>
           </Col>
         ))}
       </Row>
 
+      <div className="form-section-label"><span>02</span> 配置评测参数</div>
       <Form
+        className="evaluation-form"
         form={form}
         layout="vertical"
         size="middle"
@@ -335,6 +342,28 @@ export default function NewRunPage() {
                 </>
               )}
             </Card>
+
+            {needsTarget && (
+              <Card className="panel" title="运行预算" style={{ marginBottom: 16 }}>
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Form.Item name="max_cases" label="最大 Case 数">
+                      <InputNumber min={1} max={1000} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="budget_target_calls" label="最大 Target 调用">
+                      <InputNumber min={1} max={10000} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="budget_duration" label="时长上限（秒）">
+                      <InputNumber min={1} max={86400} style={{ width: "100%" }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </Card>
+            )}
 
             {isGraybox && (
               <Card className="panel" title="策略与 Planner">
@@ -450,31 +479,13 @@ export default function NewRunPage() {
                 </Form.Item>
               </Card>
 
-              <Card className="panel" title="运行预算">
-                <Row gutter={12}>
-                  <Col span={8}>
-                    <Form.Item name="max_cases" label="最大 Case 数">
-                      <InputNumber min={1} max={1000} style={{ width: "100%" }} />
-                    </Form.Item>
-                  </Col>
-                  <Col span={8}>
-                    <Form.Item name="budget_target_calls" label="最大 Target 调用">
-                      <InputNumber min={1} max={10000} style={{ width: "100%" }} />
-                    </Form.Item>
-                  </Col>
-                  <Col span={8}>
-                    <Form.Item name="budget_duration" label="时长上限（秒）">
-                      <InputNumber min={1} max={86400} style={{ width: "100%" }} />
-                    </Form.Item>
-                  </Col>
-                </Row>
-              </Card>
+
             </Col>
           )}
         </Row>
 
-        <Card className="panel">
-          <Space direction="vertical" style={{ width: "100%" }}>
+        <Card className="panel submit-panel" title="确认并提交">
+          <Space orientation="vertical" style={{ width: "100%" }}>
             <Form.Item name="submit_as" label="提交方式" style={{ marginBottom: 8 }}>
               <Radio.Group
                 options={[
@@ -499,7 +510,7 @@ export default function NewRunPage() {
                 <Alert
                   type="info"
                   showIcon
-                  message="持久 Job 不接受明文凭据"
+                  title="持久 Job 不接受明文凭据"
                   description="若 Target 使用 Bearer Token，请改用 Provider Instance 引用，或选择同步执行。"
                 />
               </>

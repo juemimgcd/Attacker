@@ -22,6 +22,11 @@ import {
 } from "antd";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  AuditOutlined,
+  CheckCircleFilled,
+  CloseCircleFilled,
+} from "@ant-design/icons";
 import dayjs from "dayjs";
 import {
   controlAdaptiveRun,
@@ -107,7 +112,7 @@ export default function RunDetailPage() {
       <Alert
         type="error"
         showIcon
-        message="无法加载 Run"
+        title="无法加载 Run"
         description={(reportQuery.error as Error).message}
         action={
           <Link to="/jobs">
@@ -246,7 +251,7 @@ export default function RunDetailPage() {
           type="warning"
           showIcon
           style={{ margin: "16px 0" }}
-          message={`${pendingApprovals.length} 个高风险步骤等待审批`}
+          title={`${pendingApprovals.length} 个高风险步骤等待审批`}
           description="批准后 Run 会恢复执行，执行前会重新经过 Policy Gate。"
         />
       )}
@@ -265,7 +270,7 @@ export default function RunDetailPage() {
             value={summary?.outcomes?.violation ?? 0}
             accent="var(--red)"
             valueColor={
-              (summary?.outcomes?.violation ?? 0) > 0 ? "var(--red)" : undefined
+              (summary?.outcomes?.violation ?? 0) > 0 ? "var(--danger)" : undefined
             }
           />
         </Col>
@@ -290,8 +295,9 @@ export default function RunDetailPage() {
           />
         </Col>
       </Row>
-      <Card className="panel" bodyStyle={{ padding: "14px 20px" }} style={{ marginTop: 14 }}>
+      <Card className="panel" styles={{ body: { padding: "14px 20px" } }} style={{ marginTop: 14 }}>
         <Progress
+          className="run-progress"
           percent={
             summary?.total_cases
               ? Math.round((summary.completed_cases / summary.total_cases) * 100)
@@ -299,11 +305,15 @@ export default function RunDetailPage() {
           }
           size="small"
           strokeColor="var(--red)"
-          trailColor="var(--surface-3)"
+          railColor="var(--surface-3)"
         />
       </Card>
 
-      <Card style={{ marginTop: 16 }} loading={reportQuery.isLoading}>
+      <Card
+        className="panel"
+        style={{ marginTop: 16 }}
+        loading={reportQuery.isLoading}
+      >
         <Tabs
           items={[
             {
@@ -354,6 +364,7 @@ export default function RunDetailPage() {
                   rowKey="id"
                   size="small"
                   columns={findingColumns}
+                  scroll={{ x: 820 }}
                   dataSource={report?.findings ?? []}
                   pagination={{ pageSize: 15, showSizeChanger: false }}
                   locale={{ emptyText: "无 Finding" }}
@@ -368,6 +379,7 @@ export default function RunDetailPage() {
                   rowKey="id"
                   size="small"
                   columns={stepColumns}
+                  scroll={{ x: 760 }}
                   dataSource={report?.steps ?? []}
                   pagination={{ pageSize: 20, showSizeChanger: false }}
                 />
@@ -377,42 +389,58 @@ export default function RunDetailPage() {
               key: "evidence",
               label: `证据时间线 (${report?.events.length ?? 0})`,
               children: (
-                <Timeline
-                  style={{ marginTop: 8, maxHeight: 560, overflow: "auto", paddingRight: 8 }}
-                  items={(report?.events ?? []).map((event) => ({
-                    color:
-                      event.event_type.includes("violation") ||
-                      event.event_type.includes("denied") ||
-                      event.event_type.includes("failed")
-                        ? "red"
-                        : event.event_type.includes("approval")
-                          ? "orange"
-                          : "blue",
-                    children: (
-                      <Space direction="vertical" size={2}>
-                        <Space wrap>
-                          <Typography.Text strong style={{ fontSize: 12 }}>
-                            {event.event_type}
-                          </Typography.Text>
-                          {event.operation_id && (
-                            <span
-                              className="mono ellipsis"
-                              style={{ color: "#64748b", fontSize: 11, maxWidth: 260 }}
-                            >
-                              {event.operation_id}
-                            </span>
-                          )}
-                          <JsonViewer data={event.evidence} title={event.event_type} />
-                        </Space>
-                        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                          {event.created_at
-                            ? dayjs(event.created_at).format("HH:mm:ss.SSS")
-                            : ""}
-                        </Typography.Text>
-                      </Space>
-                    ),
-                  }))}
-                />
+                <div className="timeline-card">
+                  <Timeline
+                    style={{ marginTop: 8, maxHeight: 560, overflow: "auto", paddingRight: 8 }}
+                    items={(report?.events ?? []).map((event) => {
+                      const isBad =
+                        event.event_type.includes("violation") ||
+                        event.event_type.includes("denied") ||
+                        event.event_type.includes("failed");
+                      const isApproval = event.event_type.includes("approval");
+                      const toneClass = isBad
+                        ? "tl-red"
+                        : isApproval
+                          ? "tl-warn"
+                          : "tl-ok";
+                      const toneIcon = isBad ? (
+                        <CloseCircleFilled />
+                      ) : isApproval ? (
+                        <AuditOutlined />
+                      ) : (
+                        <CheckCircleFilled />
+                      );
+                      return {
+                        dot: (
+                          <span className={`tl-icon ${toneClass}`}>{toneIcon}</span>
+                        ),
+                        children: (
+                          <Space orientation="vertical" size={2}>
+                            <Space wrap>
+                              <Typography.Text strong style={{ fontSize: 12 }}>
+                                {event.event_type}
+                              </Typography.Text>
+                              {event.operation_id && (
+                                <span
+                                  className="mono ellipsis"
+                                  style={{ color: "var(--text-3)", fontSize: 11, maxWidth: 260 }}
+                                >
+                                  {event.operation_id}
+                                </span>
+                              )}
+                              <JsonViewer data={event.evidence} title={event.event_type} />
+                            </Space>
+                            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                              {event.created_at
+                                ? dayjs(event.created_at).format("HH:mm:ss.SSS")
+                                : ""}
+                            </Typography.Text>
+                          </Space>
+                        ),
+                      };
+                    })}
+                  />
+                </div>
               ),
             },
             {
@@ -424,14 +452,14 @@ export default function RunDetailPage() {
               key: "replay",
               label: "Replay 差异",
               children: report?.replay ? (
-                <Space direction="vertical" style={{ width: "100%" }}>
+                <Space orientation="vertical" style={{ width: "100%" }}>
                   <Typography.Text type="secondary">
                     源 Run <span className="mono">{report.replay.source_run_id}</span> vs 复测 Run{" "}
                     <span className="mono">{report.replay.replay_run_id}</span>
                   </Typography.Text>
                   {(["fixed", "new", "persistent", "regressed"] as const).map((kind) => (
                     <Card key={kind} size="small">
-                      <Space direction="vertical" size={6}>
+                      <Space orientation="vertical" size={6}>
                         <ReplayKindTag kind={kind} />
                         {report.replay!.diff[kind].length ? (
                           report.replay!.diff[kind].map((caseId) => (
@@ -475,7 +503,7 @@ export default function RunDetailPage() {
         okText="提交"
         cancelText="取消"
       >
-        <Space direction="vertical" style={{ width: "100%" }}>
+        <Space orientation="vertical" style={{ width: "100%" }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             Case <span className="mono">{approvalModal?.approval.case_id}</span>
             ；决议会写入审批事实并触发恢复。
@@ -535,7 +563,7 @@ export default function RunDetailPage() {
                 </Space>
               }
               description={
-                <Space direction="vertical" size={2}>
+                <Space orientation="vertical" size={2}>
                   {item.reason && <span>理由：{item.reason}</span>}
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     {item.resolved_by ? `操作人 ${item.resolved_by} · ` : ""}

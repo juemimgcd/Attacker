@@ -1,8 +1,10 @@
-import { Alert, Card, Empty, Spin, Typography } from "antd";
+import { Alert, Button, Card, Col, Row, Spin } from "antd";
 import { Link } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
+import { ArrowRightOutlined, CheckOutlined, ClockCircleOutlined, ReloadOutlined } from "@ant-design/icons";
 import { listApprovals, listJobs } from "@/api/client";
 import PageHeader from "@/components/PageHeader";
+import { ApprovalStatusTag, RiskTag } from "@/components/StatusTags";
 
 /**
  * 后端没有全局"待审批"列表接口；审批中心通过进行中的 Job -> Run -> approvals
@@ -19,9 +21,9 @@ export default function ApprovalsPage() {
     ],
   })[0];
 
-  const runIds = (jobsQuery.data ?? [])
+  const runIds = [...new Set((jobsQuery.data ?? [])
     .map((job) => job.run_id)
-    .filter((id): id is string => Boolean(id));
+    .filter((id): id is string => Boolean(id)))];
 
   const approvalQueries = useQueries({
     queries: runIds.map((runId) => ({
@@ -39,54 +41,51 @@ export default function ApprovalsPage() {
     )
     .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
 
-  if (jobsQuery.isLoading) {
-    return <Spin style={{ display: "block", margin: "80px auto" }} />;
-  }
-
-  if (jobsQuery.isError) {
-    return (
-      <Alert
-        type="error"
-        showIcon
-        message="无法扫描任务队列"
-        description={(jobsQuery.error as Error).message}
-      />
-    );
-  }
+  const scanning = jobsQuery.isLoading || approvalQueries.some((query) => query.isLoading);
+  const scanError = jobsQuery.error ?? approvalQueries.find((query) => query.isError)?.error;
+  const refreshing = jobsQuery.isFetching || approvalQueries.some((query) => query.isFetching);
 
   return (
     <>
       <PageHeader
         eyebrow="Approvals"
         title="审批中心"
-        desc="聚合最近任务中等待人工决议的高风险步骤。批准后 Run 恢复执行，执行前重新经过 Policy Gate。"
+        desc="审查等待人工决议的高风险步骤。批准后恢复执行，并重新检查授权策略。"
+        extra={<Button icon={<ReloadOutlined />} loading={refreshing} onClick={() => { jobsQuery.refetch(); approvalQueries.forEach((query) => query.refetch()); }}>刷新审批</Button>}
       />
-
-      {pending.length === 0 ? (
-        <Card>
-          <Empty description="当前没有待处理的审批" />
-        </Card>
+      {scanError && <Alert className="query-alert" type="error" showIcon title="审批扫描未完成" description={(scanError as Error).message} />}
+      {scanning ? <Card className="panel"><Spin style={{ display: "block", margin: "64px auto" }} /></Card> : pending.length === 0 ? (
+        <Card className="panel"><div className="empty-state">
+          <div className="empty-state-icon"><CheckOutlined /></div>
+          <h3>{scanError ? "暂时无法确认审批状态" : "当前没有待处理的审批"}</h3>
+          <p>{scanError ? "请检查连接后刷新，未能加载的审批不会计入结果。" : "最近 200 条任务中未发现待审批步骤。需要人工决议时，会在这里显示。"}</p>
+          <Link to="/jobs" className="text-link">查看任务队列 <ArrowRightOutlined /></Link>
+        </div></Card>
       ) : (
-        <Card
-          className="panel"
-          title={`待处理（${pending.length}）`}
-        >
-          {pending.map((item) => (
-            <Card.Grid key={item.approval_id} style={{ width: "50%", padding: 16 }}>
-              <Typography.Text strong className="mono" style={{ fontSize: 12 }}>
-                {item.case_id}
-              </Typography.Text>
-              <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                Run <span className="mono">{item.run_id?.slice(0, 8)}</span>
-                {item.reason ? ` · ${item.reason}` : ""}
-              </div>
-              <Link to={`/runs/${item.run_id}`}>
-                <Typography.Link style={{ fontSize: 12 }}>
-                  前往 Run 详情处理 →
-                </Typography.Link>
-              </Link>
-            </Card.Grid>
-          ))}
+        <Card className="panel" title={`待处理（${pending.length}）`}>
+          <Row gutter={[14, 14]}>
+            {pending.map((item) => (
+              <Col key={item.approval_id} xs={24} md={12}>
+                <div className="approval-card" style={{ padding: 16 }}>
+                  <div className="approval-card-head">
+                    <span className="case-id">{item.case_id}</span>
+                    <span style={{ display: "inline-flex", gap: 6 }}>
+                      {item.risk_level && <RiskTag level={item.risk_level} />}
+                      <ApprovalStatusTag status={item.status} />
+                    </span>
+                  </div>
+                  <div className="approval-meta">
+                    <ClockCircleOutlined style={{ marginRight: 6, color: "var(--warn)" }} />
+                    Run <span className="mono">{item.run_id?.slice(0, 8)}</span>
+                    {item.reason ? ` · ${item.reason}` : ""}
+                  </div>
+                  <Link to={`/runs/${item.run_id}`} className="approval-link">
+                    前往 Run 详情处理 <ArrowRightOutlined />
+                  </Link>
+                </div>
+              </Col>
+            ))}
+          </Row>
         </Card>
       )}
     </>
