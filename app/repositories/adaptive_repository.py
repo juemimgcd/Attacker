@@ -708,6 +708,8 @@ class AdaptiveRepository:
                     "result_ref": event.id,
                     "finding_ref": evidence.get("finding_id"),
                 }
+                if "reason" in evidence:
+                    result["reason"] = evidence["reason"]
             elif event.event_type == "planner_finish_rejected":
                 index = event.operation_id.rsplit(":", 1)[-1]
                 call = by_operation.get(f"{event.run_id}:planner:{index}")
@@ -716,6 +718,8 @@ class AdaptiveRepository:
                     "reason_code": evidence["reason_code"],
                     "result_ref": event.id,
                 }
+                if "detail" in evidence:
+                    result["reason"] = evidence["detail"]
             if call is not None and result is not None:
                 history.append(
                     ToolExchange(
@@ -1445,6 +1449,7 @@ class AdaptiveRepository:
                     "outcome": outcome.value,
                     "evidence_event_ids": [],
                     "finding_id": None,
+                    "reason": reason,
                 },
             )
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from app.agent.hooks import Hooks
 from app.equipment.catalog import EquipmentCatalog
 from app.equipment.metrics import EquipmentMetrics
 from app.equipment.runner import EquipmentRunner
@@ -74,6 +75,7 @@ async def create_runtime(
     *,
     secret_broker: SecretBroker | None = None,
     recover_cleanups: bool = True,
+    agent_hooks: Hooks | None = None,
 ) -> AsyncIterator[AppRuntime]:
     """按依赖顺序构建运行时，并在 finally 中关闭任务与数据库。"""
 
@@ -120,6 +122,7 @@ async def create_runtime(
             repository=adaptive_repository,
             equipment_service=equipment_service,
             secret_broker=resolved_secret_broker,
+            hooks=agent_hooks,
         )
         deterministic_graybox_service = DeterministicGrayBoxRunService(
             adaptive_repository,

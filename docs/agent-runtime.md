@@ -10,15 +10,20 @@ AdaptiveRunService.start / resume
   -> RunResources（本轮使用的 Target、Planner、凭据）+ RunState
   -> run_loop(runtime)
      -> runtime.prepare()：候选快照 + SQL 当前事实 + 已完成工具历史
+     -> before_model
      -> runtime.request(context)
         -> planner.plan(context)
            -> prepare_context：构建视图，必要时 compact，再构建
            -> ModelProvider.infer
            -> 解析 JSON / 原生 tool call，校验实际展示的候选与引用
         -> 校验同 Run 的 SQL 引用，保存决策、usage 和稳定 operation_id
+     -> after_model
      -> execute_tool(name, runtime)
+        -> before_tool：可拒绝本次工具
         -> execute_candidate：Policy → Approval / Skip / Pipeline → 更新事实与停止判断
         -> finish_run：Finish Gate 接受或拒绝
+        -> after_tool（已完成或拒绝，等待审批时不触发）
+     -> after_turn：可中止仍在运行的 Run
      -> save_session → 下一轮或返回等待状态
      -> runtime.finish()：保存终态或等待审批/Planner 的 Session
 ```
@@ -32,10 +37,64 @@ AdaptiveRunService.start / resume
 | `app/agent/loop.py` | 一个显式 `while`，串起 prepare、request、tool 和 save |
 | `app/agent/runtime.py` | 候选、规划、预算与降级，调用 Policy/Finish Gate 和共享 Pipeline |
 | `app/agent/tools.py` | 普通 `TOOLS` 字典、Schema、参数校验和执行函数 |
+| `app/agent/hooks.py` | 五个生命周期阶段、回调注册、有界执行和控制决定 |
 | `app/agent/context.py` | 生成一次请求的 `ContextView`，按预算选择候选资源与历史后缀 |
 | `app/agent/compaction.py` | 校验摘要覆盖范围，压缩连续的旧完整轮次 |
 | `app/agent/session.py` / `state.py` | SQL Session 的版本、身份和可恢复状态 |
 | `app/services/adaptive_run_service.py` | 创建/恢复入口、瞬时资源、跨进程恢复租约 |
+
+## Hooks
+
+`Hooks` 默认不注册任何回调，不改变原有执行行为。同一阶段的异步回调按注册顺序执行，
+整组回调共用 `timeout`，默认 5 秒；第一个 `Decision(stop=True, reason=...)` 结束该组。
+超时、异常及取消向外传播，由已有 Service 错误处理保存失败或取消终态，再向调用方抛出。
+
+| 阶段 | 触发位置 | 允许返回 |
+|---|---|---|
+| `before_model` | 上下文准备完成、进入 `runtime.request()` 前 | `None` |
+| `after_model` | `runtime.request()` 返回并更新状态后 | `None` |
+| `before_tool` | 进入工具的 Policy / Finish Gate 前 | `None` 或 `Decision`；`stop=True` 拒绝当前工具 |
+| `after_tool` | 工具执行或拒绝处理完成后 | `None` |
+| `after_turn` | 工具轮次完成、保存 Session 前 | `None` 或 `Decision`；`stop=True` 将仍在运行的 Run 置为 `aborted` |
+
+模型阶段包围的是一次规划请求处理，可能走已保存结果、预算停止或降级分支，不代表每次
+都有新的 Provider 调用。若请求直接结束或暂停，未进入工具轮次，不触发工具及轮末回调。
+工具等待审批时不触发 `after_tool` / `after_turn`；审批恢复重新进入 `before_tool`，
+通过后继续检查 Policy，不重复请求模型。终态不会被 `after_turn` 的决定覆盖。
+
+每个回调接收独立深拷贝的 `HookContext`：包含 `state`，模型阶段另有 `planner_context`，
+工具及轮末阶段另有 `tool_name`。这些是只读观察快照，修改副本不影响真实运行或后续回调，
+也不提供 Runtime、Repository 或运行时凭据。三个观察阶段必须返回 `None`，控制阶段的
+拒绝或停止必须附带非空原因；原因脱敏后记录为 `agent_hook_decision`。
+
+`before_tool` 拒绝 Case 时走已有跳过与结果落库流程，拒绝结束请求时记录 Finish 拒绝；
+均不退回已消耗的预算。允许工具继续后，Policy、审批、预算和 Finish Gate 仍负责原有检查，
+Hook 只能增加限制。`after_turn` 的中止同样经现有收尾和 Session 保存流程处理。
+
+例如，在某轮产生新 Finding 后提前中止后续评测：
+
+```python
+from app.agent.hooks import Decision, HookContext, Hooks
+from app.runtime import create_runtime
+from app.schemas.graybox_schema import GrayBoxRunRequest
+
+
+async def stop_after_finding(context: HookContext) -> Decision | None:
+    if context.state["last_finding_delta"] > 0:
+        return Decision(stop=True, reason="new finding requires review")
+    return None
+
+
+async def run_with_hooks(request: GrayBoxRunRequest):
+    hooks = Hooks(timeout=5.0)
+    hooks.register("after_turn", stop_after_finding)
+    async with create_runtime(agent_hooks=hooks) as runtime:
+        return await runtime.adaptive_run_service.start(request)
+```
+
+也可直接使用 `AdaptiveRunService(repository=repository, hooks=hooks)` 注入。启动、审批/
+Planner 恢复及 Subagent 都使用同一组回调；跨 Run 可能并发调用，有状态回调应按
+`context.state["run_id"]` 区分并处理并发。进程重启后需重新注册；Session 不保存回调代码。
 
 ## Context 和 Compact
 
