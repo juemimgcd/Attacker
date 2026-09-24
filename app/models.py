@@ -39,6 +39,29 @@ class SubagentRunRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ConcurrencyQuotaRecord(Base):
+    """Deployment-wide slot count; a changed configuration must be reconciled explicitly."""
+
+    __tablename__ = "concurrency_quotas"
+
+    resource_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ConcurrencyLeaseRecord(Base):
+    """One owner-bound, expiring claim on a shared concurrency slot."""
+
+    __tablename__ = "concurrency_leases"
+    __table_args__ = (Index("ix_concurrency_leases_owner", "owner_token"),)
+
+    resource_key: Mapped[str] = mapped_column(
+        ForeignKey("concurrency_quotas.resource_key", ondelete="CASCADE"), primary_key=True
+    )
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_token: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 # Run 输入快照与顶层状态：回答“这次评测在什么条件下执行”。
 class TargetRecord(Base):
     __tablename__ = "targets"

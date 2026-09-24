@@ -3,7 +3,7 @@
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import SubagentRunRecord
@@ -19,13 +19,20 @@ class SubagentRepository:
             session.add(SubagentRunRecord(id=coordinator_id, manifest_json=manifest))
         return coordinator_id
 
-    async def finish(self, coordinator_id: str, errors: dict[str, str]) -> None:
+    async def finish(
+        self,
+        coordinator_id: str,
+        errors: dict[str, str],
+        model_summary: dict[str, Any] | None = None,
+    ) -> None:
         async with self.session_factory() as session, session.begin():
-            await session.execute(
-                update(SubagentRunRecord)
-                .where(SubagentRunRecord.id == coordinator_id)
-                .values(dispatch_finished=True, errors_json=errors)
-            )
+            row = await session.get(SubagentRunRecord, coordinator_id)
+            if row is None:
+                raise LookupError(f"subagent coordinator {coordinator_id} not found")
+            if model_summary is not None:
+                row.manifest_json = {**row.manifest_json, "model_summary": model_summary}
+            row.dispatch_finished = True
+            row.errors_json = errors
 
     async def get(self, coordinator_id: str) -> dict[str, Any]:
         async with self.session_factory() as session:
@@ -52,6 +59,8 @@ class SubagentRepository:
                     "coordinator_id": row.id,
                     "created_at": row.created_at.isoformat(),
                     "dispatch_finished": row.dispatch_finished,
+                    "mode": row.manifest_json["mode"],
+                    "has_model_summary": "model_summary" in row.manifest_json,
                     "subagents": row.manifest_json["subagents"],
                 }
                 for row in rows

@@ -240,6 +240,20 @@ ATTACKER_IMAGE=attacker:<new-version> \
   docker compose -f docker-compose.production.yml up -d api worker
 ```
 
+The `20260923_0012` migration adds shared Orchestrator concurrency slots. All API
+replicas that run Orchestrator requests must use the same database and identical
+`ORCHESTRATOR_CONCURRENCY__*` values. The existing durable Job Worker does not
+dispatch Orchestrator requests; these slots are shared by processes that call
+`SubagentService` (including API and CLI processes).
+
+To change slot capacities, stop new Orchestrator submissions and wait for active
+Orchestrator requests to finish. After their lease duration has elapsed, remove
+expired claims with `DELETE FROM concurrency_leases WHERE expires_at <= CURRENT_TIMESTAMP`.
+Confirm `SELECT COUNT(*) FROM concurrency_leases` returns zero, then run
+`DELETE FROM concurrency_quotas` before starting every replica with the new values.
+The first claim recreates each quota row. A process with a
+different value for an existing row fails closed instead of using a different cap.
+
 Rollback application code only when the previous version supports the upgraded schema. If a
 schema downgrade is required, stop API and workers, take another backup, run the explicit
 Alembic downgrade target, and then start the previous image. Never run concurrent application
