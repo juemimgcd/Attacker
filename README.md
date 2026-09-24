@@ -4,8 +4,8 @@
 
 # Attacker
 
-主 Agent 委派多个独立自适应测试 Agent，并汇总其 Evidence：见
-[Subagent 测试模式](docs/subagents.md)。
+Orchestrator 模型可自主拆分测试 Case，委派多个独立 worker，并基于 Evidence
+生成总结：见 [Orchestrator 与 worker 测试](docs/subagents.md)。
 
 ### Evidence-driven security evaluation for AI Agents
 
@@ -214,6 +214,9 @@ Copy-Item .env.example .env
 | 配置项 | 默认值 | 用途 |
 |---|---|---|
 | `DATABASE__URL` | `sqlite+aiosqlite:///data/attacker.sqlite3` | 业务与审计事实存储 |
+| `ORCHESTRATOR_CONCURRENCY__GLOBAL_WORKERS` | `16` | 跨进程的主任务 worker 总并发额度 |
+| `ORCHESTRATOR_CONCURRENCY__TARGET_WORKERS` | `1` | 同一 Target 的跨进程 worker 并发额度 |
+| `ORCHESTRATOR_CONCURRENCY__MODEL_WORKERS` | `4` | 同一模型接口的跨进程并发额度 |
 | `SECURITY__API_KEY` | 空 | 设置后使用 `X-API-Key` 保护业务接口 |
 | `EQUIPMENT__ROOT` | `equipment` | 本地可写装备扩展目录；内置装备从安装包只读加载 |
 | `EQUIPMENT__ALLOW_UNTRUSTED` | `false` | 是否允许不受信任装备；默认关闭 |

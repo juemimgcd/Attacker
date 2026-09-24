@@ -17,6 +17,7 @@ from app.equipment.security import SecretBroker
 from app.infrastructure.database import Database
 from app.infrastructure.secrets import build_secret_broker
 from app.repositories.adaptive_repository import AdaptiveRepository
+from app.repositories.concurrency_repository import ConcurrencyRepository
 from app.repositories.equipment_repository import EquipmentRepository
 from app.repositories.event_store import EventStore
 from app.repositories.job_repository import JobRepository
@@ -27,6 +28,7 @@ from app.services.adaptive_run_service import (
     AdaptiveRunService,
     DeterministicGrayBoxRunService,
 )
+from app.services.concurrency_limiter import SharedConcurrencyLimiter
 from app.services.equipment_service import EquipmentService
 from app.services.harness_service import HarnessService
 from app.services.job_service import JobApplicationService, JobDispatcher
@@ -142,7 +144,12 @@ async def create_runtime(
         )
         report_service = ReportService(run_repository, equipment_repository)
         subagent_service = SubagentService(
-            SubagentRepository(database.session_factory), adaptive_run_service, report_service
+            SubagentRepository(database.session_factory),
+            adaptive_run_service,
+            report_service,
+            SharedConcurrencyLimiter(
+                ConcurrencyRepository(database.session_factory), config.orchestrator_concurrency
+            ),
         )
         job_application_service = JobApplicationService(
             job_repository,

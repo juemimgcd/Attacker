@@ -60,6 +60,22 @@ class WorkerSettings(BaseSettings):
         return self
 
 
+class OrchestratorConcurrencySettings(BaseSettings):
+    global_workers: int = Field(default=16, ge=1, le=128)
+    realm_workers: int = Field(default=16, ge=1, le=128)
+    target_workers: int = Field(default=1, ge=1, le=128)
+    model_workers: int = Field(default=4, ge=1, le=128)
+    lease_seconds: int = Field(default=120, ge=30, le=3600)
+    heartbeat_seconds: int = Field(default=20, ge=5, le=300)
+    poll_seconds: float = Field(default=0.25, ge=0.05, le=5)
+
+    @model_validator(mode="after")
+    def validate_heartbeat(self) -> "OrchestratorConcurrencySettings":
+        if self.heartbeat_seconds * 2 >= self.lease_seconds:
+            raise ValueError("orchestrator heartbeat must be less than half of lease duration")
+        return self
+
+
 class SecretSettings(BaseSettings):
     backend: Literal["environment", "file", "vault"] = "environment"
     allow_environment_references: bool = True
@@ -133,6 +149,9 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    orchestrator_concurrency: OrchestratorConcurrencySettings = Field(
+        default_factory=OrchestratorConcurrencySettings
+    )
     secrets: SecretSettings = Field(default_factory=SecretSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     equipment: EquipmentSettings = Field(default_factory=EquipmentSettings)

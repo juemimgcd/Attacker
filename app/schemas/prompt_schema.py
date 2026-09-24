@@ -11,6 +11,8 @@ class PromptTask(str, Enum):
     planner = "planner"
     planner_tools = "planner_tools"
     model_judge = "model_judge"
+    orchestrator_plan = "orchestrator_plan"
+    orchestrator_summary = "orchestrator_summary"
 
 
 # 定义受控 Prompt 的输入上限。
