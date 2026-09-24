@@ -1,6 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
-import { Spin } from "antd";
+import { Skeleton } from "@/components/ui/skeleton";
 import AppLayout from "@/layouts/AppLayout";
 
 // 路由级代码分割，首屏只加载布局与当前页。
@@ -11,7 +11,16 @@ const RunDetailPage = lazy(() => import("@/pages/RunDetailPage"));
 const ApprovalsPage = lazy(() => import("@/pages/ApprovalsPage"));
 const EquipmentPage = lazy(() => import("@/pages/EquipmentPage"));
 
-const fallback = <Spin style={{ display: "block", margin: "120px auto" }} />;
+const fallback = (
+  <div
+    className="flex flex-col gap-6 p-10"
+    role="status"
+    aria-label="正在加载控制台"
+  >
+    <Skeleton className="h-10 w-48" />
+    <Skeleton className="h-72 w-full" />
+  </div>
+);
 
 export default function App() {
   return (

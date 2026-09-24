@@ -1,6 +1,6 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
 
-/** 共享指标组件：颜色用于状态标记，数字保持清晰、稳定。 */
 export default function StatCard({
   label,
   value,
@@ -9,6 +9,7 @@ export default function StatCard({
   valueColor,
   hint,
   loading = false,
+  icon,
 }: {
   label: string;
   value: number | string;
@@ -17,14 +18,26 @@ export default function StatCard({
   valueColor?: string;
   hint?: string;
   loading?: boolean;
+  icon?: ReactNode;
 }) {
   return (
-    <div className="stat-card" style={{ "--accent": accent } as CSSProperties} aria-busy={loading}>
-      <div className="stat-label"><span className="stat-dot" />{label}</div>
-      <div className={`stat-value ${loading ? "stat-loading" : ""}`} style={{ color: valueColor }}>
-        {loading ? <span aria-label="正在加载">—</span> : value}
-        {!loading && suffix && <span className="stat-suffix">{suffix}</span>}
+    <div
+      className="stat-card"
+      style={{ "--stat-accent": accent } as CSSProperties}
+      aria-busy={loading}
+    >
+      <div className="stat-label">
+        <span>{label}</span>
+        {icon ?? <span className="stat-dot" />}
       </div>
+      {loading ? (
+        <Skeleton className="mt-4 mb-2 h-10 w-20" aria-label="正在加载" />
+      ) : (
+        <div className="stat-value" style={{ color: valueColor }}>
+          {value}
+          {suffix && <span className="stat-suffix">{suffix}</span>}
+        </div>
+      )}
       {hint && <div className="stat-hint">{hint}</div>}
     </div>
   );

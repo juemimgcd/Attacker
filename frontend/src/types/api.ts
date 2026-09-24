@@ -115,11 +115,14 @@ export interface SubagentAssignment {
   agent_id: string;
   case_ids: string[];
   planner?: PlannerConfig | null;
+  objective?: string | null;
 }
 
 export interface SubagentRunRequest {
   run: GrayBoxRunRequest;
-  subagents: SubagentAssignment[];
+  subagents?: SubagentAssignment[];
+  orchestrator?: PlannerConfig;
+  worker_count?: number;
   concurrency: number;
   parallel_target_safe: boolean;
 }
