@@ -5,11 +5,13 @@
 ## 技术栈
 
 - **React 19 + TypeScript + Vite**
-- **Ant Design 6**（深色主题定制）
+- **shadcn/ui（Radix Nova）+ Tailwind CSS 4**（Neutral 浅色主题、Geist 本地字体）
+- **Ant Design 6**（保留表单状态/校验引擎与数据表格，界面控件使用 shadcn）
 - **TanStack Query**（服务端状态：轮询、缓存、失效）
 - **Zustand**（API Key 等本地状态，persist 到 localStorage）
 - **React Router**（路由级代码分割）
 - **axios**（统一 `X-API-Key` 注入与 FastAPI `detail` 错误归一化）
+- **Sonner**（操作结果通知）
 
 ## 功能
 
@@ -35,7 +37,9 @@ npm run dev        # http://localhost:5173，API 代理到 127.0.0.1:8000
 ## 构建
 
 ```bash
-npm run build      # 产物在 dist/，可由 FastAPI 静态挂载同源部署
+npm run lint       # oxlint
+npm run build      # TypeScript 检查并生成 dist/
+npm run preview    # 预览构建产物
 ```
 
 ## 设计约束
@@ -43,3 +47,13 @@ npm run build      # 产物在 dist/，可由 FastAPI 静态挂载同源部署
 - 不引入登录体系：后端是单服务级 API Key，无用户/RBAC，前端不做越权包装。
 - Finding 必须关联 Evidence 才展示关联率，遵循后端 "Evidence before claims" 原则。
 - 公网 Target 默认禁止，表单显式提供 `allow_public_target` 开关并提示授权前提。
+
+## UI 约定
+
+- 官方组件配置见 `components.json`；添加组件使用 `npx shadcn@latest add <component>`。
+- 语义色、字体、间距和页面布局集中在 `src/styles/global.css`；`main.tsx` 从同一套 tokens 生成 Ant Design 主题。
+- CSS 按 `theme → base → antd → components → utilities` 排序，避免 Ant Design 覆盖 shadcn 交互状态。
+- 桌面侧栏支持折叠，手机使用抽屉导航；数据表格在窄屏内独立横向滚动。
+- 新建评测使用 `Field` 统一标签、说明和错误提示；列表次要操作使用 `DropdownMenu`，取消任务使用 `AlertDialog`。
+- 结构化详情使用 `Dialog` + `ScrollArea`，提供复制 JSON；评测详情用 `Tabs`、`Progress` 与统一指标栏组织结果。
+- 当前后端 `/console` 是独立的原生控制台；本 React 界面开发时访问 Vite 地址。生产环境需要单独配置 `dist/` 静态挂载和 API 代理。

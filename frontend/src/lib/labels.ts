@@ -53,6 +53,7 @@ export const runModeLabel: Record<string, string> = {
   deterministic_graybox: "确定性灰盒",
   adaptive: "自适应灰盒",
   stateful: "带状态",
+  deterministic_stateful: "带状态基线",
   subagent: "Subagent",
   equipment_benchmark: "装备基准",
   benchmark_import: "公开基准",

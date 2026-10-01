@@ -1,7 +1,6 @@
-import { Space, Typography } from "antd";
 import type { ReactNode } from "react";
+import { Separator } from "@/components/ui/separator";
 
-/** 统一页头与可换行的操作区。 */
 export default function PageHeader({
   eyebrow,
   title,
@@ -18,13 +17,18 @@ export default function PageHeader({
       <div className="page-heading">
         <div className="eyebrow">{eyebrow}</div>
         <h1 className="page-title">{title}</h1>
-        {desc && <div className="page-desc">{desc}</div>}
+        {desc && <p className="page-desc">{desc}</p>}
       </div>
-      {extra && <Space className="page-actions" align="start" wrap>{extra}</Space>}
+      {extra && <div className="page-actions">{extra}</div>}
     </div>
   );
 }
 
 export function DividerLabel({ children }: { children: ReactNode }) {
-  return <Typography.Text className="divider-label">{children}</Typography.Text>;
+  return (
+    <div className="divider-label">
+      <span>{children}</span>
+      <Separator className="flex-1" />
+    </div>
+  );
 }
